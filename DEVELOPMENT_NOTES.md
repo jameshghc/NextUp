@@ -34,6 +34,22 @@ one rule the folder has.
 
 No change to the app itself, so no new version.
 
+### And a history
+
+The same day, the folder became a git repository — local only, nothing
+uploaded. Every change from here is a snapshot with a note, so any past
+version can be looked at, compared or undone, and the question "when did
+Favourites break?" (answer: v0.1.20, found by hand nine versions later) has
+a lookup instead of an investigation. The whole history of `nextup.py` will
+cost megabytes where `Old versions and extras` costs 1.5GB.
+
+`.gitignore` keeps out everything private or rebuildable — the config with
+its keys and password, the library with its watch history, `tests\_work`,
+the TMDB cache, the artwork, the built `.exe`, and the old versions — and
+the staged files were searched for the config's actual secrets before the
+first commit: none present. A copy on GitHub, which is what would bring the
+Mac up to date in one step, is in PLANNED.md.
+
 ---
 
 ## 2026-09-25 — v0.1.42, the Watch Score

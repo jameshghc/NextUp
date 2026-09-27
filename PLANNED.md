@@ -97,6 +97,21 @@ TMDB doesn't have the asked-for kind. Options:
 
 ## Low priority — wanted eventually, no rush
 
+### A copy on GitHub
+
+The project has had a local git history since 2026-09-27: every change is
+saved as a snapshot, on this machine only. The next step is a private copy
+on GitHub, which would mean:
+
+- **the Mac fetches the latest version in one step** instead of files being
+  copied across by hand — the fix for the item at the top of this list
+- a copy that isn't on the X: drive
+
+Needs you to make a GitHub account and a **private** repository; Claude
+can't create accounts, and will ask before uploading anything. The private
+files — config, library, test scratch — are already excluded and were
+checked before the first snapshot.
+
 ### Your phone as a way in
 
 Three different projects wearing one name. The fork matters, so it needs a
