@@ -16,6 +16,68 @@ at the top.
 
 ---
 
+## 2026-09-28 — v0.1.43, the first design pass, on Settings
+
+The first job for the new `ui-designer` agent (`.claude/agents/`). It wasn't
+loaded yet in the session that wrote it, so a general agent was told to read
+the file and follow it — which made the run a test of the instructions as
+much as of the page.
+
+### What it fixed
+
+Eleven things, all styling, markup and wording, no behaviour, gathered in one
+commented `-- settings` block at the end of THE FACELIFT:
+
+- **The docking station's selection count was invisible below 1340px** — the
+  row borrowed the Library toolbar's `.searchrow`, and with it that toolbar's
+  rule hiding the count on narrower windows. Here the count is the only place
+  a selection spanning pages is totalled.
+- Four card headings sat 22px lower than the other three (leftover inline
+  margins); all seven now measure the same.
+- Save buttons were "Save", "Save settings", "Save", "Save subtitle
+  settings", in sentence case where every other primary button is caps, and
+  "Save settings" saved only the TMDB key. Now SAVE, SAVE KEY, SAVE, SAVE, all
+  in the same button row.
+- The four-field rows (still watching?, subtitles) broke three-and-an-orphan
+  at 760px and with the queue docked. Each card is now a size container: four
+  across from 700px of card, two by two below — keyed on the card, not the
+  window, the same rule as the Rate card.
+- Rows in "What's stored" were indented 34px by an empty rank column borrowed
+  from the numbered lists; the checkbox was system blue, the only blue in the
+  app; `<code>` fell back to the browser's monospace; explanations ran about
+  140 characters a line (now capped near 80); the duplicate-copies details
+  touched its buttons; the folders box could be dragged out of its card.
+- Wording: "1 of your old copy", "3 things… if a scan brings it in".
+
+Checked independently afterwards rather than taken on the report: the diff
+read line by line, headings, grid columns and the count measured at 760 and
+1000, all 162 checks passing, and the real config, library, downloads folder
+and OneDrive sharing folder untouched.
+
+Six bigger findings came back as proposals, the most important being that
+saving one card silently discards unsaved edits in the others. They're in
+PLANNED.md.
+
+### What it found about the sandbox
+
+The instructions said clicking anything in the dev server was safe. It
+wasn't: `isolate()` sandboxed the app's own files, but SHARE THROUGH ONEDRIVE
+would have written test history into the real sharing folder, the docking
+station copies to real USB drives, the sorter acts on the real downloads
+folder — and MOVE TO BIN in the duplicates review would have binned real
+films, because the sandbox's library is a copy whose paths point at the real
+media. The agent noticed and kept clear. Those routes are now switched off
+inside `isolate()` itself (a test that needs one puts a stand-in back), so
+nobody has to remember. mpv and SCAN MY FOLDERS still reach the real thing,
+and the instructions now say so.
+
+Its other notes on its own instructions were folded back in: how to pass the
+profile picker from script, rendering a state with made-up data instead of
+causing it, treating screenshots as rough, where the page-parse check lives,
+and the borrowed-class trap as a layout rule.
+
+---
+
 ## 2026-09-27 — the tests move in
 
 Every test suite written since August lived in a Claude session's scratch

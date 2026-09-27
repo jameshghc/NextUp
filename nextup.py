@@ -89,7 +89,7 @@ DISMISS_PATH = os.path.join(HERE, "nextup_dismissed.json")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.42"
+APP_VERSION = "0.1.43"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -13563,6 +13563,45 @@ body.queue-docked #toast{left:calc(50% - 150px)}
 .syncoffer .play,.syncoffer .iconbtn{padding-block:7px}
 #view-library.showing-recs .syncoffer,#view-library.showing-history .syncoffer,
 #view-library.showing-drives .syncoffer{display:none}
+
+/* -- settings ---------------------------------------------------------------- */
+/* Each card is its own size container, so the four-field rows are keyed on
+   the card rather than the window: auto-fit left three fields and an orphan
+   on a second line at the 760px minimum and with the queue docked. Four
+   across once the longest label ("Evening (6pm-midnight)") fits on one
+   line, two by two below that. Nothing fixed-position lives in a card, so
+   a container becoming the containing block costs nothing here. */
+.settings{container-type:inline-size}
+.settings .fields.quad{grid-template-columns:repeat(4,minmax(0,1fr))}
+@container (max-width:700px){
+  .settings .fields.quad{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+/* The explanations ran the full card: about 140 characters a line at the
+   page's widest, which is a long way back to find the start of the next.
+   62ch of Spline Sans comes out near 80 characters of ordinary text. */
+.settings p.empty{max-width:62ch}
+.settings p.empty + p.empty{padding-top:0}
+/* Was the one thing in the app still drawn in the system's blue. */
+.settings .toggle input[type=checkbox]{flex:none;width:16px;height:16px;accent-color:var(--marigold)}
+/* File names in the explanations: only .notice styled <code>, so these
+   fell back to the browser's own monospace. */
+.settings code{font-family:var(--mono);font-size:12.5px;color:var(--paper);background:var(--ink-3);
+  padding:1px 5px;border-radius:2px}
+/* The docking station borrows the Library toolbar's .searchrow and so
+   inherited its rules: pushed to the right, and the count hidden below
+   1340px (1640px docked) — and here the count is the only place the ticked
+   total shows once a selection spans pages. */
+#view-settings .searchrow{justify-content:flex-start}
+#view-settings .searchrow .libcount{display:block;margin-left:auto}
+/* An empty rank column borrowed from the numbered lists indented these
+   rows 34px, while the file rows and Recent activity under them sat flush. */
+.settings .toprow .pos:empty{display:none}
+/* Closed, "What they are" sat on top of the buttons with no gap at all. */
+#sortaside details + .rowbtns{margin-top:12px}
+#sortaside summary{cursor:pointer;color:var(--muted);font-size:13.5px}
+#sortaside summary:hover{color:var(--paper)}
+/* Dragged sideways, the box ran out of its card. */
+#c_folders{resize:vertical}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
 </head>
@@ -13902,7 +13941,7 @@ body.queue-docked #toast{left:calc(50% - 150px)}
     </div>
     <p class="empty" id="sortnote">Where finished downloads land. Next Up runs the <code>process_new_movies.py</code> sorter kept in that folder, and shows you what it plans to do before anything moves.</p>
     <div class="rowbtns">
-      <button class="play" id="savelocal">Save</button>
+      <button class="play" id="savelocal">SAVE</button>
       <button class="iconbtn" id="scanlib">SCAN MY FOLDERS</button>
       <button class="iconbtn" id="sortnew">SORT NEW DOWNLOADS</button>
       <button class="iconbtn" id="testmpv">TEST MPV</button>
@@ -13914,19 +13953,21 @@ body.queue-docked #toast{left:calc(50% - 150px)}
   </div>
 
   <div class="settings">
-    <h3 style="margin-top:22px">TMDB key</h3>
+    <h3>TMDB key</h3>
     <p class="empty">Optional. Without it, Next Up can only spot holes inside seasons you already own. With it you get missing seasons, film series, director filmographies and the suggestions built from your ratings. Free from themoviedb.org &gt; Settings &gt; API.</p>
     <div class="fields">
       <div><label>API key (v3)</label><input id="c_tmdb" placeholder="paste key"></div>
     </div>
-    <button class="play" id="savecfg">Save settings</button>
-    <span id="savemsg" class="libline" style="margin-left:12px"></span>
+    <div class="rowbtns">
+      <button class="play" id="savecfg">SAVE KEY</button>
+      <span id="savemsg" class="libline"></span>
+    </div>
   </div>
 
   <div class="settings">
-    <h3 style="margin-top:22px">Are you still watching?</h3>
+    <h3>Are you still watching?</h3>
     <p class="empty">Episodes, the queue and the channels all carry on by themselves. After this long with nothing touched &mdash; here, or on mpv&rsquo;s own keyboard &mdash; the next one is held back and Next Up asks. It only ever asks between programmes, never over one. Minutes; <b>0</b> means never ask at that time of day.</p>
-    <div class="fields">
+    <div class="fields quad">
       <div><label>Daytime (6am&ndash;6pm)</label><input id="c_afk_day" placeholder="240"></div>
       <div><label>Evening (6pm&ndash;midnight)</label><input id="c_afk_evening" placeholder="150"></div>
       <div><label>After midnight</label><input id="c_afk_late" placeholder="90"></div>
@@ -13935,28 +13976,30 @@ body.queue-docked #toast{left:calc(50% - 150px)}
     <p class="empty" style="margin-top:10px">Unanswered, it closes the player when that last one runs out &mdash; which is also what lets the PC get to sleep, since mpv holds it awake for as long as it is playing.</p>
     <label class="toggle" style="margin-top:6px"><input type="checkbox" id="c_afk_on"> Ask when playback has been running unattended</label>
     <div class="rowbtns" style="margin-top:12px">
-      <button class="play" id="saveafk">Save</button>
-      <span id="afkmsg" class="libline" style="margin-left:4px"></span>
+      <button class="play" id="saveafk">SAVE</button>
+      <span id="afkmsg" class="libline"></span>
     </div>
   </div>
 
   <div class="settings">
-    <h3 style="margin-top:22px">Subtitles</h3>
+    <h3>Subtitles</h3>
     <p class="empty">For the FETCH SUBS button on the remote. Searching needs only the API key — free from opensubtitles.com &gt; Consumers. Downloading needs an account too, because it's rationed against one: <b>five a day without an account, twenty with a free one</b>. Files are saved next to the film, so any player finds them.</p>
-    <div class="fields">
+    <div class="fields quad">
       <div><label>API key</label><input id="c_oskey" placeholder="paste key"></div>
       <div><label>Username</label><input id="c_osuser" placeholder="opensubtitles.com account" autocomplete="off"></div>
       <div><label>Password</label><input id="c_ospass" type="password" placeholder="paste password" autocomplete="new-password"></div>
       <div><label>Language</label><input id="c_oslang" placeholder="en" maxlength="5"></div>
     </div>
     <p class="empty" style="margin-top:10px">The password is kept in <code>nextup_config.json</code> in plain text, alongside the TMDB key, so the app can sign in again on its own. Anything running on this PC as you can read that file.</p>
-    <button class="play" id="savesubs">Save subtitle settings</button>
-    <span id="submsg" class="libline" style="margin-left:12px"></span>
+    <div class="rowbtns">
+      <button class="play" id="savesubs">SAVE</button>
+      <span id="submsg" class="libline"></span>
+    </div>
   </div>
 
   <!-- ================= SHARING BETWEEN DEVICES ================= -->
   <div class="settings" id="syncsettings">
-    <h3 style="margin-top:22px">Sharing between devices</h3>
+    <h3>Sharing between devices</h3>
     <p class="empty">Your history, ratings, watchlist, favourites and where you stopped, kept the same on every computer running Next Up — through a cloud folder they all sync, such as OneDrive. Each computer writes only its own file there, so two open at once can't get in each other's way. Your library itself stays on this computer.</p>
     <div id="sync_body"><p class="empty">Checking…</p></div>
   </div>
@@ -17646,7 +17689,7 @@ async function sorterLoad(){
   if(!$('#c_downloads').value) $('#c_downloads').value = st.folder || st.suggestion || '';
   if(!st.folder && st.suggestion){
     sortNote('Found the sorter in <b>'+esc(st.suggestion)+'</b>, which is where your '
-           + 'library folders live. Press <b>Save</b> to use it, or type another folder.');
+           + 'library folders live. Press <b>SAVE</b> to use it, or type another folder.');
   }
   const btn = $('#sortnew');
   btn.disabled = !st.folder || st.running;
@@ -17674,7 +17717,7 @@ function drawAside(a){
   card.append(el('h3', null, n + ' duplicate cop' + (n === 1 ? 'y' : 'ies') + ' set aside · ' + dockGB(a.bytes)));
   const said = [];
   if(n - up) said.push((n - up) + ' download' + (n - up === 1 ? '' : 's') + ' of things you already had at the same or better quality');
-  if(up) said.push(up + ' of your old cop' + (up === 1 ? 'y' : 'ies') + ', replaced by a better download');
+  if(up) said.push(up + ' of your old copies, replaced by a better download');
   card.append(el('p', null, esc(said.join(', and ') + '. Nothing in your library is missing — '
     + 'these are the losing copies. Move them to the Recycle Bin?')));
   const list = document.createElement('details');
@@ -18598,7 +18641,8 @@ function syncRender(s){
     body.append(el('p','empty', (s.waiting === 1
       ? '1 thing from another computer isn\'t'
       : s.waiting + ' things from other computers aren\'t') +
-      ' in this library — kept, and applied if a scan brings it in.'));
+      ' in this library — kept, and applied if a scan brings ' +
+      (s.waiting === 1 ? 'it' : 'them') + ' in.'));
   }
 
   const btns = el('div','rowbtns');

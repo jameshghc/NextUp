@@ -1,4 +1,4 @@
-NEXT UP  v0.1.42
+NEXT UP  v0.1.43
 A film and TV companion for your own media folders.
 
 

@@ -33,6 +33,7 @@ since exists only on the Windows copy:
 | v0.1.40 | shows follow the episode you watched last; favourites suggest any episode |
 | v0.1.41 | missing episodes re-checked against the library every time |
 | v0.1.42 | a hidden Watch Score for every film and show |
+| v0.1.43 | a design pass on Settings |
 
 **How:** copy `nextup.py` across on its own. Not the `mac/` folder — the
 copy in `Old versions and extras` had its bundled Python broken by a
@@ -92,6 +93,29 @@ TMDB doesn't have the asked-for kind. Options:
   ever written once. Reads exactly like the example. Needs an Anthropic API
   key in Settings; the whole library would cost pennies with a small model.
   Shows could have them too.
+
+---
+
+## Waiting on a decision: the rest of the Settings design pass
+
+The first ui-designer run (2026-09-28) fixed eleven small things and brought
+these back rather than build them, because they change behaviour or layout:
+
+- **Saving one card throws away unsaved edits in the others.** Each SAVE
+  reloads every field from the saved settings, so edit the folders, save the
+  TMDB key, and the folder edits silently vanish. Fix: one SAVE for the page,
+  or reloading only the fields that weren't being edited.
+- **"saved" appears even when saving failed** — the result is never read.
+- **The docking station duplicates the Library's own select-and-copy tray**
+  (same cart, same drives). The Settings card could become two lines and a
+  button into Library select mode — once it's checked nothing is lost.
+- **The page is long and ungrouped**: seven cards, about six screens. A
+  regrouping — Library, Playback, Keys, Devices, Your data — with a small
+  index at the top.
+- **Recent activity shows episode titles without their show** ("I CAN DO
+  WHATEVER I WANT." — of what?). Needs the show name sent with it.
+- Small: "1830 events" where the card says "things"; the minutes fields
+  don't say "min"; the TMDB key box runs the full card width.
 
 ---
 
