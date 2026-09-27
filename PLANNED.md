@@ -1,0 +1,197 @@
+# Planned
+
+Everything wanted but not built, most pressing first. `DEVELOPMENT_NOTES.md`
+is the record of what *has* been done; this is the list of what hasn't.
+
+Read this at the start of a session. Anything asked for but not started
+belongs here rather than in a conversation, because conversations get
+summarised away and files don't.
+
+---
+
+## Always: the Mac is behind
+
+**Do this whenever there's time.** The MacBook is on **v0.1.21**. Everything
+since exists only on the Windows copy:
+
+| | |
+|---|---|
+| v0.1.22 | sharing history, ratings, watchlist and resume between computers |
+| v0.1.23 | the header reshuffle |
+| v0.1.24 | shows for you, and what would fill a thin channel |
+| v0.1.25–26 | the right-click menu and the docked queue |
+| v0.1.27 | the "Pick something" rework |
+| v0.1.28–30 | the port fix, dead code swept out, browser cache reclaimed |
+| v0.1.31 | the SORT NEW DOWNLOADS button |
+| v0.1.32 | history opening on a week, and a tab press that goes home |
+| v0.1.33–34 | "are you still watching?" |
+| v0.1.35 | the resume tile follows the Films / TV shows tab |
+| v0.1.36 | Favourites and Watchlist shelves actually filter again |
+| v0.1.37 | no TMDB score on the Rate tab |
+| v0.1.38 | the Rate card: artwork, one size, full description, tagline tile |
+| v0.1.39 | a sort keeps the better copy, and asks before binning the other |
+| v0.1.40 | shows follow the episode you watched last; favourites suggest any episode |
+| v0.1.41 | missing episodes re-checked against the library every time |
+| v0.1.42 | a hidden Watch Score for every film and show |
+
+**How:** copy `nextup.py` across on its own. Not the `mac/` folder — the
+copy in `Old versions and extras` had its bundled Python broken by a
+Windows unzip, and the only good one is inside the original Mac zip.
+
+Two things to check once it's over there: sharing needs turning on in
+Settings on that machine too, and the sorter button will want a downloads
+folder that exists on the Mac.
+
+---
+
+## "Are you still watching?" — the second iteration
+
+**Built in v0.1.33**, after a night when episode 1 of My Hero Academia turned
+into the whole season. What it does now: playback that carries on by itself —
+an episode run, the queue, a channel — stops at a hand-over and asks, once
+nothing has been touched for longer than that time of day allows. Settings
+live under Settings › *Are you still watching?*
+
+Deliberately left out of the first iteration, in roughly the order they'd be
+worth adding:
+
+- **The remote window doesn't show the question.** It's the one window that
+  sits *above* mpv, so it's the obvious place to answer from the sofa. Cheap
+  to add: it already polls once a second.
+- **Nothing asks during a single very long film.** Asking only at hand-overs
+  was the right first rule, but a four-hour film with nobody in the room
+  still plays to the end.
+- **Only the keyboard counts as being there, not the mouse.** Pausing and
+  seeking in mpv are noticed; moving the mouse over its window isn't.
+  mpv has a `mouse-pos` property, so this is one more poll if it matters.
+- **How long you've been watching isn't an input.** Four hours in, at any
+  hour, is a different proposition from twenty minutes in. Clock bands alone
+  caught the night that prompted this, so it may never be needed.
+- **The band boundaries are fixed** at 6am, 6pm and midnight. Only the
+  lengths are adjustable.
+- **It doesn't put the machine to sleep**, it only stops holding it awake.
+  Windows' own timer does the rest.
+
+---
+
+## Waiting on a decision: a written one-liner for every film
+
+Asked for 2026-09-23: a line like *"DiCaprio stars in a film about Wall
+Street"* on the Rate card. The card has TMDB's own tagline in that spot
+for now (539 of 558 films) — but that is the studio's poster line ("Earn.
+Spend. Party."), not a description of the film.
+
+TMDB doesn't have the asked-for kind. Options:
+
+- **Template from cast, director and genre** — "Leonardo DiCaprio in
+  Martin Scorsese's crime comedy". Free, instant, always correct, but no
+  *about*: that part needs the keywords, which are too unreliable (*Babylon*
+  leads with "elephant").
+- **A language model writes them once**, from the title, cast and plot
+  already in the database, cached in a new column so each film is only
+  ever written once. Reads exactly like the example. Needs an Anthropic API
+  key in Settings; the whole library would cost pennies with a small model.
+  Shows could have them too.
+
+---
+
+## Low priority — wanted eventually, no rush
+
+### Your phone as a way in
+
+Three different projects wearing one name. The fork matters, so it needs a
+decision before any work:
+
+- **A phone-shaped page served over Wi-Fi, playing on the PC.** The cheap
+  one. `/remote` already exists and already carries a viewport meta; this
+  widens it into browsing, queueing and rating. Add-to-home-screen makes it
+  feel like an app without an APK.
+- **The same, plus video on the phone.** 80% of this library is `.mkv`,
+  which Android browsers won't play — those would hand off to VLC, and only
+  the ~460 MP4s would play in the page itself. Transcoding is a much bigger
+  job.
+- **A real APK.** Weeks: a Python build chain on Linux, a rewritten UI,
+  mpv-android, and the PC still holds the files. Advised against.
+
+**Settle first, whichever way it goes:** the server binds `127.0.0.1` only,
+and there is **no authentication anywhere** — some endpoints move files to
+the bin. A phone reaching the app means a LAN bind, a PIN, and the
+destructive routes closed to it.
+
+### The old versions archive
+
+`Old versions and extras` is 1.45GB and nothing current depends on it.
+Pruning is a decision, not a tidy-up — those folders are there because they
+were asked to be kept. The two safe wins when the time comes:
+
+- the **extracted** Mac copy, ~380MB, broken by the Windows unzip (its
+  working zip stays)
+- superseded release builds and zips, ~700MB
+
+---
+
+## Decisions waiting on you
+
+### X-Men '97 is in the library twice
+
+Two show rows share TMDB id 138502 and split twelve episodes between them:
+`x-men 97` (id 1) holds S01E01–E04 from a dotted release name and carries
+**your 8.5 rating**; `x-men '97` (id 48) holds S01E01 and E04–E10 from
+apostrophe-named files and is unrated. E01 and E04 exist on both.
+
+The cost is quiet but real: neither row knows the full run, so "next
+episode" and series progress are wrong for it, and Binge #12 — which
+filters on your own rating — sees only the four-episode fragment. The
+451-second resume position on S01E05 sits on the half with no rating. It is
+also why an audit of the picking algorithm reported a show repeating two
+presses apart: measured by title those are one show, measured by id they
+are two.
+
+Merging is a data change on a library that has been hurt by a bad merge
+before (see 2026-08-04, where an over-eager fix deleted all twelve BoJack
+episodes), so it waits for a decision rather than being done in passing.
+With a database backup first, it is a small job.
+
+---
+
+## Ideas, unranked
+
+### A front door: launcher, installer, and a login
+
+Something that runs *before* the window — sets the machine up on first run,
+works out which platform it is on, then opens the right thing.
+
+**The installer is the strong idea.** It is what `mac/` does by hand
+already: carry the runtime, check it, start. Generalising that into a
+first-run step that verifies Python and mpv, fetches what is missing and
+reports what it cannot fix would remove the entire class of "it doesn't
+start".
+
+**The platform detection mostly exists**, in the only place it can:
+`nextup.py` is the same file on both systems and already branches on
+`os.name` everywhere it matters. What cannot be unified is the double-click
+target — Windows needs a `.exe`, macOS needs a Mac executable bit. Two entry
+points is the floor, not a shortfall.
+
+Worth remembering: **NextUp.exe is a PyInstaller bundle with its own frozen
+copy of the source.** It does not read the `nextup.py` beside it. Any
+launcher that "chooses the right version" is choosing between a frozen build
+and a live script, and those drift the moment either changes.
+
+**The login screen is the weak one.** For one person across several devices
+it protects nothing — the library, the ratings and the files are all
+readable next to it. Build it as a *profile picker* — who is watching, whose
+ratings these are — and it earns its place. Build it as authentication and
+it is a lock drawn on a door. (The profile picker exists; this would be the
+honest remainder of the idea.)
+
+---
+
+## Watched, not built
+
+**mpv crashes by itself** with an access violation (0xc0000005), twice on
+2026-08-06 at the same fault offset. That is mpv v0.41.0 faulting inside
+itself — nothing of ours on the stack, nothing to fix unless it recurs.
+
+**A first-chance `0x8001010d` COM exception** during WebView2 creation gets
+logged by faulthandler and is harmless.

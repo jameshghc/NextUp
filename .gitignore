@@ -1,0 +1,43 @@
+# What stays out of the history, and why. The rule of thumb: the history
+# holds what the app IS, never what it KNOWS about you or can rebuild.
+
+# --- private: never, anywhere ---------------------------------------------------
+# The TMDB key, the OpenSubtitles username and password, the sync folder.
+nextup_config.json
+# Your library: every rating, every play, the whole watch history.
+nextup_library.db
+nextup_library.db-journal
+nextup_library.db-wal
+nextup_library.db-shm
+# What's on right now, where you stopped in things, what you dismissed.
+nextup_playing.json
+nextup_resume/
+nextup_dismissed.json
+# The tests' scratch space: the sharing test's two pretend computers hold
+# copies of the library AND the config, passwords included.
+tests/_work/
+# Claude Code's own per-machine permissions.
+.claude/settings.local.json
+
+# --- rebuilt or re-fetched, so no point keeping --------------------------------
+# 66MB of TMDB replies; refills itself.
+nextup_cache.json
+# Posters and backdrops; re-downloaded as needed.
+nextup_art/
+# The last recommendations scan; a new scan makes another.
+nextup_recs.json
+nextup_errors.log
+# The packaged app: built from nextup.py with PyInstaller, so the source is
+# the thing to keep. 15MB a version would bloat the history fast.
+NextUp.exe
+*.spec
+build/
+dist/
+__pycache__/
+*.pyc
+
+# --- the past, kept by hand before there was a history --------------------------
+Old versions and extras/
+
+# --- this machine only ----------------------------------------------------------
+*.lnk

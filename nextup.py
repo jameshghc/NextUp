@@ -1,0 +1,19605 @@
+#!/usr/bin/env python3
+"""
+NEXT UP — a film and TV companion for your own media folders.
+
+Three jobs:
+  1. "Now"     — tells you what to watch from what you already own, and plays
+                 it through mpv.
+  2. "Rate"    — works through everything you haven't scored, and keeps your
+                 top tens.
+  3. "Up Next" — tells you what's worth downloading: episodes missing from
+                 seasons you own, films missing from series you own, other
+                 work by directors you collect, and titles built out of your
+                 own ratings.
+
+Runs entirely on your PC. Python standard library only — no pip installs.
+
+    python nextup.py
+
+Then open http://localhost:8770 (it opens automatically).
+
+--------------------------------------------------------------------------
+BEFORE FIRST RUN
+--------------------------------------------------------------------------
+1. Install mpv, which does the playing. In PowerShell as administrator:
+       winget install --id shinchiro.mpv -e
+2. Get a free TMDB key: themoviedb.org > account > Settings > API (v3 auth).
+   Without one you get titles parsed from filenames and nothing else.
+3. Start the app, open Settings, and give it your media folders, the path to
+   mpv.exe, and that key. Then press "Scan my folders".
+
+Everything it learns lives in nextup_library.db next to this file. Back that
+up and you've backed up your ratings, your progress and the lot.
+"""
+
+import glob
+import hashlib
+import json
+import math
+import os
+import queue
+import random
+import re
+import shutil
+import socket
+import struct
+import sys
+import tempfile
+import threading
+import time
+import traceback
+import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+import webbrowser
+from collections import Counter, defaultdict
+from datetime import date
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# ---------------------------------------------------------------------------
+# CONFIG — edit these
+# ---------------------------------------------------------------------------
+
+TMDB_API_KEY = ""          # optional, see note above
+
+APP_PORT = 8770
+OPEN_BROWSER = True
+
+# How to show the app:
+#   "auto"    native window if pywebview is installed, otherwise an Edge or
+#             Chrome window with the address bar and tabs stripped off
+#   "window"  native window only
+#   "app"     Edge/Chrome app window only
+#   "browser" ordinary browser tab
+WINDOW = "auto"
+
+# ---------------------------------------------------------------------------
+
+if getattr(sys, "frozen", False):
+    # Running as a PyInstaller exe. __file__ points at a temp folder that gets
+    # wiped on exit, so settings and cache go next to the exe instead.
+    HERE = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    HERE = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(HERE, "nextup_config.json")
+CACHE_PATH = os.path.join(HERE, "nextup_cache.json")
+DISMISS_PATH = os.path.join(HERE, "nextup_dismissed.json")
+LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
+ICON_PATH = os.path.join(HERE, "nextup.ico")
+
+APP_VERSION = "0.1.42"
+
+TMDB_BASE = "https://api.themoviedb.org/3"
+POSTER = "https://image.tmdb.org/t/p/w342"
+# Wide art for the favourites page, and head-and-shoulders for the cast row.
+BACKDROP = "https://image.tmdb.org/t/p/w780"
+PROFILE = "https://image.tmdb.org/t/p/w185"
+OLD_POSTER = "https://image.tmdb.org/t/p/w185"
+
+# How many TMDB lookups each pass is allowed. Keeps a first run to a couple
+# of minutes on a 460-title library; everything is cached afterwards.
+BUDGET = {
+    "collections": 70,     # films checked for a parent collection
+    "directors": 14,       # directors whose filmography is pulled
+    "actors": 14,          # actors whose filmography is pulled
+    "shows": 60,           # tv shows checked for missing episodes
+    "profile": 250,        # films read in detail to build your taste profile
+    "discover": 18,        # searches run from that profile
+    "similar": 14,         # films used as "more like this" seeds
+    "tv_similar": 16,      # shows used as "more like this" seeds
+    "tv_discover": 10,     # searches run from what you rate on TV
+    "channels": 60,        # searches run on behalf of thin channels
+}
+
+# A title recommended this widely is one you've almost certainly already
+# considered. "Hide the obvious" filters on this.
+OBVIOUS_VOTES = 6000
+
+# What being on the watchlist is worth when picking something for tonight.
+#
+# It was 2.5, added to a raw TMDB rating — and the unrated half of this
+# library spans 5.7 to 8.6, a range of 2.8. A bonus nearly as wide as the
+# whole scale isn't a nudge, it's a sort order: EVERY watchlisted film
+# outranked EVERY other one, however good. With 15 unrated watchlisted films
+# and 16 unrated film slots in the draw pool, the film half of "pick
+# something" was simply the watchlist read out, which is why the same few
+# came round forever and a 7.0 sat there ahead of two hundred better films.
+#
+# At 0.6 it does what it was meant to do: lifts a film over others of about
+# the same standing, and loses to one that's genuinely better.
+# Retuned to 0.35 when TMDB's own weight came down to 0.35 (see
+# TMDB_WEIGHT). The two numbers have to move together: 0.6 against a raw
+# TMDB rating was a nudge, but against a weighted one it was worth nearly
+# five points of TMDB, and eleven of the top twelve films in the draw were
+# watchlisted — the same "watchlist, in order" failure as the 2.5, arrived
+# at from the other direction. At 0.35 it is worth about one point of TMDB:
+# enough to lift a film over others of its standing, not enough to make a
+# list of its own.
+WATCHLIST_BONUS = 0.35
+
+
+# ===========================================================================
+# Config / small stores
+# ===========================================================================
+
+def load_json(path, default):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return default
+
+
+def save_json(path, data):
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        os.replace(tmp, path)
+    except Exception as exc:
+        print("could not write %s: %s" % (path, exc))
+
+
+CONFIG = {
+    "tmdb_key": TMDB_API_KEY,
+    "media_folders": [],
+    "mpv_path": "",
+    # Who is watching, and which machine this is. Separate on purpose — see
+    # the note above the profiles table.
+    "active_profile": 0,
+    "skip_picker": False,
+    "device_name": "",
+    # Sharing between devices — see "sharing history between devices" below.
+    # sync_folder is the cloud folder's root (OneDrive, say); the app keeps
+    # its files in a subfolder of it. device_id is what this machine's file
+    # is named after, and device_id_host is the machine it was made on, so a
+    # config copied to another computer can't make two machines one.
+    "sync_folder": "",
+    "device_id": "",
+    "device_id_host": "",
+    "sync_offer_dismissed": False,
+    # Whether the queue panel is tucked away. Kept here rather than in the
+    # browser: pywebview hands the window a fresh WebView2 profile in the
+    # temp folder on every run, so localStorage is wiped each time the app
+    # starts and the preference never survived the night.
+    "queue_tucked": False,
+    # Where finished downloads land, holding process_new_movies.py — the
+    # sorter the app drives rather than reimplements. Empty until set.
+    "downloads_folder": "",
+    # "Are you still watching?" — how long playback may carry on with nobody
+    # touching anything, per band of the clock. Empty means the defaults;
+    # see AFK_DEFAULTS.
+    "afk": {},
+}
+CONFIG.update(load_json(CONFIG_PATH, {}))
+
+CACHE = load_json(CACHE_PATH, {})
+CACHE_LOCK = threading.Lock()
+DISMISSED = set(load_json(DISMISS_PATH, []))   # migrated into the db on start
+
+
+# Whether anything has been added to the cache since it was last written.
+# The file is 66MB of TMDB replies; writing it takes about a second and a
+# half, and it was written on every close whether or not a single lookup
+# had happened. That second and a half was spent with the app's port still
+# held — see release_port.
+_CACHE_DIRTY = [False]
+
+
+def cache_flush():
+    with CACHE_LOCK:
+        if not _CACHE_DIRTY[0]:
+            return
+        save_json(CACHE_PATH, CACHE)
+        _CACHE_DIRTY[0] = False
+
+
+# ===========================================================================
+# Library writes
+# ===========================================================================
+
+class AppError(Exception):
+    pass
+
+
+def set_rating(kind, item_id, rating):
+    """A personal score of 0-10 per item. 0 clears it.
+
+    Rating something says nothing about whether you've "watched" it as far as
+    this app is concerned. It has no idea what you saw before it existed, and
+    a guess dressed up as a fact is worse than an honest blank.
+    """
+    rating = max(0.0, min(10.0, round(float(rating) * 2) / 2))
+    if rating == int(rating):
+        rating = int(rating)          # keep whole numbers tidy in the database
+    if kind not in ("movie", "episode", "tvshow"):
+        raise AppError("Can't rate a %s." % kind)
+    item_id = int(item_id)
+    title = LOCAL.field(kind, item_id, "title")
+    LOCAL.set_field(kind, item_id, "userrating", rating)
+    LOCAL.set_field(kind, item_id, "rated_at", now_stamp() if rating else None)
+    log_event(kind, item_id, title, "rated" if rating else "rating cleared", rating)
+    return rating, False
+
+
+def toggle_watchlist(kind, item_id):
+    """On or off — a film or show you mean to get to, as opposed to a rating,
+    which says something about one you already have."""
+    if kind not in ("movie", "tvshow"):
+        raise AppError("Can't watchlist a %s." % kind)
+    item_id = int(item_id)
+    title = LOCAL.field(kind, item_id, "title")
+    on = not LOCAL.field(kind, item_id, "watchlisted_at")
+    LOCAL.set_field(kind, item_id, "watchlisted_at", now_stamp() if on else None)
+    log_event(kind, item_id, title, "watchlisted" if on else "removed from watchlist")
+    return on
+
+
+def toggle_favourite(kind, item_id):
+    """On or off — something you'd happily put on again.
+
+    Deliberately its own flag rather than "anything you scored 9 or above".
+    A score is a judgement about how good something is; a favourite is about
+    whether you want it back on, and the two part company constantly.
+    """
+    if kind not in ("movie", "tvshow"):
+        raise AppError("Can't favourite a %s." % kind)
+    item_id = int(item_id)
+    title = LOCAL.field(kind, item_id, "title")
+    on = not LOCAL.field(kind, item_id, "favourited_at")
+    LOCAL.set_field(kind, item_id, "favourited_at", now_stamp() if on else None)
+    log_event(kind, item_id, title,
+              "favourited" if on else "removed from favourites")
+    if on:
+        # Off the request thread: a backdrop and ten portraits shouldn't keep
+        # the click waiting, and if it fails the page falls back to TMDB.
+        threading.Thread(target=cache_favourite_art, args=(kind, item_id),
+                         daemon=True).start()
+    return on
+
+
+def owned_movie_keys(movies):
+    """Every identifier that means 'I already have this film'."""
+    keys = set()
+    for m in movies:
+        uid = m.get("uniqueid") or {}
+        for k in ("tmdb", "imdb"):
+            if uid.get(k):
+                keys.add(str(uid[k]))
+        if m.get("imdbnumber"):
+            keys.add(str(m["imdbnumber"]))
+        keys.add(norm_title(m.get("title", "")) + "|" + str(m.get("year") or ""))
+        keys.add(norm_title(m.get("originaltitle") or ""))
+        keys.add(norm_title(m.get("title", "")))
+    keys.discard("")
+    return keys
+
+
+def owned_show_keys(shows):
+    """Every identifier that means 'I already have this show'."""
+    keys = set()
+    for s in shows:
+        uid = s.get("uniqueid") or {}
+        if uid.get("tmdb"):
+            keys.add(str(uid["tmdb"]))
+        keys.add(norm_title(s.get("title", "")))
+    keys.discard("")
+    return keys
+
+
+def norm_title(text):
+    text = (text or "").lower()
+    text = re.sub(r"^(the|a|an)\s+", "", text)
+    text = re.sub(r"[^a-z0-9]+", "", text)
+    return text
+
+
+# ===========================================================================
+# TMDB
+# ===========================================================================
+
+class Budget(object):
+    def __init__(self, limits):
+        self.left = dict(limits)
+
+    def take(self, name):
+        if self.left.get(name, 0) <= 0:
+            return False
+        self.left[name] -= 1
+        return True
+
+
+def tmdb(path, params=None):
+    key = CONFIG.get("tmdb_key") or ""
+    if not key:
+        return None
+    params = dict(params or {})
+    params["api_key"] = key
+    url = TMDB_BASE + path + "?" + urllib.parse.urlencode(params)
+
+    ck = url.replace(key, "KEY")
+    with CACHE_LOCK:
+        if ck in CACHE:
+            return CACHE[ck]
+
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(url, headers={"Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            with CACHE_LOCK:
+                CACHE[ck] = data
+                _CACHE_DIRTY[0] = True
+            return data
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                with CACHE_LOCK:
+                    CACHE[ck] = None
+                    _CACHE_DIRTY[0] = True
+                return None
+            if exc.code == 429:
+                time.sleep(2 + attempt * 2)
+                continue
+            if exc.code == 401:
+                raise RuntimeError("TMDB rejected the API key.")
+            return None
+        except Exception:
+            time.sleep(1)
+    return None
+
+
+TMDB_GENRES = {}
+
+
+def tmdb_genre_names(ids):
+    """TMDB returns genre ids on list endpoints. Turn them into the same
+    names your library uses, so a filter set on one tab means something on
+    the other."""
+    global TMDB_GENRES
+    if not TMDB_GENRES:
+        data = tmdb("/genre/movie/list") or {}
+        TMDB_GENRES = dict((g["id"], g["name"]) for g in data.get("genres") or [])
+    return [TMDB_GENRES[i] for i in (ids or []) if i in TMDB_GENRES]
+
+
+TMDB_TV_GENRES = {}
+
+
+def tmdb_tv_genre_names(ids):
+    """TV has its own genre list on TMDB — "Action & Adventure" and "Sci-Fi &
+    Fantasy" are one tag each there — and it's the list the library's shows
+    already use, since they were tagged from it."""
+    global TMDB_TV_GENRES
+    if not TMDB_TV_GENRES:
+        data = tmdb("/genre/tv/list") or {}
+        TMDB_TV_GENRES = dict((g["id"], g["name"]) for g in data.get("genres") or [])
+    return [TMDB_TV_GENRES[i] for i in (ids or []) if i in TMDB_TV_GENRES]
+
+
+def tmdb_genre_ids(names, media):
+    """Names back to ids, for a discover search. A name the other medium
+    doesn't have simply drops out — "Kids" is a TV genre and no film search
+    can ask for it."""
+    if media == "tv":
+        tmdb_tv_genre_names([])
+        table = TMDB_TV_GENRES
+    else:
+        tmdb_genre_names([])
+        table = TMDB_GENRES
+    wanted = set(n.lower() for n in names or [])
+    return [str(i) for i, n in table.items() if n.lower() in wanted]
+
+
+def tmdb_is_cached(path, params=None):
+    """Whether tmdb() would answer this from the cache. Lets a long list of
+    lookups spend the budget only on the ones that actually go out."""
+    key = CONFIG.get("tmdb_key") or ""
+    params = dict(params or {})
+    params["api_key"] = key
+    url = TMDB_BASE + path + "?" + urllib.parse.urlencode(params)
+    with CACHE_LOCK:
+        return url.replace(key, "KEY") in CACHE
+
+
+def tmdb_id_for_movie(movie):
+    uid = movie.get("uniqueid") or {}
+    if uid.get("tmdb"):
+        return str(uid["tmdb"])
+    imdb = uid.get("imdb") or movie.get("imdbnumber") or ""
+    if imdb.startswith("tt"):
+        found = tmdb("/find/%s" % imdb, {"external_source": "imdb_id"})
+        results = (found or {}).get("movie_results") or []
+        if results:
+            return str(results[0]["id"])
+    return None
+
+
+def movie_detail(tid):
+    """One call that carries the collection, keywords and credits. Shared by
+    the collection scan and the taste profile so neither pays twice."""
+    return tmdb("/movie/%s" % tid,
+                {"append_to_response": "keywords,credits"}) or {}
+
+
+def tmdb_id_for_show(show):
+    uid = show.get("uniqueid") or {}
+    if uid.get("tmdb"):
+        return str(uid["tmdb"])
+    imdb = uid.get("imdb") or show.get("imdbnumber") or ""
+    if imdb.startswith("tt"):
+        found = tmdb("/find/%s" % imdb, {"external_source": "imdb_id"})
+        results = (found or {}).get("tv_results") or []
+        if results:
+            return str(results[0]["id"])
+    if show.get("title"):
+        found = tmdb("/search/tv", {"query": show["title"]})
+        results = (found or {}).get("results") or []
+        if results:
+            return str(results[0]["id"])
+    return None
+
+
+# ===========================================================================
+# TONIGHT — what to watch from what you own
+# ===========================================================================
+
+MOODS = {
+    "any":      {"label": "Anything",       "genres": [],                                        "min_rating": 0},
+    "bleak":    {"label": "Bleak laughs",   "genres": ["Comedy", "Drama"],                       "min_rating": 6.8},
+    "heavy":    {"label": "Something heavy","genres": ["Drama", "War", "History", "Crime"],      "min_rating": 7.2},
+    "off":      {"label": "Switch off",     "genres": ["Action", "Adventure", "Comedy", "Animation"], "min_rating": 0},
+    "trash":    {"label": "Genre trash",    "genres": ["Horror", "Thriller", "Science Fiction", "Action"], "min_rating": 0},
+}
+
+
+def minutes(seconds):
+    return int(round((seconds or 0) / 60.0))
+
+
+def episode_order(e):
+    return (e.get("season") or 0, e.get("episode") or 0)
+
+
+def series_progress(episodes_by_show, tvshowid):
+    """Where you are in a series, based only on what this app watched you do.
+
+    It never assumes you haven't seen something. With no record of you playing
+    anything, there is no progress — the series simply isn't in the Continue
+    list, rather than being labelled unwatched.
+    """
+    eps = [e for e in (episodes_by_show.get(tvshowid) or [])
+           if (e.get("season") or 0) > 0]
+    eps.sort(key=episode_order)
+    if not eps:
+        return None
+
+    # Anchored on the episode you watched MOST RECENTLY — not the one
+    # furthest along the run. It used to be the furthest, which is right
+    # for a show watched in order and wrong for every show watched any other
+    # way: Sunny had thirteen half-finished episodes scattered from season 1
+    # to 16, so "where you are" was whichever of those sat latest in the
+    # run, not the S17E01 you'd actually just watched. With no timestamps to
+    # go on (plays recorded before the app kept them) the furthest one still
+    # wins the tie, which is the old reading.
+    touched = [e for e in eps if e.get("last_played") or e.get("playcount")
+               or (e.get("resume") or {}).get("position")]
+    if not touched:
+        return None
+    latest = max(touched, key=lambda e: (e.get("last_played") or "", episode_order(e)))
+    played = sum(1 for e in eps if e.get("playcount"))
+    at = latest.get("last_played") or ""
+    resume = latest.get("resume") or {}
+    position = resume.get("position") or 0
+
+    # Stopped part way: pick that one back up. A position on an episode
+    # you've already finished only counts past a minute — a few seconds is
+    # the player opening and closing on a rewatch, not a place to resume.
+    if position and (not latest.get("playcount") or position >= MIN_WATCH_SECONDS):
+        percent = int(100 * position / resume["total"]) if resume.get("total") else 0
+        return {"episode": latest, "state": "resume", "percent": percent,
+                "played": played, "at": at}
+    # Opened and closed again without getting anywhere: still where you are.
+    if not latest.get("playcount"):
+        return {"episode": latest, "state": "next", "percent": 0,
+                "played": played, "at": at}
+    # Finished it: the one after, if you own one.
+    following = [e for e in eps if episode_order(e) > episode_order(latest)]
+    if not following:
+        return None
+    return {"episode": following[0], "state": "next", "percent": 0,
+            "played": played, "at": at}
+
+
+# How steep the ranking is. The weight of the item in position i is
+# 1/(i + RANK_SOFTNESS), so a bigger number is a flatter shelf.
+#
+# It was 3, over a pool cut off at 60 per type, and the two together were
+# the whole of "the same films keep coming round": the top item took a
+# sixth of every draw, #48 took a seventeenth of what #1 did, and #49 —
+# the same TMDB score as #48, separated by a tie-break — could only ever
+# arrive through the wildcard, 22 times less often. At 10, over the whole
+# shelf with no cut-off at all, the top is still the top and the fiftieth
+# is still reachable.
+RANK_SOFTNESS = 10
+
+
+def _draw_one(pool):
+    """One position-weighted draw from an already score-sorted pool —
+    stronger items more likely, nothing ever guaranteed."""
+    weights = [1.0 / (i + RANK_SOFTNESS) for i in range(len(pool))]
+    total = sum(weights)
+    target = random.uniform(0, total)
+    running = 0.0
+    for item, weight in zip(pool, weights):
+        running += weight
+        if running >= target:
+            return item
+    return pool[-1]
+
+
+REWATCH_SHARE = 0.2   # roughly one draw in five, when there's anything to draw
+
+# One draw in four ignores the ranking completely and takes anything at all
+# from what's eligible.
+#
+# Everything else here is a machine for finding the BEST thing, and a machine
+# like that answers the same way every time you ask it. That's the whole of
+# "it's the same shortlist over and over": nothing was broken, the ranking
+# was just doing its job on a library whose ranking doesn't change. A shelf
+# of 500 films has a few hundred perfectly good evenings on it that no
+# ranking will ever put in the top twenty, and this is the only way any of
+# them are ever seen.
+#
+# Uniform on purpose — weighting it would make it another ranking. It draws
+# from what's already passed every filter and the cooldown, so the worst it
+# can offer is something you own, haven't disliked, and asked to see.
+WILDCARD_SHARE = 0.25
+
+# What TMDB's opinion is worth, against everything the app knows about YOU.
+#
+# The score used to start life as the raw TMDB rating, so a 8.6 began 1.6
+# ahead of a 7.0 and the watchlist's 0.6 could not catch it. Measured over
+# 40,000 draws that put 71% of every press onto the 168 titles rated 8.0 or
+# better: a shelf of 599 things behaving like a shelf of 168. Weighted at
+# 0.35 and measured from 6.5 — about the middle of what a library like this
+# holds — a point of TMDB is worth about a third of being on your
+# watchlist, and the things you actually watch can outrank the classics.
+TMDB_WEIGHT = 0.35
+TMDB_MIDPOINT = 6.5
+
+# A show you are actually watching should turn up because you are actually
+# watching it. Counted over this many days, worth at most this much — which
+# is enough to put your current rotation above a show you rated once and
+# haven't touched since, and not enough to bury everything else.
+HABIT_DAYS = 90
+HABIT_MAX = 2.0
+
+# A show can't be offered again this soon, even as a different episode.
+# Without it the other changes here would hand the Now tab to whatever
+# you're bingeing: the offer memory holds back the EPISODE, and the next
+# episode of the same show is a different key, eligible immediately and
+# ranked just as highly.
+SHOW_COOLDOWN = 15
+
+
+def weighted_sample(items, k):
+    """Pick k items, favouring the stronger ones without ever being
+    deterministic.
+
+    Weight by POSITION, not by raw score. Score gaps vary enormously between
+    libraries — anything your scraper didn't rate scores zero — and weighting
+    by raw score lets a single outlier take almost every draw, which looks
+    exactly like no randomness at all. Position weighting behaves the same
+    whatever the spread.
+
+    One split before any drawing: things you've already seen go in their own
+    reserve, so a loved rewatch — which after its scoring bonus would
+    otherwise win almost every position at the top — can't crowd out the
+    pile you haven't got to. "What should I watch" means that pile, mostly,
+    with an occasional rewatch rather than a highlight reel of your own top
+    scores.
+
+    What counts as seen is decided in build_tonight and carried on the pick
+    (see `rewatch`), not worked out here from whether you've rated it. A
+    film you've rated is one you've watched; a SHOW you've rated is very
+    often one you're in the middle of, and thirteen of those — Seinfeld,
+    The Simpsons, Peep Show, the ones on most nights — were sitting in the
+    rewatch reserve behind twelve others, reachable only by the wildcard at
+    one press in 2,396. Rating a show you're still watching doesn't mean
+    you're done with it.
+
+    Neither pool is cut off any more. It used to keep 60 of each type and
+    the rest of the shelf could only arrive by wildcard; the ranking is
+    gentle enough now (see RANK_SOFTNESS) that the whole shelf can be in
+    the draw with the good stuff still at the top of it.
+    """
+    main_pool = sorted([p for p in items if not p.get("rewatch")],
+                       key=lambda p: p["score"], reverse=True)
+    rewatch_pool = sorted([p for p in items if p.get("rewatch")],
+                          key=lambda p: p["score"], reverse=True)
+    # Not a top-anything: everything still standing after the filters and the
+    # cooldown, in no order, so the wildcard can reach the whole shelf.
+    wildcard_pool = list(items)
+
+    def drop(item):
+        """Out of every pool at once — the same dict object sits in more than
+        one, and identity is the only safe test when two films can compare
+        equal on their contents."""
+        for pool in (main_pool, rewatch_pool, wildcard_pool):
+            for i, p in enumerate(pool):
+                if p is item:
+                    pool.pop(i)
+                    break
+
+    chosen = []
+    for _ in range(k):
+        roll = random.random()
+        if wildcard_pool and roll < WILDCARD_SHARE:
+            picked = random.choice(wildcard_pool)
+        elif rewatch_pool and roll < WILDCARD_SHARE + REWATCH_SHARE:
+            picked = _draw_one(rewatch_pool)
+        elif main_pool:
+            picked = _draw_one(main_pool)
+        elif rewatch_pool:
+            picked = _draw_one(rewatch_pool)
+        elif wildcard_pool:
+            picked = random.choice(wildcard_pool)
+        else:
+            break
+        chosen.append(picked)
+        drop(picked)
+    return chosen
+
+
+def normalize_by_type(picks):
+    """Rank each pick against others of the same type before they're mixed
+    together for the weighted draw.
+
+    TV as a catalog just rates higher than film on TMDB — nothing to do with
+    your taste, a platform-wide pattern. Pooling raw scores and cutting the
+    top 40 means a merely-decent show can outrank a genuinely great film
+    before a human ever gets a say, which quietly turns "anything" into
+    "mostly TV." Percentile rank within each type first, so a top film and a
+    top show arrive as equals.
+    """
+    by_type = defaultdict(list)
+    for p in picks:
+        by_type[p["type"]].append(p)
+    for group in by_type.values():
+        group.sort(key=lambda p: p["score"])
+        span = len(group) - 1
+        for i, p in enumerate(group):
+            p["score"] = (i / span) if span > 0 else 1.0
+    return picks
+
+
+def bulk_import_days():
+    """Everything picked up by the first scan shares one added-date. That is
+    the day you set the app up, not the day the film turned up — treating it
+    as "new" makes half the library look freshly added, which is noise.
+
+    Any day accounting for a big slice of the library is treated as an import
+    rather than as new arrivals.
+    """
+    counts = Counter()
+    for m in LIB.movies:
+        counts[(m.get("dateadded") or "")[:10]] += 1
+    total = sum(counts.values())
+    if not total:
+        return set()
+    return set(day for day, n in counts.items()
+               if day and n >= max(8, total * 0.2))
+
+
+# How many of the most recent offers are held back from the next draw.
+#
+# The draw was always random, but random from a pool of twenty with the top
+# of it weighted at one in six is a machine for showing you the same handful
+# — position weighting means the strongest item takes a sixth of every draw
+# on its own, and the "already skipped" list only lasted until you changed a
+# filter or closed the app. This is the part that persists: what you were
+# shown last time is still known next time.
+#
+# Fifty proved far too shallow. It guaranteed no repeat inside fifty picks
+# and delivered exactly that — the well-rated favourites came back on the
+# fifty-first draw, every time, which is what "12 Angry Men again" was. At
+# 150, against 587 eligible titles, 200 draws produced 185 different ones
+# where fifty produced 93. It's a ceiling rather than a promise: see
+# picks_with_cooldown for what happens when the filters are tight enough
+# that holding back 150 would empty the shelf.
+OFFER_MEMORY = 150
+
+# The table is trimmed to a multiple of that rather than to the line itself,
+# so the memory can be widened later without having already thrown away the
+# rows it would need.
+OFFER_KEEP = OFFER_MEMORY * 4
+
+
+def recent_offers(limit=OFFER_MEMORY):
+    """The keys of the last `limit` things the Now tab put in front of you."""
+    return set(recent_offer_list(limit))
+
+
+def recent_show_ids(limit=SHOW_COOLDOWN):
+    """The shows behind the last few offers — see SHOW_COOLDOWN."""
+    if limit <= 0:
+        return set()
+    keys = [k for k in recent_offer_list(limit) if k.startswith("episode:")]
+    if not keys:
+        return set()
+    wanted = set(int(k.split(":", 1)[1]) for k in keys if k.split(":", 1)[1].isdigit())
+    return set(e.get("tvshowid") for e in LIB.episodes
+               if e.get("episodeid") in wanted)
+
+
+def recent_offer_list(limit):
+    """The last `limit` offers, newest first, in order."""
+    conn = db()
+    rows = conn.execute("SELECT key FROM offered ORDER BY id DESC LIMIT ?",
+                        (limit,)).fetchall()
+    conn.close()
+    return [r["key"] for r in rows]
+
+
+def remember_offer(key):
+    """Note that this was shown, and move it to the front of the queue.
+
+    Deleted and re-inserted rather than updated, because position in the
+    memory is the id — something offered again today is the newest thing
+    there, not still sitting where it was a fortnight ago.
+    """
+    conn = db()
+    conn.execute("DELETE FROM offered WHERE key=?", (key,))
+    conn.execute("INSERT INTO offered (key, at) VALUES (?,?)", (key, now_stamp()))
+    conn.execute("DELETE FROM offered WHERE id NOT IN"
+                 " (SELECT id FROM offered ORDER BY id DESC LIMIT ?)", (OFFER_KEEP,))
+    conn.commit()
+    conn.close()
+
+
+def picks_with_cooldown(skipped, args):
+    """Draw, holding back as much of the recent past as this shelf can afford.
+
+    The cooldown is the first thing given up when the filters are tight,
+    because a fresh list of nothing is no use to anybody — but it's given up
+    by halves rather than all at once. Some combinations leave very little
+    standing: Horror under 90 minutes matches nothing at all here, and
+    Documentary under 100 matches three. The old all-or-nothing fallback
+    took a shelf of forty straight from "no repeats in 150" to no cooldown
+    whatsoever; halving finds the deepest memory that shelf can carry, which
+    for forty films is around twenty.
+
+    Nearly always returns on the first attempt — 587 titles are eligible
+    with the filters open.
+    """
+    memory = OFFER_MEMORY
+    while True:
+        exclude = skipped | (recent_offers(memory) if memory else set())
+        # The show cooldown narrows with the memory, for the same reason:
+        # on a shelf with four things left on it, holding back whole shows
+        # is a luxury that empties the screen.
+        shows = recent_show_ids(memory * SHOW_COOLDOWN // OFFER_MEMORY) if memory else set()
+        picks = build_tonight(exclude=exclude, avoid_shows=shows, **args)
+        if picks or not memory:
+            return picks
+        memory //= 2
+
+
+# How recently, and how much of it, counts as "I've just seen that".
+#
+# Sixty per cent rather than the 97% that counts as finished: walking out of
+# a film with half an hour left is still having watched it, and being offered
+# it again three days later is the complaint this answers. Thirty days is the
+# quarantine — long enough that a film doesn't come back round the same
+# month, short enough that a favourite is offerable again by next season.
+RECENT_WATCH_DAYS = 30
+RECENT_WATCH_FRACTION = 0.6
+
+
+def recently_watched(days=RECENT_WATCH_DAYS, fraction=RECENT_WATCH_FRACTION):
+    """Everything you've seen enough of, recently enough, to not want offered.
+
+    Read from the history rather than from resume_pos, because resume_pos is
+    a current state and gets cleared the moment something is finished — it
+    can say "you're 40 minutes into this", never "you finished this a
+    fortnight ago". The history is the only thing that remembers.
+
+    Timestamps compare as strings on purpose: now_stamp() writes a fixed-width
+    "%Y-%m-%d %H:%M:%S", which sorts and compares identically to the dates it
+    represents, so the filtering happens in SQLite rather than over every row
+    ever written.
+    """
+    since = time.strftime("%Y-%m-%d %H:%M:%S",
+                          time.localtime(time.time() - days * 86400))
+    try:
+        conn = db()
+        try:
+            rows = conn.execute(
+                "SELECT kind,item_id,event,position,total FROM history"
+                " WHERE at >= ? AND event IN (?,?)",
+                (since,) + WATCH_EVENTS).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return set()      # a suggestion is better than an error page
+
+    seen = set()
+    for r in rows:
+        if not r["item_id"]:
+            continue
+        # A "watched" row is one you saw out to the end — that's what
+        # WATCHED_FRACTION decided when it was written, and it holds for the
+        # older rows that carry no numbers at all.
+        enough = r["event"] == "watched" or (
+            r["total"] and r["position"]
+            and r["position"] >= r["total"] * fraction)
+        if enough:
+            seen.add("%s:%s" % (r["kind"], r["item_id"]))
+    return seen
+
+
+def show_watch_habits(days=HABIT_DAYS):
+    """How many episodes of each show you've actually watched lately.
+
+    The one thing the ranking never knew. Everything else it scored with —
+    TMDB's rating, your own rating, the watchlist — describes what you think
+    of a programme; none of it says which ones you're WATCHING at the
+    moment, which is the question the Now tab is really asking. Counted
+    from the history, so a show is lifted by evenings spent on it rather
+    than by opinion, and it fades on its own when you stop.
+
+    Every kind of play counts, channels included: an episode that reached
+    the screen is an episode you watched.
+    """
+    since = time.strftime("%Y-%m-%d %H:%M:%S",
+                          time.localtime(time.time() - days * 86400))
+    plays = defaultdict(int)
+    try:
+        conn = db()
+        try:
+            rows = conn.execute(
+                "SELECT item_id FROM history WHERE at >= ? AND kind='episode'"
+                " AND item_id IS NOT NULL", (since,)).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return {}
+    show_of = dict((e.get("episodeid"), e.get("tvshowid")) for e in LIB.episodes)
+    for r in rows:
+        show = show_of.get(r["item_id"])
+        if show:
+            plays[show] += 1
+    return plays
+
+
+def habit_bonus(plays):
+    """Diminishing, and capped: the difference between never and sometimes
+    matters far more than the difference between often and constantly."""
+    if not plays:
+        return 0.0
+    return min(HABIT_MAX, 0.5 * math.log(1 + plays, 2))
+
+
+def build_tonight(kind, mood, max_mins, genre, count=3, exclude=None,
+                  avoid_shows=()):
+    LIB.load()
+    now = time.time()
+    bulk_days = bulk_import_days()
+    mood_cfg = MOODS.get(mood, MOODS["any"])
+    # Union rather than an argument: this one isn't a preference the caller
+    # gets to weigh, and unlike the offer cooldown it is never given up when
+    # the filters are tight (see picks_with_cooldown). "Don't offer me what I
+    # watched last week" stays true even if the answer is that nothing fits.
+    turned_down = set(exclude or ())
+    exclude = turned_down | recently_watched()
+    picks = []
+
+    def recent_bonus(item):
+        added = item.get("dateadded") or ""
+        if added[:10] in bulk_days:
+            return 0.0        # arrived with the initial scan, so it means nothing
+        try:
+            t = time.mktime(time.strptime(added[:19], "%Y-%m-%d %H:%M:%S"))
+        except Exception:
+            return 0.0
+        age_days = (now - t) / 86400.0
+        if age_days < 30:
+            return 0.8
+        if age_days < 120:
+            return 0.3
+        return 0.0
+
+    if kind in ("any", "film"):
+        for m in LIB.movies:
+            # A low score means you didn't like it — don't offer it again.
+            # A high score is the opposite of a reason to hide something:
+            # sometimes tonight's answer is a rewatch of what you loved.
+            if 0 < (m.get("userrating") or 0) < 5:
+                continue
+            if ("movie:%s" % m["movieid"]) in exclude:
+                continue
+            genres = m.get("genre") or []
+            if genre and genre not in genres:
+                continue
+            if mood_cfg["genres"] and not set(genres) & set(mood_cfg["genres"]):
+                continue
+            rating = m.get("rating") or 0
+            if rating and rating < mood_cfg["min_rating"]:
+                continue
+            mins = minutes(m.get("runtime"))
+            if max_mins and mins and mins > max_mins:
+                continue
+
+            # TMDB's opinion, weighted down and measured from the middle of
+            # the shelf rather than from zero — see TMDB_WEIGHT.
+            score = TMDB_WEIGHT * (rating - TMDB_MIDPOINT) if rating else 0.0
+            if m.get("watchlisted"):
+                score += WATCHLIST_BONUS
+            if (m.get("userrating") or 0) >= 8:
+                score += 1.5
+            score += recent_bonus(m)
+
+            reason = []
+            if m.get("watchlisted"):
+                reason.append("on your watchlist")
+            if recent_bonus(m) >= 0.8:
+                reason.append("added since your last scan")
+            if (m.get("userrating") or 0) >= 8:
+                reason.append("you've scored it %s/10" % m["userrating"])
+            if rating >= 7.5:
+                reason.append("well regarded — TMDB %.1f" % rating)
+            if mins and mins <= 100:
+                reason.append("%s min, in and out" % mins)
+            elif mins:
+                reason.append("%s min" % mins)
+            if genres:
+                reason.append(" / ".join(genres[:2]).lower())
+
+            picks.append({
+                "type": "movie", "id": m["movieid"], "title": m.get("title"),
+                "year": m.get("year"), "runtime": mins, "rating": round(rating, 1),
+                "genres": genres[:3], "art": art_url(m.get("art", {}).get("poster")),
+                "backdrop": m.get("backdrop"),
+                "plot": (m.get("plot") or "")[:280],
+                "why": " · ".join(reason[:3]) or "sitting there unrated",
+                "score": score,
+                "rate_type": "movie", "rate_id": m["movieid"],
+                "rate_label": "Your rating",
+                "userrating": m.get("userrating") or 0,
+                # A film you've rated is a film you've seen, so it's offered
+                # from the rewatch reserve rather than the main shelf.
+                "rewatch": bool(m.get("userrating")),
+                # So the card's watchlist button can open in the right state
+                # rather than flicking to it after the first click.
+                "watchlisted": bool(m.get("watchlisted")),
+            })
+
+    if kind in ("any", "tv"):
+        by_show = defaultdict(list)
+        for e in LIB.episodes:
+            by_show[e.get("tvshowid")].append(e)
+        habits = show_watch_habits()
+        for s in LIB.shows:
+            # Offered a moment ago as some other episode. The offer memory
+            # works on episodes, and the next one along is a different key.
+            if s.get("tvshowid") in avoid_shows:
+                continue
+            # Same rule as films: a low score means don't offer it again,
+            # not "you've already seen this so it's disqualified forever."
+            if 0 < (s.get("userrating") or 0) < 5:
+                continue
+            genres = s.get("genre") or []
+            if genre and genre not in genres:
+                continue
+            if mood_cfg["genres"] and not set(genres) & set(mood_cfg["genres"]):
+                continue
+            progress = series_progress(by_show, s.get("tvshowid"))
+            if s.get("favourited"):
+                # A favourite is a show you know by heart, and there's no
+                # "next" in a sitcom you've seen five times: any episode is
+                # the right one. The app can't know you've seen them all —
+                # it only saw the plays it was there for — so favouriting is
+                # the signal. Prefers one you haven't had lately.
+                ep = random_episode(by_show.get(s.get("tvshowid")) or [], exclude)
+                if not ep:
+                    continue
+            elif progress:
+                ep = progress["episode"]
+            else:
+                # Nothing played yet — offer the start rather than claiming
+                # you've never seen it.
+                pool = sorted([e for e in (by_show.get(s.get("tvshowid")) or [])
+                               if (e.get("season") or 0) > 0], key=episode_order)
+                if not pool:
+                    continue
+                ep = pool[0]
+            # An episode you stopped part way through is exempt from "you
+            # watched that recently": picking it back up is the whole point.
+            # Without this a show vanished from the tab whenever the episode
+            # you're half way through was one you'd also seen to the end in
+            # the last month — My Hero Academia, the morning after a night
+            # of autoplay. What you've turned down this session still counts.
+            resuming = (progress and progress["state"] == "resume"
+                        and not s.get("favourited"))
+            if ("episode:%s" % ep["episodeid"]) in (turned_down if resuming else exclude):
+                continue
+            mins = minutes(ep.get("runtime"))
+            if max_mins and mins and mins > max_mins:
+                continue
+            rating = s.get("rating") or 0
+            if rating and rating < mood_cfg["min_rating"]:
+                continue
+
+            score = TMDB_WEIGHT * (rating - TMDB_MIDPOINT) if rating else 0.0
+            if s.get("watchlisted"):
+                score += WATCHLIST_BONUS
+            if (s.get("userrating") or 0) >= 8:
+                score += 1.5
+            plays = habits.get(s.get("tvshowid"), 0)
+            score += habit_bonus(plays)
+            code = "S%02dE%02d" % (ep.get("season") or 0, ep.get("episode") or 0)
+            if s.get("favourited"):
+                score += FAVOURITE_BONUS
+                why = "a favourite, so any episode will do — %s tonight" % code
+            elif progress and progress["state"] == "resume":
+                score += 2.0
+                why = "you're %s%% through %s — pick it back up" % (progress["percent"], code)
+            elif progress:
+                score += 1.5
+                why = "%s is where you got to" % code
+            else:
+                why = "starts at %s" % code
+            if plays >= 3:
+                why = ("%d episodes in the last %d days · " % (plays, HABIT_DAYS)) + why
+            elif (s.get("userrating") or 0) >= 8:
+                why = "you've scored it %s/10 · " % s["userrating"] + why
+            if s.get("watchlisted"):
+                why = "on your watchlist · " + why
+
+            picks.append({
+                "type": "episode", "id": ep["episodeid"],
+                "title": s.get("title"), "sub": "%s · %s" % (code, ep.get("title") or ""),
+                "year": s.get("year"), "runtime": mins, "rating": round(rating, 1),
+                "genres": genres[:3],
+                "art": art_url(s.get("art", {}).get("poster") or ep.get("art", {}).get("thumb")),
+                "backdrop": s.get("backdrop"),
+                "plot": (ep.get("plot") or s.get("plot") or "")[:280],
+                "why": why, "score": score,
+                "rate_type": "tvshow", "rate_id": s.get("tvshowid"),
+                "rate_label": "Your rating for the show",
+                "userrating": s.get("userrating") or 0,
+                # A show is a rewatch only when you're NOT part way through
+                # it. One you're in the middle of is the opposite of a
+                # rewatch however highly you've rated it — see the note in
+                # weighted_sample.
+                "rewatch": bool(s.get("userrating")) and not progress,
+                # The show's flag, not the episode's — the watchlist holds
+                # programmes, and there is no such thing as watchlisting
+                # S03E07 on its own.
+                "watchlisted": bool(s.get("watchlisted")),
+            })
+
+    return weighted_sample(normalize_by_type(picks), count)
+
+
+# A favourite's episode is picked at random, but not one you've had in the
+# last few weeks while there's anything else to offer.
+RANDOM_EPISODE_REST_DAYS = 45
+
+# What being a favourite adds to a show's score on the Now tab. Stands in for
+# the "part way through" bonus most favourites used to earn — they're the
+# shows on most nights, and making their episodes random shouldn't make
+# them rarer. Measured against v0.1.39 rather than guessed.
+FAVOURITE_BONUS = 2.0
+
+
+def random_episode(episodes, exclude=()):
+    """Any episode of a show — season 0 aside — preferring ones you haven't
+    watched lately and never one just turned down."""
+    pool = [e for e in episodes if (e.get("season") or 0) > 0
+            and ("episode:%s" % e.get("episodeid")) not in exclude]
+    if not pool:
+        return None
+    cutoff = time.strftime("%Y-%m-%d %H:%M:%S",
+                           time.localtime(time.time() - RANDOM_EPISODE_REST_DAYS * 86400))
+    rested = [e for e in pool if (e.get("last_played") or "") < cutoff]
+    return random.choice(rested or pool)
+
+
+def build_continue():
+    """Everything this app has actually seen you start and not finish. Nothing
+    here is inferred — if it's listed, mpv reported a position or you played an
+    episode through to the end."""
+    LIB.load()
+    out = []
+
+    for m in LIB.movies:
+        resume = m.get("resume") or {}
+        if resume.get("position", 0) <= 60:
+            continue
+        total = resume.get("total") or 0
+        percent = int(100 * resume["position"] / total) if total else 0
+        if total and percent >= 95:
+            continue
+        out.append({
+            "type": "movie", "id": m["movieid"], "title": m.get("title"),
+            "year": m.get("year"), "percent": percent,
+            "why": ("%d%% in · %d min left" % (percent, minutes(total - resume["position"])))
+                   if total else ("%d minutes in" % minutes(resume["position"])),
+            "art": art_url(m.get("art", {}).get("poster")),
+            "sort": 2,
+        })
+
+    by_show = defaultdict(list)
+    for e in LIB.episodes:
+        by_show[e.get("tvshowid")].append(e)
+
+    for show in LIB.shows:
+        progress = series_progress(by_show, show.get("tvshowid"))
+        if not progress:
+            continue
+        ep = progress["episode"]
+        code = "S%02dE%02d" % (ep.get("season") or 0, ep.get("episode") or 0)
+        if progress["state"] == "resume":
+            note = "%s%% through %s" % (progress["percent"], code)
+            sort = 1
+        else:
+            note = "up to %s" % code
+            sort = 3
+        out.append({
+            "type": "episode", "id": ep["episodeid"],
+            "title": show.get("title"), "sub": code, "why": note,
+            "percent": progress["percent"],
+            "art": art_url(show.get("art", {}).get("poster")),
+            "sort": sort,
+        })
+
+    out.sort(key=lambda x: (x["sort"], -(x.get("percent") or 0)))
+    # Two rows on a normal window. Past that it stops being "where was I"
+    # and turns into a second library — and the things you actually meant to
+    # get back to are the ones at the top anyway.
+    return out[:6]
+
+
+# "More than a few minutes." Below this you opened something, thought
+# better of it, and closed it again — a shelf of those is a shelf of
+# accidents, not a shelf of things to get back to. The Now tab's own
+# Continue list keeps its looser one-minute floor: that list is a survey of
+# everything outstanding, where this one is four things to press.
+RESUME_FLOOR_SECONDS = 300
+
+# Past this it isn't unfinished, it's finished — you stopped over the
+# credits, or two minutes from the end and never went back.
+RESUME_CEILING_PERCENT = 95
+
+
+def build_resume_row(limit=4):
+    """The few things you are genuinely part way through, newest first.
+
+    Deliberately narrower than build_continue, which answers "what have I
+    got outstanding" and so includes a series whose next episode you have
+    never touched. This answers "what was I watching", which is a question
+    only something with real time on the clock can answer — so it is
+    resume positions only, and only ones past RESUME_FLOOR_SECONDS.
+
+    Newest first, by when the app last played the thing rather than by how
+    far in you are: the point of the row is the evening you interrupted,
+    and that is a question about time, not progress. Anything with no
+    recorded play sorts to the end — its position came from mpv's own
+    watch-later file, so the app never saw when it happened and an unknown
+    time is not a recent one.
+    """
+    LIB.load()
+    out = []
+
+    def entry(item, kind, item_id, title, sub, art):
+        """One card, or None if this isn't far enough in to be one.
+
+        The length is taken from the resume record first and the stored
+        runtime second. mpv only writes a duration back when it has been
+        asked for one, so a file played before this app started watching
+        positions has a real place in it but no idea how long it is — and
+        "0% in, 0 min left" is a worse answer than saying plainly how many
+        minutes you got through.
+        """
+        resume = item.get("resume") or {}
+        position = resume.get("position") or 0
+        if position <= RESUME_FLOOR_SECONDS:
+            return None
+        total = resume.get("total") or (item.get("runtime") or 0) * 60
+        percent = int(100 * position / total) if total else 0
+        if total and percent >= RESUME_CEILING_PERCENT:
+            return None
+        return {
+            "type": kind, "id": item_id, "title": title or "", "sub": sub,
+            "percent": percent,
+            "left": minutes(total - position) if total else 0,
+            "note": ("%d%% in · %d min left" % (percent, minutes(total - position))
+                     if total else "%d min in" % minutes(position)),
+            "art": art,
+            "at": item.get("last_played") or "",
+        }
+
+    for m in LIB.movies:
+        card = entry(m, "movie", m["movieid"], m.get("title"),
+                     str(m.get("year") or ""),
+                     art_url(m.get("art", {}).get("poster")))
+        if card:
+            out.append(card)
+
+    by_show = defaultdict(list)
+    for e in LIB.episodes:
+        by_show[e.get("tvshowid")].append(e)
+
+    # One entry per show, not per episode: three episodes of the same thing
+    # is one answer written out three times, and series_progress already
+    # knows which one you are actually on — the one you watched last.
+    #
+    # For television, "where you left off" includes having finished an
+    # episode: the answer is then the next one, dated by when you watched
+    # the one before it. Without that, finishing S17E01 left the row showing
+    # some half-watched episode from months earlier.
+    for show in LIB.shows:
+        progress = series_progress(by_show, show.get("tvshowid"))
+        if not progress:
+            continue
+        ep = progress["episode"]
+        code = "S%02dE%02d" % (ep.get("season") or 0, ep.get("episode") or 0)
+        poster = art_url(show.get("art", {}).get("poster"))
+        if progress["state"] == "resume":
+            card = entry(ep, "episode", ep["episodeid"], show.get("title"), code, poster)
+        else:
+            card = {"type": "episode", "id": ep["episodeid"],
+                    "title": show.get("title") or "", "sub": code, "percent": 0,
+                    "left": minutes(ep.get("runtime")) or 0, "note": "up next",
+                    "art": poster, "at": progress.get("at") or ""}
+        if card:
+            out.append(card)
+
+    out.sort(key=lambda x: (x["at"], x["percent"]), reverse=True)
+    return out[:limit] if limit else out
+
+
+def resume_position(kind, item_id):
+    """How far into this the app last saw you get, in seconds.
+
+    Read from our own record rather than left to mpv's watch-later file,
+    because that file is only consulted on some of the paths into the
+    player: a channel and anything else that holds the window open load
+    with resume-playback=no, so an episode resumed by hand would otherwise
+    start from the beginning while the row that offered it said 43% in.
+    """
+    table = {"movie": "movies", "episode": "episodes"}.get(kind)
+    if not table:
+        return 0
+    conn = db()
+    row = conn.execute("SELECT resume_pos FROM %s WHERE id=?" % table,
+                       (item_id,)).fetchone()
+    conn.close()
+    return (row["resume_pos"] or 0) if row else 0
+
+
+def art_url(poster):
+    """Posters are TMDB urls now, so the browser fetches them directly."""
+    return poster or None
+
+
+def show_next_episode(by_show, tvshowid):
+    """The episode that "watch this" means for a show.
+
+    Where you got to if this app has seen you watch any of it, and the first
+    episode if it hasn't — the same reckoning the Now tab uses, so a show
+    offers the same episode wherever you meet it.
+    """
+    progress = series_progress(by_show, tvshowid)
+    if progress:
+        return progress["episode"]
+    pool = sorted([e for e in (by_show.get(tvshowid) or [])
+                   if (e.get("season") or 0) > 0], key=episode_order)
+    return pool[0] if pool else None
+
+
+def build_rating_queue():
+    """Everything you haven't scored yet, plus your own top tens.
+
+    No filtering by whether you've "seen" it — that isn't known and shouldn't
+    be guessed. Order is the frontend's job: it shuffles once and keeps that
+    order stable while you work through it, rather than this handing back a
+    fresh sort (by title, by id, whatever) that looks arbitrary every time
+    the queue is re-fetched after a rating.
+    """
+    LIB.load()
+
+    films, shows = [], []
+    for m in LIB.movies:
+        if m.get("userrating"):
+            continue
+        resume = m.get("resume") or {}
+        films.append({
+            "rate_type": "movie", "rate_id": m["movieid"],
+            "title": m.get("title"), "year": m.get("year"),
+            "genres": (m.get("genre") or [])[:3],
+            "tmdb": round(m.get("rating") or 0, 1),
+            "runtime": minutes(m.get("runtime")),
+            "art": art_url(m.get("art", {}).get("poster")),
+            "backdrop": m.get("backdrop"),
+            "tagline": m.get("tagline") or "",
+            # The whole description, not the first 200 characters: this card
+            # is where you decide whether you've seen the thing, and the half
+            # of the plot that got cut was often the half that told you.
+            "plot": m.get("plot") or "",
+            "in_progress": bool(resume.get("position")),
+            "watchlisted": bool(m.get("watchlisted")),
+            # A film is its own play target. Named the same as the shows
+            # below so the page never has to ask which kind it is holding.
+            "play_id": m["movieid"],
+            "play_code": "",
+        })
+    by_show = defaultdict(list)
+    for e in LIB.episodes:
+        by_show[e.get("tvshowid")].append(e)
+
+    for s_ in LIB.shows:
+        if s_.get("userrating"):
+            continue
+        nxt = show_next_episode(by_show, s_.get("tvshowid"))
+        shows.append({
+            "rate_type": "tvshow", "rate_id": s_["tvshowid"],
+            "title": s_.get("title"), "year": s_.get("year"),
+            "genres": (s_.get("genre") or [])[:3],
+            "tmdb": round(s_.get("rating") or 0, 1),
+            "episodes": s_.get("episode") or 0,
+            "art": art_url(s_.get("art", {}).get("poster")),
+            "backdrop": s_.get("backdrop"),
+            "plot": s_.get("plot") or "",
+            "watchlisted": bool(s_.get("watchlisted")),
+            # What a PLAY button here would start, and what to call it.
+            "play_id": nxt["episodeid"] if nxt else None,
+            "play_code": ("S%02dE%02d" % (nxt.get("season") or 0,
+                                          nxt.get("episode") or 0)) if nxt else "",
+        })
+
+    def top_ten(rows, kind, id_field, title_field="title"):
+        scored = [r for r in rows if (r.get("userrating") or 0) > 0]
+        scored.sort(key=lambda r: (-(r.get("userrating") or 0),
+                                   -(r.get("rating") or 0)))
+        out = []
+        for r in scored[:10]:
+            entry = {
+                "title": r.get(title_field), "year": r.get("year"),
+                "score": r.get("userrating"),
+                "tmdb": round(r.get("rating") or 0, 1),
+                "art": art_url(r.get("art", {}).get("poster")),
+                "rate_type": kind, "rate_id": r.get(id_field),
+            }
+            if kind == "movie":
+                entry["play_id"] = r.get(id_field)
+                entry["play_code"] = ""
+            else:
+                nxt = show_next_episode(by_show, r.get(id_field))
+                entry["play_id"] = nxt["episodeid"] if nxt else None
+                entry["play_code"] = ("S%02dE%02d" % (nxt.get("season") or 0,
+                                                      nxt.get("episode") or 0)) if nxt else ""
+            out.append(entry)
+        return out
+
+    return {
+        "films": films,
+        "shows": shows,
+        "unrated_films": len(films),
+        "unrated_shows": len(shows),
+        "rated_films": sum(1 for m in LIB.movies if m.get("userrating")),
+        "rated_shows": sum(1 for x in LIB.shows if x.get("userrating")),
+        "top_films": top_ten(LIB.movies, "movie", "movieid"),
+        "top_shows": top_ten(LIB.shows, "tvshow", "tvshowid"),
+    }
+
+
+# ===========================================================================
+# THE LIBRARY — scanning, metadata, and everything you've rated
+# ===========================================================================
+#
+# Four jobs live in here: cataloguing your files, fetching their metadata,
+# remembering what you've rated and how far into things you got, and handing
+# files to mpv.
+
+import sqlite3
+
+DB_PATH = os.path.join(HERE, "nextup_library.db")
+
+VIDEO_EXT = {".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".mpg", ".mpeg",
+             ".m2ts", ".ts", ".divx", ".flv", ".webm", ".iso"}
+
+# Release-name noise. Anything from here onward in a filename is not the title.
+JUNK = r"""
+(?:480p|576p|720p|1080p|1440p|2160p|4320p|4k|8k|uhd|hd|sd|
+ bluray|blu-ray|bdrip|brrip|bdremux|remux|dvdrip|dvd|web-?dl|web-?rip|webhd|
+ hdtv|pdtv|hdrip|cam|ts|tc|r5|screener|dvdscr|
+ x264|x265|h\.?264|h\.?265|hevc|avc|xvid|divx|vp9|av1|10bit|8bit|hi10p|
+ aac|ac3|eac3|dts(?:-?hd)?|truehd|atmos|dd5\.?1|dd\+?|flac|mp3|opus|
+ 5\.1|7\.1|2\.0|dual-?audio|multi|
+ hdr10\+?|hdr|dv|dolby-?vision|sdr|imax|
+ extended|unrated|uncut|directors?-?cut|theatrical|remastered|proper|repack|
+ internal|limited|complete|retail|subbed|dubbed|
+ amzn|nf|hmax|dsnp|atvp|hulu|pcok|stan|itunes)
+"""
+
+_JUNK_RE = re.compile(r"\b" + JUNK + r"\b.*$", re.I | re.X)
+_YEAR_RE = re.compile(r"[\(\[\.\s_-](19\d{2}|20\d{2})[\)\]\.\s_-]?")
+# The show part may be empty: plenty of libraries store "Season 3/S03E07.mkv",
+# where the only place the show name appears is the folder above.
+_EP_PATTERNS = [
+    # The trailing [a-b]? catches paired-segment numbering like "S01E17A" —
+    # SpongeBob and similar shows split one episode slot into two halves.
+    re.compile(r"^(?P<show>.*?)[\.\s_-]*\bs(?P<s>\d{1,2})[\.\s_-]?e(?P<e>\d{1,3})[a-z]?\b", re.I),
+    re.compile(r"^(?P<show>.*?)[\.\s_-]*\b(?P<s>\d{1,2})x(?P<e>\d{1,3})[a-z]?\b", re.I),
+    re.compile(r"^(?P<show>.*?)[\.\s_-]*\bseason[\.\s_-]?(?P<s>\d{1,2})[\.\s_-]?episode[\.\s_-]?(?P<e>\d{1,3})\b", re.I),
+]
+# The "#" is here because _SEASON_PREFIX_RE below already allowed it and this
+# one didn't — so "Season #9" was a season folder to one test and not to the
+# other. Plex and friends write that form, and Seinfeld's last four episodes
+# were sitting in one.
+_SEASON_DIR_RE = re.compile(
+    r"^(?:season|series|s)[\s._-]*#?[\s._-]*(\d{1,2})$", re.I)
+# A folder that's nothing but a season marker up front, whatever release
+# junk follows: "S03", "Season #1", "S03 480p DVD".
+_SEASON_PREFIX_RE = re.compile(r"^(?:season|series|s)[\s._-]*#?\d{1,2}\b", re.I)
+# Matches the season part of a folder like "Game of Thrones Season 1" or
+# "The Simpsons S03" or "South Park Season 15 S15 + Extras" — everything
+# from here on is season bookkeeping, not the show name.
+_SEASON_MARK_RE = re.compile(
+    r"[\s._-]+(?:(?:season|series)\b[\s._-]*#?\d{1,3}|s\d{1,2}\b)", re.I)
+# "S01E02 The Stakeout - Seinfeld" — the show name after the last " - ",
+# used when nothing came before the episode marker. Requires spaces around
+# the dash so a title with one of its own ("X-Men", "One-Punch Man") doesn't
+# get cut in half.
+_TRAILING_NAME_RE = re.compile(r".*\s-\s+(.+)$")
+# One junk token on its own, for trimming the tail of an already-cut title.
+_JUNK_WORD_RE = re.compile(JUNK.strip(), re.I | re.X)
+# A show's feature-length extra, as media managers name them: "Movie Bigger,
+# Longer and Uncut - South Park", "Special The End of Obesity - South Park".
+# The " - <show>" half is required, so a real film called "Movie 43" doesn't
+# get its prefix stripped down to "43".
+_TV_FEATURE_RE = re.compile(r"^(?:movie|special)\s+(?P<title>.+?)\s+-\s+.+$", re.I)
+# "S01SP01" — a special hung off a season rather than numbered as an episode.
+_SPECIAL_EP_RE = re.compile(
+    r"^(?P<show>.*?)[\.\s_-]*\bs\d{1,2}[\.\s_-]?sp(?P<e>\d{1,3})\b", re.I)
+
+
+def tidy(text):
+    """Turn a release-style name fragment into something searchable."""
+    text = re.sub(r"^\[[^\]]*\]", " ", text or "")       # leading [group]
+    text = text.replace("_", " ").replace(".", " ")
+    text = re.sub(r"[\(\[\{].*?[\)\]\}]", " ", text)     # bracketed extras
+    text = re.sub(r"\s*-\s*$", "", text)
+    text = re.sub(r"\s+", " ", text).strip(" -_.")
+    return text
+
+
+def looks_useless(name):
+    """Filenames like 'video', 'movie', or a release-group hash tell us
+    nothing — in those cases the containing folder usually does."""
+    stripped = re.sub(r"[^a-z]", "", (name or "").lower())
+    if len(stripped) < 3:
+        return True
+    return stripped in {"video", "movie", "film", "title", "main", "index",
+                        "vts01", "fulldisc", "untitled"}
+
+
+def strip_trailing_junk(name):
+    """Peel release-name noise off the END of a title, a word at a time.
+
+    Deliberately not the same as cutting from the first junk word onwards,
+    which is what _JUNK_RE does when there's no year to cut at. That is too
+    violent to use on a name that has already been trimmed: "A Complete
+    Unknown" would come back as "A", because "complete" is on the list.
+    Taking only trailing words stops the moment it meets a real one.
+    """
+    parts = (name or "").split()
+    while parts and _JUNK_WORD_RE.fullmatch(parts[-1]):
+        parts.pop()
+    return " ".join(parts)
+
+
+def parse_movie(path):
+    """Work out a title and year from a film's path."""
+    stem = os.path.splitext(os.path.basename(path))[0]
+    folder = os.path.basename(os.path.dirname(path))
+
+    def attempt(raw):
+        name = raw or ""
+        year = None
+        matches = list(_YEAR_RE.finditer(name))
+        if matches:
+            # The last plausible year wins: "Blade Runner 2049 (2017)" is a
+            # 2017 film, not a 2049 one.
+            best = matches[-1]
+            year = int(best.group(1))
+            # Cutting at the year leaves anything in front of it, junk and
+            # all — which is how "Jackass Number Two Unrated (2006)" went
+            # looking for a film called "Jackass Number Two Unrated".
+            name = strip_trailing_junk(tidy(name[:best.start()]))
+        else:
+            name = _JUNK_RE.sub("", name)
+        return tidy(name), year
+
+    # A show's feature-length extra: "Movie <title> - <show>", "Special
+    # <title> - <show>". Taken as written, because these names are curated
+    # rather than scraped from a release — running the junk stripper over one
+    # would eat the "Uncut" out of "Bigger, Longer & Uncut", where it's part
+    # of the actual title rather than noise.
+    feature = _TV_FEATURE_RE.match(stem)
+    if feature:
+        ftitle = tidy(feature.group("title"))
+        if ftitle and not looks_useless(ftitle):
+            return ftitle, (attempt(stem)[1] or attempt(folder)[1])
+
+    title, year = attempt(stem)
+    if not title or looks_useless(title):
+        ftitle, fyear = attempt(folder)
+        if ftitle and not looks_useless(ftitle):
+            title, year = ftitle, (year or fyear)
+    elif year is None:
+        # "In Bruges [2008]/In.Bruges.720p.mkv" — the filename has the title,
+        # the folder has the year. Take one from each.
+        year = attempt(folder)[1]
+    return title, year
+
+
+def _folder_show_name(parent, grandparent):
+    """Best guess at a show name from the season folder, for files whose own
+    name carries none. A folder that's nothing but the season marker
+    ("Season 3", "Season #3") means the show name is the level above; a
+    folder that's the show name WITH a season marker tacked on ("Game of
+    Thrones Season 1", "South Park Season 15 S15 + Extras") means the show
+    name is whatever comes before that marker."""
+    if _SEASON_PREFIX_RE.match(parent):
+        return grandparent
+    hit = _SEASON_MARK_RE.search(parent)
+    if hit:
+        stripped = parent[:hit.start()].strip(" -_.")
+        if stripped and not looks_useless(stripped):
+            return stripped
+        return grandparent
+    return parent
+
+
+def parse_episode(path):
+    """Work out show, season and episode from a TV file's path."""
+    stem = os.path.splitext(os.path.basename(path))[0]
+    parent = os.path.basename(os.path.dirname(path))
+    grandparent = os.path.basename(os.path.dirname(os.path.dirname(path)))
+
+    def show_name(hit, raw):
+        """The show this file belongs to, given a matched episode marker."""
+        show = tidy(raw)
+        if not show or looks_useless(show):
+            # Some libraries put the show name at the END instead:
+            # "S01E02 The Stakeout - Seinfeld.mkv". Try that before
+            # falling back to the folder, which is often just as bare.
+            trailing = _TRAILING_NAME_RE.search(stem[hit.end():])
+            candidate = tidy(trailing.group(1)) if trailing else ""
+            show = candidate if candidate and not looks_useless(candidate) \
+                else tidy(_folder_show_name(parent, grandparent))
+        return tidy(_YEAR_RE.sub(" ", show).strip())
+
+    # Checked before the ordinary patterns: a special is numbered off its
+    # season ("S01SP01") but belongs in season 0, which is where TMDB files
+    # specials and which this app already keeps out of series progress and
+    # channel rotations. Left as a movie it becomes a phantom film instead.
+    special = _SPECIAL_EP_RE.match(stem)
+    if special:
+        return show_name(special, special.group("show")), 0, int(special.group("e"))
+
+    for pattern in _EP_PATTERNS:
+        hit = pattern.match(stem)
+        if hit:
+            return (show_name(hit, hit.group("show")),
+                    int(hit.group("s")), int(hit.group("e")))
+
+    # "Breaking Bad/Season 3/07 - Title.mkv"
+    season_hit = _SEASON_DIR_RE.match(parent)
+    if season_hit:
+        season = int(season_hit.group(1))
+        num = re.match(r"\s*(\d{1,4})\b", stem)
+        if num:
+            digits = num.group(1)
+            episode = int(digits)
+            # "921 - The Clip Show.mkv" in Season #9 is episode 21, not
+            # episode 921: some libraries write the season and the episode
+            # as one number. Only read it that way when the leading digits
+            # ARE the season we already know from the folder, and when what
+            # is left is a plausible episode — so "300 - Title.mkv" in a
+            # Season 3 folder stays 300 rather than becoming episode 0.
+            head = str(season)
+            if len(digits) > len(head) and digits.startswith(head):
+                rest = digits[len(head):]
+                if 1 <= int(rest) <= 99:
+                    episode = int(rest)
+            # The folder above is usually "Show (1997)"; the year is part of
+            # the folder's name, not the show's, and leaving it on means this
+            # file starts a second show rather than joining the one that is
+            # already there.
+            show = tidy(_YEAR_RE.sub(" ", tidy(grandparent)).strip())
+            return show, season, episode
+    return None, None, None
+
+
+def classify(path):
+    """Film or episode? The episode patterns are specific enough that
+    matching one is a reliable answer."""
+    show, season, episode = parse_episode(path)
+    if show and season is not None:
+        return "episode", (show, season, episode)
+    title, year = parse_movie(path)
+    if title:
+        return "movie", (title, year)
+    return None, None
+
+
+# --- storage --------------------------------------------------------------
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS movies (
+  id INTEGER PRIMARY KEY, path TEXT UNIQUE, title TEXT, year INTEGER,
+  tmdb_id TEXT, genres TEXT, directors TEXT, plot TEXT, poster TEXT,
+  tmdb_rating REAL, runtime INTEGER, collection_id TEXT, collection_name TEXT,
+  added TEXT, playcount INTEGER DEFAULT 0, userrating REAL DEFAULT 0,
+  resume_pos REAL DEFAULT 0, resume_total REAL DEFAULT 0, matched INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS shows (
+  id INTEGER PRIMARY KEY, name TEXT UNIQUE, title TEXT, year INTEGER,
+  tmdb_id TEXT, genres TEXT, plot TEXT, poster TEXT, tmdb_rating REAL,
+  userrating REAL DEFAULT 0, matched INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS episodes (
+  id INTEGER PRIMARY KEY, path TEXT UNIQUE, show_id INTEGER,
+  season INTEGER, episode INTEGER, title TEXT, runtime INTEGER, added TEXT,
+  playcount INTEGER DEFAULT 0, userrating REAL DEFAULT 0,
+  resume_pos REAL DEFAULT 0, resume_total REAL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS unmatched (
+  path TEXT PRIMARY KEY, guess TEXT, kind TEXT
+);
+-- Every play and every rating, with a date on it.
+CREATE TABLE IF NOT EXISTS history (
+  id INTEGER PRIMARY KEY, at TEXT, kind TEXT, item_id INTEGER,
+  title TEXT, event TEXT, value REAL
+);
+-- Suggestions you've hidden, kept with the rest of your data rather than in
+-- a loose json file beside it.
+CREATE TABLE IF NOT EXISTS dismissed (
+  key TEXT PRIMARY KEY, at TEXT
+);
+-- What the Now tab has already put in front of you, newest last. Nothing
+-- here is a judgement — it exists so a shelf of 500 films stops offering
+-- the same six. Trimmed as it goes; see OFFER_MEMORY.
+CREATE TABLE IF NOT EXISTS offered (
+  id INTEGER PRIMARY KEY, key TEXT UNIQUE, at TEXT
+);
+-- When the filename parser gets something wrong, your correction lives here
+-- and survives every rescan.
+CREATE TABLE IF NOT EXISTS overrides (
+  path TEXT PRIMARY KEY, title TEXT, year INTEGER, tmdb_id TEXT, at TEXT
+);
+-- A library snapshot carried over from another device. Deliberately its own
+-- set of tables rather than rows in movies/shows/episodes with an
+-- "available" flag: the scanner's removal logic walks those tables and
+-- decides what has gone missing, and a file-less row is exactly what that
+-- logic is built to clean up. Keeping the snapshot outside it means an
+-- import can never cause a deletion, and never be mistaken for something
+-- you own. See the note under 2026-08-04 for what a careless merge cost
+-- last time.
+-- WHO is watching. Deliberately not the same thing as WHICH MACHINE this
+-- is: the device is derived (a machine holding someone else's snapshot is
+-- the auxiliary one) while a profile is a person, and one person across two
+-- machines must stay one person. Make a profile mean a device and your
+-- ratings split down the middle, each half knowing less than the whole —
+-- which is the X-Men '97 problem in the Planned section wearing a hat.
+--
+-- Ratings and history are NOT keyed by profile yet; they still live on the
+-- item rows. Until that migration happens this table names the viewer and
+-- nothing more, and the picker must not suggest otherwise.
+-- Files you have decided not to keep in the library. Needed because a
+-- removal that only deletes the row is undone by the next scan, which walks
+-- the disk and finds the file sitting exactly where it was.
+CREATE TABLE IF NOT EXISTS ignored_files (
+  path TEXT PRIMARY KEY, why TEXT, at TEXT
+);
+CREATE TABLE IF NOT EXISTS profiles (
+  id INTEGER PRIMARY KEY, name TEXT, accent TEXT,
+  created_at TEXT, last_used TEXT
+);
+CREATE TABLE IF NOT EXISTS snapshot_meta (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  device TEXT, exported_at TEXT, imported_at TEXT, app_version TEXT,
+  movies INTEGER DEFAULT 0, shows INTEGER DEFAULT 0, episodes INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS snapshot_movies (
+  tmdb_id TEXT PRIMARY KEY, title TEXT, year INTEGER, genres TEXT,
+  directors TEXT, cast_names TEXT, plot TEXT, poster TEXT, tmdb_rating REAL,
+  runtime INTEGER, userrating REAL DEFAULT 0, playcount INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS snapshot_shows (
+  tmdb_id TEXT PRIMARY KEY, title TEXT, year INTEGER, genres TEXT,
+  plot TEXT, poster TEXT, tmdb_rating REAL, userrating REAL DEFAULT 0,
+  episode_count INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS snapshot_episodes (
+  show_tmdb_id TEXT, season INTEGER, episode INTEGER, title TEXT,
+  PRIMARY KEY (show_tmdb_id, season, episode)
+);
+-- Sharing between devices. The inbox holds every event that arrived from
+-- another machine, applied or not: something watched on the Mac that this
+-- library doesn't have yet waits here, and is applied if a later scan finds
+-- it. sync_files remembers how far into each device's file has been read.
+-- What plays after what's on. Kept in the database rather than in memory
+-- so a queue built on Friday is still there after the app is closed. pos
+-- is a REAL so something can go in front of the head without renumbering.
+CREATE TABLE IF NOT EXISTS queue (
+  id INTEGER PRIMARY KEY, pos REAL, kind TEXT, item_id INTEGER, added_at TEXT
+);
+CREATE TABLE IF NOT EXISTS sync_inbox (
+  uid TEXT PRIMARY KEY, device_id TEXT, device TEXT, utc REAL,
+  payload TEXT, applied INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS sync_files (
+  name TEXT PRIMARY KEY, offset INTEGER DEFAULT 0, size INTEGER DEFAULT 0,
+  mtime REAL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS sync_devices (
+  device_id TEXT PRIMARY KEY, name TEXT, events INTEGER DEFAULT 0,
+  last_utc REAL DEFAULT 0, file_mtime REAL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS ep_show ON episodes(show_id);
+CREATE INDEX IF NOT EXISTS hist_at ON history(at);
+"""
+
+# Columns added after the first release. Existing databases get them on the
+# next start rather than needing a rebuild.
+LATER_COLUMNS = [
+    ("movies", "cast_names", "TEXT"),
+    ("movies", "keywords", "TEXT"),
+    ("movies", "tagline", "TEXT"),
+    ("movies", "country", "TEXT"),
+    ("shows", "cast_names", "TEXT"),
+    ("movies", "rated_at", "TEXT"),
+    ("movies", "last_played", "TEXT"),
+    ("shows", "rated_at", "TEXT"),
+    ("episodes", "rated_at", "TEXT"),
+    ("episodes", "last_played", "TEXT"),
+    ("episodes", "plot", "TEXT"),
+    ("episodes", "still", "TEXT"),
+    ("movies", "watchlisted_at", "TEXT"),
+    ("shows", "watchlisted_at", "TEXT"),
+    ("movies", "vote_count", "INTEGER"),
+    ("shows", "country", "TEXT"),
+    ("shows", "creators", "TEXT"),
+    # What language a film was actually made in. Production country is a poor
+    # stand-in — half the foreign films worth watching are co-productions with
+    # an American studio somewhere in the credits.
+    ("movies", "original_language", "TEXT"),
+    # A favourite is not a watchlist entry and not a rating. The watchlist is
+    # things you mean to get to; a rating is a verdict. This is the shorter
+    # list you'd actually put on again.
+    ("movies", "favourited_at", "TEXT"),
+    ("shows", "favourited_at", "TEXT"),
+    # Everything below feeds the favourites page: the wide art behind the
+    # title, a face for each name, and the handful of numbers TMDB actually
+    # knows. Fetched for the whole library because it rides along in replies
+    # already cached — only the IMAGES are downloaded, and only for favourites.
+    ("movies", "backdrop", "TEXT"),
+    ("movies", "cast_profiles", "TEXT"),
+    ("movies", "director_profiles", "TEXT"),
+    ("movies", "budget", "INTEGER"),
+    ("movies", "revenue", "INTEGER"),
+    ("movies", "companies", "TEXT"),
+    ("movies", "released", "TEXT"),
+    ("shows", "backdrop", "TEXT"),
+    ("shows", "cast_profiles", "TEXT"),
+    ("shows", "creator_profiles", "TEXT"),
+    ("shows", "status", "TEXT"),
+    ("shows", "networks", "TEXT"),
+    ("shows", "first_air", "TEXT"),
+    ("shows", "seasons_count", "INTEGER"),
+    # TMDB person ids, in step with the name and photo lists. Without these a
+    # name is just a string — there's no way to ask TMDB who it belongs to,
+    # and two different Chris Evanses would be the same person.
+    ("movies", "cast_ids", "TEXT"),
+    ("movies", "director_ids", "TEXT"),
+    ("shows", "cast_ids", "TEXT"),
+    ("shows", "creator_ids", "TEXT"),
+    # What the watch history is built from. `value` on a playback row already
+    # meant nothing, but it's a single number and this needs three things kept
+    # apart, because they answer different questions and only one of them is
+    # "how long did I watch".
+    #
+    #   seconds  — how long the player was open on it. Wall clock, so a pause
+    #              to make tea counts. That's the honest reading of "for how
+    #              long" and it's the only one that can be observed.
+    #   position — where in the file you got to when it stopped.
+    #   total    — how long the thing is, as mpv measured it rather than as
+    #              TMDB claims, so "48m of 1h52m" is two facts from one source.
+    ("history", "seconds", "INTEGER"),
+    ("history", "position", "INTEGER"),
+    ("history", "total", "INTEGER"),
+    # For sharing history between devices. A local row id means nothing on
+    # another machine, so every row also records WHAT it was about in the
+    # terms both machines share: the TMDB id, plus season and episode for an
+    # episode. uid makes the same event arriving twice a no-op; utc orders
+    # events from machines whose local clocks are written as local time;
+    # origin names the device a row came from (NULL means this one); shared
+    # is 1 once this machine's row has been written to its sync file.
+    ("history", "uid", "TEXT"),
+    ("history", "utc", "REAL"),
+    ("history", "origin", "TEXT"),
+    ("history", "tmdb_id", "TEXT"),
+    ("history", "season", "INTEGER"),
+    ("history", "episode", "INTEGER"),
+    ("history", "show_title", "TEXT"),
+    ("history", "shared", "INTEGER"),
+    # The Watch Score — see update_watch_scores. Derived, so never synced:
+    # each machine works it out from the history it holds.
+    ("movies", "watch_seconds", "INTEGER"),
+    ("movies", "watch_score", "REAL"),
+    ("shows", "watch_seconds", "INTEGER"),
+    ("shows", "watch_score", "REAL"),
+]
+
+
+def migrate(conn):
+    for table, column, coltype in LATER_COLUMNS:
+        existing = set(r[1] for r in conn.execute("PRAGMA table_info(%s)" % table))
+        if column not in existing:
+            conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, column, coltype))
+    # Here rather than in SCHEMA: SCHEMA runs before these columns exist on
+    # an older database, and an index on a missing column fails the start.
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS hist_uid ON history(uid)")
+    # Posters were stored at a size that looks soft on a wall of tiles.
+    for table in ("movies", "shows"):
+        conn.execute("UPDATE %s SET poster = REPLACE(poster, ?, ?)"
+                     " WHERE poster LIKE ?" % table,
+                     (OLD_POSTER, POSTER, OLD_POSTER + "%"))
+    conn.commit()
+
+
+_MIGRATED = [False]
+
+
+def db():
+    conn = sqlite3.connect(DB_PATH, timeout=20)
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    if not _MIGRATED[0]:
+        migrate(conn)
+        _MIGRATED[0] = True
+    return conn
+
+
+def now_stamp():
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+ERROR_LOG = os.path.join(HERE, "nextup_errors.log")
+
+
+def log_problem(where):
+    """Write a traceback somewhere it can be read afterwards.
+
+    The app runs under pythonw with no console attached, so print() and an
+    unhandled traceback both go precisely nowhere. That is how a fault gets
+    reported as "it crashed" with nothing else to go on — not because the
+    information wasn't there, but because it had nowhere to land.
+    """
+    try:
+        with open(ERROR_LOG, "a", encoding="utf-8") as handle:
+            handle.write("\n%s  %s\n%s\n"
+                         % (now_stamp(), where, traceback.format_exc()))
+    except Exception:
+        pass            # logging a failure must never become one
+
+
+def install_crash_log():
+    """Catch what falls out of a thread or off the main one — and, below
+    that, what takes the process out without Python noticing at all.
+
+    An access violation in a C library leaves no Python traceback, no
+    excepthook and no log: the app simply isn't there any more, which is
+    indistinguishable from a clean exit unless something says otherwise.
+    faulthandler is the only thing that speaks at that level; it holds the
+    log open and dumps every thread's Python stack as the process dies.
+    """
+    try:
+        import faulthandler
+        # Held open for the life of the app on purpose — a handle opened
+        # during a crash is a handle that may not open.
+        install_crash_log.handle = open(ERROR_LOG, "a", encoding="utf-8")
+        install_crash_log.handle.write(
+            "\n%s  started, v%s\n" % (now_stamp(), APP_VERSION))
+        install_crash_log.handle.flush()
+        faulthandler.enable(file=install_crash_log.handle, all_threads=True)
+    except Exception:
+        pass
+
+    def on_thread(args):
+        try:
+            raise args.exc_value
+        except BaseException:
+            log_problem("thread %s" % getattr(args.thread, "name", "?"))
+
+    def on_main(kind, value, tb):
+        try:
+            raise value
+        except BaseException:
+            log_problem("main thread")
+
+    try:
+        threading.excepthook = on_thread
+    except Exception:
+        pass
+    sys.excepthook = on_main
+
+    # So a tidy shutdown can be told apart from a disappearance. A log that
+    # says "started" and nothing else means the process was taken out; one
+    # that says "closed" means something asked it to go.
+    def on_exit():
+        # Before the log line, so the player is already going while this
+        # writes. Guarded inside itself against running twice.
+        try:
+            shutdown_playback()
+        except Exception:
+            pass
+        try:
+            handle = getattr(install_crash_log, "handle", None)
+            if handle:
+                handle.write("%s  closed\n" % now_stamp())
+                handle.flush()
+        except Exception:
+            pass
+
+    try:
+        import atexit
+        atexit.register(on_exit)
+    except Exception:
+        pass
+
+    # atexit does NOT run on a signal — the process is simply taken down, and
+    # that is how a Mac asks an app to quit (Cmd+Q, "Quit" from the Dock, a
+    # logout) as well as how Ctrl+C arrives in a terminal. Without these the
+    # player carries on with nothing driving it, which is the whole bug.
+    try:
+        import signal as _signal
+
+        # Python runs a signal handler on the MAIN thread, between two
+        # bytecodes. The main thread here spends its life inside the GUI's
+        # own event loop, which is C — so a handler written the ordinary way
+        # never gets a turn, and the app sat through SIGTERM entirely
+        # ignoring it. Twice: once raising SystemExit that had nothing to
+        # unwind, once doing the work inline where the work never ran.
+        #
+        # set_wakeup_fd is the way out. The C-level handler writes a byte to
+        # a pipe whatever the interpreter is doing, and a thread of our own
+        # is sitting on the other end waiting for it.
+        read_fd, write_fd = os.pipe()
+        os.set_blocking(write_fd, False)
+        _signal.set_wakeup_fd(write_fd)
+
+        def take_the_signal():
+            try:
+                os.read(read_fd, 1)         # blocks until a signal lands
+            except Exception:
+                return
+            try:
+                shutdown_playback()
+            except Exception:
+                pass
+            try:
+                cache_flush()
+            except Exception:
+                pass
+            try:
+                on_exit()
+            except Exception:
+                pass
+            os._exit(0)
+
+        threading.Thread(target=take_the_signal, daemon=True,
+                         name="signal-watch").start()
+
+        for name in ("SIGTERM", "SIGINT", "SIGHUP"):
+            sig = getattr(_signal, name, None)
+            if sig is not None:
+                try:
+                    # A handler has to exist or the default action kills the
+                    # process outright and the byte is never written. It does
+                    # nothing itself; the thread above does the work.
+                    _signal.signal(sig, lambda *a: None)
+                except (ValueError, OSError):
+                    pass          # not the main thread, or not allowed here
+    except Exception:
+        pass
+
+
+def watch_stacks(what, seconds=6.0):
+    """Arrange to photograph every thread if `what` takes too long.
+
+    Windows kills a window that stops answering its messages, and it does it
+    without anything in Python being told: no exception, no fault, no exit
+    handler. Every "crash" reported so far has been one of those — the app
+    was hung, not broken, and there was nothing left to read afterwards. The
+    only way to see inside one is to have arranged for the picture in
+    advance. Returns a timer to cancel when the work finishes in good time,
+    in which case nothing is ever written.
+    """
+    handle = getattr(install_crash_log, "handle", None)
+    if handle is None:
+        return None
+
+    def fire():
+        try:
+            import faulthandler
+            handle.write("\n%s  STILL BUSY after %ss: %s\n"
+                         % (now_stamp(), seconds, what))
+            faulthandler.dump_traceback(file=handle, all_threads=True)
+            handle.write("--- end of stacks ---\n")
+            handle.flush()
+        except Exception:
+            pass
+
+    try:
+        timer = threading.Timer(seconds, fire)
+        timer.daemon = True
+        timer.start()
+        return timer
+    except Exception:
+        return None
+
+
+def stop_watching(timer):
+    if timer is not None:
+        try:
+            timer.cancel()
+        except Exception:
+            pass
+
+
+def log_event(kind, item_id, title, event, value=None,
+              seconds=None, position=None, total=None):
+    """Append to the history table. Nothing reads this to make decisions —
+    it's here so that when you want to know what you watched in June, the
+    answer exists.
+
+    seconds/position/total are filled in only by the playback rows, and only
+    with what was actually observed: None where it wasn't, never a guess. A
+    watch history that quietly rounds up is worse than a short one.
+
+    Every row is also written in the terms another machine understands — see
+    sync_identity — and, when sharing is on, handed to the sync loop. It is
+    only ever handed over, never written to the cloud folder from here: a
+    click must not wait on OneDrive, and a folder that isn't reachable right
+    now must not lose the event, which is what `shared` being unset is for."""
+    try:
+        conn = db()
+        utc = time.time()
+        ident = sync_identity(conn, kind, item_id)
+        conn.execute(
+            "INSERT INTO history (at,kind,item_id,title,event,value,"
+            "seconds,position,total,uid,utc,tmdb_id,season,episode,show_title)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(utc)),
+             kind, item_id, title, event, value,
+             None if seconds is None else int(seconds),
+             None if position is None else int(position),
+             None if total is None else int(total),
+             uuid.uuid4().hex, utc) + (ident or (None, None, None, None)))
+        conn.commit()
+        conn.close()
+    except sqlite3.Error:
+        return
+    if ident and CONFIG.get("sync_folder"):
+        _SYNC_WAKE.set()
+
+
+# The two history events that mean "you sat and watched some of this". The
+# rest of the table is bookkeeping — ratings, watchlist toggles, the moment a
+# channel was tuned — and none of it belongs in a watch history.
+WATCH_EVENTS = ("watched", "stopped")
+
+
+# --- the Watch Score ------------------------------------------------------------
+#
+# "Time spent watching X compared to similar mediums" — the definition as it
+# was asked for. One number per title, a film or a whole show, for how much
+# of your time it has had against the others of its kind. Hidden on
+# purpose: nothing on screen shows it yet. It is
+# kept on the movies and shows rows as two columns:
+#
+#   watch_seconds   how long you've actually watched it, summed over every
+#                   sitting in the history. The absolute measure.
+#   watch_score     0-99, a whole number, relative to the other titles of
+#                   the same KIND: films against films, shows against
+#                   shows. Your most-watched film is 99 and your most-watched
+#                   show is 99 — a show you put on most nights would
+#                   otherwise leave every film near the bottom. Any watch
+#                   time at all is at least 1, so 0 means exactly "never
+#                   watched". Recomputed whenever anything is
+#                   watched, so a title's score moves when others do.
+#
+# The relative scale is logarithmic, because watch time is: a sitcom you put
+# on most nights runs to dozens of hours, a film you loved to two. On a
+# straight line every film would sit at 3 or 4 and the scale would say
+# nothing below the top few shows. On a log scale an hour is a clear step up
+# from nothing, and fifty hours from ten is still visibly more.
+#
+# How a sitting is counted, from what the history recorded:
+#   * seconds    the player was open for, capped at the title's own length —
+#                a paused film left on overnight is not twelve hours of it
+#   * or, on the older "watched" rows that carry no timing at all, the
+#     episode's or film's full length
+# It is time the thing PLAYED, so it only counts from the moment the "are
+# you still watching?" question existed to stop it playing to an empty room:
+# before that, one night asleep could run a whole season into the score. The
+# first start of a version with the timer, from nextup_errors.log, was
+# v0.1.34 at the time below. Earlier history stays in the history; it just
+# doesn't count here.
+
+WATCH_SCORE_SINCE = "2026-09-22 23:58:07"
+WATCH_SCORE_FILM_FALLBACK = 6000        # a watched film with no runtime on record
+
+
+def update_watch_scores(conn=None):
+    """Recompute every title's watch time and Watch Score from the history.
+
+    Cheap enough to run after every sitting: one pass over the watch rows,
+    two batches of updates. Returns {("movie"|"tvshow", id): (seconds, score)}.
+    """
+    own = conn is None
+    conn = conn or db()
+    try:
+        ep_show, ep_runtime = {}, {}
+        for r in conn.execute("SELECT id, show_id, runtime FROM episodes"):
+            ep_show[r["id"]] = r["show_id"]
+            ep_runtime[r["id"]] = r["runtime"] or 0
+        film_runtime = {r["id"]: r["runtime"] or 0
+                        for r in conn.execute("SELECT id, runtime FROM movies")}
+        show_by_tmdb = {str(r["tmdb_id"]): r["id"] for r in conn.execute(
+            "SELECT id, tmdb_id FROM shows WHERE tmdb_id IS NOT NULL AND tmdb_id != ''")}
+
+        totals = defaultdict(float)
+        for r in conn.execute(
+                "SELECT kind, item_id, seconds, total, tmdb_id FROM history"
+                " WHERE event IN (?,?) AND at >= ?", WATCH_EVENTS + (WATCH_SCORE_SINCE,)):
+            kind, item = r["kind"], r["item_id"]
+            if kind == "movie":
+                if item not in film_runtime:
+                    continue
+                key = ("movie", item)
+                length = r["total"] or film_runtime[item] or WATCH_SCORE_FILM_FALLBACK
+            elif kind == "episode":
+                show = ep_show.get(item)
+                if show is None and r["tmdb_id"]:
+                    # The episode's file has gone since; the show hasn't.
+                    show = show_by_tmdb.get(str(r["tmdb_id"]))
+                if show is None:
+                    continue
+                key = ("tvshow", show)
+                length = r["total"] or ep_runtime.get(item) or DEFAULT_EPISODE_RUNTIME
+            else:
+                continue
+            seconds = r["seconds"] or 0
+            totals[key] += min(seconds, length) if seconds else length
+
+        top = defaultdict(float)            # the most-watched of each kind
+        for (kind, _item), seconds in totals.items():
+            top[kind] = max(top[kind], seconds)
+        scores = {}
+        for key, seconds in totals.items():
+            best = top[key[0]]
+            score = 99.0 * math.log1p(seconds / 3600.0) / math.log1p(best / 3600.0) if best else 0.0
+            scores[key] = (int(round(seconds)), max(1, int(round(score))) if seconds else 0)
+
+        # Everything else is zero: a title you've never watched has had none
+        # of your time, and leaving it NULL would make "unknown" and "none"
+        # look different when they aren't.
+        conn.execute("UPDATE movies SET watch_seconds=0, watch_score=0")
+        conn.execute("UPDATE shows SET watch_seconds=0, watch_score=0")
+        conn.executemany("UPDATE movies SET watch_seconds=?, watch_score=? WHERE id=?",
+                         [(v[0], v[1], k[1]) for k, v in scores.items() if k[0] == "movie"])
+        conn.executemany("UPDATE shows SET watch_seconds=?, watch_score=? WHERE id=?",
+                         [(v[0], v[1], k[1]) for k, v in scores.items() if k[0] == "tvshow"])
+        conn.commit()
+        return scores
+    finally:
+        if own:
+            conn.close()
+
+
+def watch_score_table(limit=None):
+    """The scores, highest first — for looking at, not for the page."""
+    conn = db()
+    try:
+        rows = [("movie", r["id"], r["title"], r["watch_seconds"], r["watch_score"])
+                for r in conn.execute("SELECT id, title, watch_seconds, watch_score FROM movies"
+                                      " WHERE watch_seconds > 0")]
+        rows += [("tvshow", r["id"], r["title"], r["watch_seconds"], r["watch_score"])
+                 for r in conn.execute("SELECT id, title, watch_seconds, watch_score FROM shows"
+                                       " WHERE watch_seconds > 0")]
+    finally:
+        conn.close()
+    rows.sort(key=lambda r: -(r[4] or 0))
+    return [{"kind": k, "id": i, "title": t, "hours": round((sec or 0) / 3600.0, 1),
+             "score": sc} for k, i, t, sec, sc in rows[:limit]]
+
+
+def refresh_watch_scores():
+    """update_watch_scores, for callers that must never be stopped by it."""
+    try:
+        update_watch_scores()
+    except Exception:
+        log_problem("watch scores")
+# A sitting STARTS with "played" and ends with one of the two above. Reading
+# only the endings loses every session that never got one — the app being
+# closed mid-film is the ordinary way that happens, and the evening still
+# happened. See build_history.
+SESSION_EVENTS = ("played",) + WATCH_EVENTS
+
+
+def build_history(days=90, limit=400):
+    """What you watched, newest first, one row per THING, holding its sittings.
+
+    This used to be one row per sitting, deliberately: watching the same
+    episode twice in a week is two evenings and a list that says so is more
+    honest than one that doesn't. That reasoning was right about the facts
+    and wrong about the page — a long history of a rewatched show became a
+    wall of the same title. So the rows merge by thing and keep every
+    sitting inside them, which loses nothing: the count, each date, and how
+    far each one got are all still there, a click away.
+
+    A sitting starts at a "played" row and ends at the "stopped" or
+    "watched" that follows it. Reading only the endings — which is what this
+    did — silently dropped every sitting that never got one, and the app
+    being closed mid-film is the ordinary way that happens. Those are kept,
+    marked open, and speak for themselves through the library's own resume
+    position, which mpv wrote even though the ending never landed.
+
+    Measured in RUNTIME COVERED, never in how long the player was open.
+    Those two came apart the first evening this shipped: eight hours of
+    Empire of the Sun, because falling asleep in front of something leaves
+    mpv running all night and the wall clock has no idea you aren't there.
+    How far through the film the playhead got is a fact about the film; how
+    long the window was open is a fact about the window. `seconds` is still
+    written to the table because it costs nothing and it was observed, but
+    nothing reads it.
+    """
+    since = time.time() - days * 86400
+    conn = db()
+    try:
+        # Chronological, because a sitting is built by pairing its start with
+        # its end and that only works forwards.
+        #
+        # By time rather than by row id, and the NEWEST rows. Row order was
+        # time order while every row was written here as it happened; rows
+        # arriving from another device are written when they arrive, often
+        # long after they happened. And the old "id ASC LIMIT" kept the
+        # OLDEST rows, which only went unnoticed while the table was short.
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM (SELECT id,at,kind,item_id,title,event,seconds,"
+            " position,total,origin,tmdb_id,season,episode,show_title"
+            " FROM history WHERE event IN (?,?,?) ORDER BY at DESC, id DESC"
+            " LIMIT ?) ORDER BY at ASC, id ASC",
+            SESSION_EVENTS + (limit * 3,))]
+    finally:
+        conn.close()
+
+    # Looked up from the lists already in memory rather than a query each.
+    # History outlives the files it's about, so anything no longer in the
+    # library simply keeps the title the row was written with and goes
+    # without a poster — the evening still happened.
+    LIB.load()
+    films = {m.get("movieid"): m for m in LIB.movies}
+    shows = {s.get("tvshowid"): s for s in LIB.shows}
+    eps = {e.get("episodeid"): e for e in LIB.episodes}
+
+    def describe(kind, item_id, logged_title):
+        """Poster, headline and second line for one row.
+
+        An episode is logged under the episode's own title, which is how it
+        arrives here — "Lisa the Beauty Queen", with nothing to say it's The
+        Simpsons. In a list of a hundred evenings that's unreadable, so the
+        show carries the row and the episode goes underneath it. When the
+        episode has since left the library there's nothing to look it up
+        with, and the row keeps the name it was written with rather than
+        losing it."""
+        if kind == "movie":
+            m = films.get(item_id)
+            return (art_url(m.get("art", {}).get("poster")) if m else None,
+                    logged_title, "")
+        ep = eps.get(item_id)
+        if not ep:
+            far = elsewhere.get((kind, item_id))
+            if far and far[0]:
+                # Watched on another device and not in this library: the row
+                # carried its show's name across for exactly this.
+                code = ("S%02dE%02d" % (far[1], far[2])
+                        if far[1] is not None and far[2] is not None else "")
+                return None, far[0], "  ·  ".join(x for x in (code, logged_title) if x)
+            return None, logged_title, ""
+        show = shows.get(ep.get("tvshowid"))
+        code = "S%02dE%02d" % (ep.get("season") or 0, ep.get("episode") or 0)
+        return (art_url(show.get("art", {}).get("poster")) if show else None,
+                (show.get("title") if show else None) or logged_title,
+                "  ·  ".join(x for x in (code, logged_title) if x))
+
+    def still_here(kind, item_id):
+        """Is the thing this row is about still in the library?
+
+        History outlives the files it is about — see the note on describe()
+        above — so a row can perfectly well name something that has since
+        been deleted. A PLAY button on one of those is a button that can
+        only fail, so the page needs to be told which rows have something
+        behind them.
+        """
+        return bool(films.get(item_id) if kind == "movie" else eps.get(item_id))
+
+    def show_of(kind, item_id):
+        """The library page an episode belongs to is its SHOW's page; there
+        is no page for a single episode to open."""
+        if kind == "movie":
+            return None
+        ep = eps.get(item_id)
+        return ep.get("tvshowid") if ep else None
+
+    def runtime_of(kind, item_id):
+        """How long the thing is, from the library. Only used where mpv never
+        recorded a length of its own."""
+        item = films.get(item_id) if kind == "movie" else eps.get(item_id)
+        return (item.get("runtime") or 0) if item else 0
+
+    def resume_of(kind, item_id):
+        """Where the library thinks you are in this, right now.
+
+        The only thing that can speak for a sitting nobody closed: mpv wrote
+        a position before the app went away, so "how far in" survives even
+        though the ending never got logged.
+        """
+        item = films.get(item_id) if kind == "movie" else eps.get(item_id)
+        if not item:
+            return 0, 0
+        resume = item.get("resume") or {}
+        return resume.get("position") or 0, resume.get("total") or 0
+
+    # --- one sitting at a time ---------------------------------------------
+    # A "played" opens one; the next "stopped" or "watched" for the same thing
+    # closes it. An ending with nothing open is a sitting of its own, because
+    # the rows predating "played" are all endings.
+    sessions, open_now = [], {}
+    elsewhere = {}      # key -> (show title, season, episode) for rows with no local item
+    for r in rows:
+        if r["item_id"]:
+            key = (r["kind"], r["item_id"])
+        else:
+            # From another device, about something this library hasn't got.
+            # A missing id can't be the key — every such row would merge into
+            # one — so it's keyed by what it IS, in the terms both share.
+            key = (r["kind"], "tmdb:%s:%s:%s" % (r["tmdb_id"], r["season"], r["episode"]))
+            elsewhere[key] = (r["show_title"], r["season"], r["episode"])
+        # Two devices, so a sitting is only closed by an ending from the same
+        # one: "played" on the Mac and "stopped" here are two evenings.
+        key_open = key + (r["origin"],)
+        if r["event"] == "played":
+            # Two "played" in a row means the first was never closed. Keep it:
+            # it happened, it just has no ending on record.
+            if key_open in open_now:
+                sessions.append(open_now.pop(key_open))
+            open_now[key_open] = {"key": key, "at": r["at"], "ended": None,
+                                  "title": r["title"] or "", "finished": False,
+                                  "position": None, "total": None, "open": True,
+                                  "device": r["origin"]}
+            continue
+        sitting = open_now.pop(key_open, None)
+        if sitting is None:
+            sitting = {"key": key, "at": r["at"], "title": r["title"] or "",
+                       "position": None, "total": None, "device": r["origin"]}
+        sitting.update(ended=r["at"], finished=(r["event"] == "watched"),
+                       position=r["position"], total=r["total"], open=False)
+        sessions.append(sitting)
+    sessions.extend(open_now.values())
+
+    # Which sitting of each thing is the most recent one. Only that one may
+    # borrow the library's resume position when nobody closed it: an OPEN
+    # sitting is not necessarily the latest — a film started and abandoned
+    # three times running leaves three of them, and the position on the
+    # movie row describes the last of those and nothing about the others.
+    newest = {}
+    for sitting in sessions:
+        at = sitting["at"]
+        if at > newest.get(sitting["key"], ""):
+            newest[sitting["key"]] = at
+
+    grouped, covered_total = {}, 0
+    for sitting in sessions:
+        when = stamp_seconds(sitting["at"])
+        if when is not None and when < since:
+            continue
+        kind, item_id = sitting["key"]
+        is_newest = sitting["at"] == newest.get(sitting["key"])
+        total = sitting["total"] or runtime_of(kind, item_id) or 0
+        if sitting["finished"]:
+            covered = total
+        elif sitting["position"]:
+            covered = min(sitting["position"], total) if total else sitting["position"]
+        elif sitting.get("open") and is_newest and not sitting.get("device"):
+            # Nobody closed it, so the library's own resume position is the
+            # best account of it there is — but only for the most recent
+            # sitting, which is the only one that position can be about.
+            pos, res_total = resume_of(kind, item_id)
+            total = total or res_total
+            covered = min(pos, total) if (pos and total) else pos
+        else:
+            covered = 0
+        covered_total += covered
+
+        art, title, sub = describe(kind, item_id, sitting["title"])
+        entry = grouped.get((kind, item_id))
+        if entry is None:
+            entry = grouped[(kind, item_id)] = {
+                "kind": kind, "id": item_id if isinstance(item_id, int) else None,
+                "title": title, "sub": sub,
+                "art": art, "sessions": [],
+                "available": still_here(kind, item_id),
+                "show_id": show_of(kind, item_id),
+            }
+        entry["sessions"].append({
+            "at": sitting["at"], "ended": sitting.get("ended"),
+            "finished": sitting["finished"], "open": bool(sitting.get("open")),
+            "covered": covered or None, "total": total or None,
+            "percent": (int(round(100.0 * covered / total))
+                        if covered and total else None),
+            "device": sitting.get("device"),
+        })
+
+    # One row per thing, its sittings newest first inside it, and the rows
+    # themselves ordered by when you last sat with it.
+    out = []
+    for entry in grouped.values():
+        entry["sessions"].sort(key=lambda x: x["at"], reverse=True)
+        latest = entry["sessions"][0]
+        seen = [x["covered"] for x in entry["sessions"] if x["covered"]]
+        entry.update({
+            "at": latest["at"],
+            "sittings": len(entry["sessions"]),
+            "finished": any(x["finished"] for x in entry["sessions"]),
+            # The row's headline numbers describe the LATEST sitting, because
+            # "got to 35%" is a fact about an evening. The total across all of
+            # them is carried separately rather than mixed in with it.
+            "covered": latest["covered"],
+            "total": latest["total"],
+            "percent": latest["percent"],
+            "open": latest["open"],
+            "device": latest["device"],
+            "covered_all": sum(seen) or None,
+        })
+        out.append(entry)
+    out.sort(key=lambda e: e["at"], reverse=True)
+    out = out[:limit]
+
+    return {"items": out, "days": days,
+            "covered_total": covered_total,
+            # Counted over SITTINGS, not rows: the totals line talks about
+            # evenings, and one row can now be several of them.
+            "sittings": sum(e["sittings"] for e in out),
+            "measured": sum(1 for e in out for x in e["sessions"] if x["covered"]),
+            "unmeasured": sum(1 for e in out for x in e["sessions"] if not x["covered"])}
+
+
+def stamp_seconds(stamp):
+    """A now_stamp() string back to epoch seconds, or None if it won't
+    parse — an unreadable timestamp is not the year zero."""
+    try:
+        return time.mktime(time.strptime(stamp, "%Y-%m-%d %H:%M:%S"))
+    except (TypeError, ValueError):
+        return None
+
+
+def as_list(text):
+    return [x for x in (text or "").split("|") if x]
+
+
+def as_text(items):
+    return "|".join(x for x in (items or []) if x)
+
+
+# --- scanning -------------------------------------------------------------
+
+EXTRAS_DIRS = {
+    "extra", "extras", "bonus", "bonusfeatures", "sample", "samples",
+    "trailer", "trailers", "behindthescenes", "deletedscenes", "interviews",
+    "specialfeatures", "makingof",
+}
+
+
+def is_extras_dir(name):
+    """A folder whose contents aren't part of the library.
+
+    Compared on letters only, and with a prefix rule for featurettes, because
+    these folder names are typed by hand and get typed wrong — a real library
+    here had "Featuretts", which an exact-match list sails straight past, and
+    two True Detective extras ended up catalogued as films.
+
+    Matched whole rather than as a substring on purpose: "Extraction (2020)"
+    is a film, not an extras folder.
+    """
+    low = (name or "").lower()
+    if "quarantine" in low:
+        # A deliberately quarantined holding area (e.g. _EXTRAS_QUARANTINE) —
+        # safe to skip at the walk itself, unlike the incomplete-downloads
+        # case, since nothing genuinely part of the library lives there.
+        return True
+    plain = re.sub(r"[^a-z]", "", low)
+    return plain.startswith("featurett") or plain in EXTRAS_DIRS
+
+
+_IGNORED = {"at": 0.0, "paths": set()}
+
+
+def ignored_paths(force=False):
+    """Paths deliberately left out of the library. Cached briefly: walk_media
+    asks once per file and a scan is thousands of files."""
+    if force or time.time() - _IGNORED["at"] > 5:
+        try:
+            conn = db()
+            _IGNORED["paths"] = set(r[0] for r in conn.execute(
+                "SELECT path FROM ignored_files"))
+            conn.close()
+        except Exception:
+            _IGNORED["paths"] = set()
+        _IGNORED["at"] = time.time()
+    return _IGNORED["paths"]
+
+
+def walk_media(folders):
+    for folder in folders:
+        if not folder or not os.path.isdir(folder):
+            continue
+        for root, dirs, files in os.walk(folder):
+            dirs[:] = [d for d in dirs if not d.startswith(".")
+                       and not is_extras_dir(d)]
+            for name in files:
+                if os.path.splitext(name)[1].lower() not in VIDEO_EXT:
+                    continue
+                # Normalised, so the SAME file is the same string however the
+                # folder above it was typed. Without this, changing a media
+                # folder from "E:/Torrents" to "E:/Torrents/MOVIES" makes
+                # every file look brand new — the path is what identifies a
+                # row, and "E:/Torrents\MOVIES\x.mkv" and
+                # "E:/Torrents/MOVIES\x.mkv" are different strings for one file.
+                path = os.path.normpath(os.path.join(root, name))
+                if path in ignored_paths():
+                    continue            # a duplicate you already dealt with
+                try:
+                    if os.path.getsize(path) < 50 * 1024 * 1024:
+                        continue        # samples and trailers
+                except OSError:
+                    continue
+                yield path
+
+
+def is_staging_path(path):
+    """A torrent client's own in-progress folder — "Incomplete - Delete",
+    "Incomplete - DOWNLOADS" — not a folder you organized on purpose. This
+    only gates what counts as a NEW find, never what counts as still on
+    disk: excluding it from the walk itself would make an already-known
+    file in there look deleted the moment this shipped, and quietly drop it
+    from your library on the next routine rescan."""
+    parts = re.split(r"[\\/]", path)
+    return any("incomplete" in part.lower() for part in parts)
+
+
+def missing_folders(folders):
+    """Configured folders that aren't there at this moment — an external
+    drive that's unplugged, a network share that's down, a letter that
+    moved after a reboot."""
+    return [f for f in folders if f and not os.path.isdir(f)]
+
+
+# A scan that finds a folder empty concludes every file in it was deleted.
+# If that's most of the library it is far likelier the drive is missing than
+# that you really threw it all away, so the removals are held back and said
+# out loud instead. Below this share it's treated as ordinary tidying up.
+MASS_DELETE_SHARE = 0.5
+MASS_DELETE_FLOOR = 20     # tiny libraries legitimately swing by large shares
+
+
+def scan_local_library(progress=None):
+    """Walk the folders, work out what each file is, then fill in the
+    metadata from TMDB. Files already in the database are left alone, so a
+    rescan only costs you the new ones."""
+    folders = CONFIG.get("media_folders") or []
+    # Your ratings live on the same rows as the file paths, so a scan that
+    # wrongly concludes a file is gone doesn't just forget the film — it
+    # takes your score for it with it. A folder that isn't reachable tells
+    # us nothing about what's in it, so nothing is the honest thing to
+    # conclude: stop, rather than read an unplugged drive as an empty one.
+    absent = missing_folders(folders)
+    if absent:
+        raise AppError(
+            "Can't reach %s. That usually means a drive isn't plugged in or a "
+            "share is down. Nothing has been changed — reconnect it and scan "
+            "again, or take the folder off the list on this tab if it's gone "
+            "for good." % ", ".join(absent))
+    conn = db()
+    # A sort run outside the app — the scheduled one — may have swapped a
+    # better copy in under a new extension. Move the library row across
+    # before looking, or this scan would drop the old path and your rating.
+    try:
+        if downloads_root():
+            sorter_carry_upgrades(conn)
+    except Exception:
+        log_problem("carry upgrades before scan")
+    known = set(r["path"] for r in conn.execute("SELECT path FROM movies"))
+    known |= set(r["path"] for r in conn.execute("SELECT path FROM episodes"))
+    known |= set(r["path"] for r in conn.execute("SELECT path FROM unmatched"))
+
+    found = list(walk_media(folders))
+    fresh = [p for p in found if p not in known and not is_staging_path(p)]
+    added = {"movies": 0, "episodes": 0, "unmatched": 0}
+    now = now_stamp()
+
+    for index, path in enumerate(fresh):
+        if progress:
+            progress(index + 1, len(fresh), os.path.basename(path))
+        kind, parts = classify(path)
+        try:
+            if kind == "movie":
+                title, year = parts
+                conn.execute(
+                    "INSERT OR IGNORE INTO movies (path,title,year,added) VALUES (?,?,?,?)",
+                    (path, title, year, now))
+                added["movies"] += 1
+            elif kind == "episode":
+                show, season, episode = parts
+                key = show.lower()
+                row = conn.execute("SELECT id FROM shows WHERE name=?", (key,)).fetchone()
+                if row:
+                    show_id = row["id"]
+                else:
+                    cur = conn.execute(
+                        "INSERT INTO shows (name,title) VALUES (?,?)", (key, show))
+                    show_id = cur.lastrowid
+                conn.execute(
+                    "INSERT OR IGNORE INTO episodes (path,show_id,season,episode,added)"
+                    " VALUES (?,?,?,?,?)", (path, show_id, season, episode, now))
+                added["episodes"] += 1
+            else:
+                conn.execute("INSERT OR IGNORE INTO unmatched (path,guess,kind)"
+                             " VALUES (?,?,?)", (path, os.path.basename(path), "?"))
+                added["unmatched"] += 1
+        except sqlite3.Error:
+            pass
+    conn.commit()
+
+    # Drop rows whose file has gone.
+    still_here = set(found)
+    doomed = {}
+    total_rows = 0
+    for table in ("movies", "episodes", "unmatched"):
+        rows = [r["path"] for r in conn.execute("SELECT path FROM %s" % table)]
+        total_rows += len(rows)
+        doomed[table] = [p for p in rows if p not in still_here]
+
+    # Second guard, for the cases the reachability check can't see: a folder
+    # that's mounted but empty, a drive letter now pointing at something
+    # else. Same reasoning — losing your ratings is permanent, an extra scan
+    # is not.
+    condemned = sum(len(v) for v in doomed.values())
+    kept = 0
+    if (total_rows >= MASS_DELETE_FLOOR
+            and condemned >= total_rows * MASS_DELETE_SHARE):
+        kept = condemned
+        condemned = 0
+    else:
+        for table, paths in doomed.items():
+            for path in paths:
+                conn.execute("DELETE FROM %s WHERE path=?" % table, (path,))
+    conn.commit()
+
+    enriched = enrich_local(conn, progress)
+    conn.close()
+    added["enriched"] = enriched
+    added["removed"] = condemned
+    added["kept"] = kept
+    added["total_files"] = len(found)
+    return added
+
+
+def cast_names(detail, limit=10):
+    credits = detail.get("credits") or {}
+    return [c.get("name") for c in (credits.get("cast") or [])[:limit] if c.get("name")]
+
+
+def cast_photos(detail, limit=10):
+    """Portrait urls in the SAME order as cast_names, so the two lists line
+    up by position. An actor TMDB has no photo for holds its place with a
+    blank rather than shifting everyone after it along one."""
+    credits = detail.get("credits") or {}
+    out = []
+    for c in (credits.get("cast") or [])[:limit]:
+        if not c.get("name"):
+            continue
+        out.append(PROFILE + c["profile_path"] if c.get("profile_path") else "")
+    return out
+
+
+def cast_ids(detail, limit=10):
+    """TMDB person ids, positionally in step with cast_names and cast_photos."""
+    credits = detail.get("credits") or {}
+    return [str(c.get("id") or "") for c in (credits.get("cast") or [])[:limit]
+            if c.get("name")]
+
+
+def crew_photos(detail, job="Director"):
+    credits = detail.get("credits") or {}
+    return [(PROFILE + c["profile_path"] if c.get("profile_path") else "")
+            for c in (credits.get("crew") or []) if c.get("job") == job]
+
+
+def crew_ids(detail, job="Director"):
+    credits = detail.get("credits") or {}
+    return [str(c.get("id") or "")
+            for c in (credits.get("crew") or []) if c.get("job") == job]
+
+
+def keyword_names(detail, limit=14):
+    kws = (detail.get("keywords") or {}).get("keywords") or []
+    return [k.get("name") for k in kws[:limit] if k.get("name")]
+
+
+def apply_movie_match(conn, movie_id, title, year):
+    """Search TMDB under the given title/year and write whatever it finds
+    onto the row. Shared by the ordinary matching pass and by a manual
+    title correction, so a fix behaves exactly like a fresh match."""
+    hit = tmdb_find_movie(title, year)
+    if not hit:
+        conn.execute("UPDATE movies SET matched=-1 WHERE id=?", (movie_id,))
+        conn.commit()
+        return False
+    detail = movie_detail(str(hit["id"])) or {}
+    credits = detail.get("credits") or {}
+    directors = [c.get("name") for c in (credits.get("crew") or [])
+                 if c.get("job") == "Director"]
+    coll = detail.get("belongs_to_collection") or {}
+    conn.execute(
+        "UPDATE movies SET tmdb_id=?,title=?,year=?,genres=?,directors=?,plot=?,"
+        "poster=?,tmdb_rating=?,vote_count=?,runtime=?,collection_id=?,collection_name=?,"
+        "cast_names=?,keywords=?,tagline=?,country=?,original_language=?,"
+        "backdrop=?,cast_profiles=?,director_profiles=?,budget=?,revenue=?,"
+        "companies=?,released=?,cast_ids=?,director_ids=?,matched=1"
+        " WHERE id=?",
+        (str(hit["id"]), detail.get("title") or title,
+         int((detail.get("release_date") or "0000")[:4]) or year,
+         as_text([g["name"] for g in detail.get("genres") or []]),
+         as_text(directors), (detail.get("overview") or "")[:1200],
+         POSTER + detail["poster_path"] if detail.get("poster_path") else None,
+         detail.get("vote_average") or 0, detail.get("vote_count") or 0,
+         (detail.get("runtime") or 0) * 60,
+         str(coll.get("id")) if coll else None,
+         coll.get("name") if coll else None,
+         as_text(cast_names(detail)), as_text(keyword_names(detail)),
+         (detail.get("tagline") or "")[:200],
+         as_text([c.get("name") for c in detail.get("production_countries") or []]),
+         detail.get("original_language") or "",
+         BACKDROP + detail["backdrop_path"] if detail.get("backdrop_path") else None,
+         as_text(cast_photos(detail)), as_text(crew_photos(detail)),
+         detail.get("budget") or 0, detail.get("revenue") or 0,
+         as_text([c.get("name") for c in detail.get("production_companies") or []][:3]),
+         detail.get("release_date") or "",
+         as_text(cast_ids(detail)), as_text(crew_ids(detail)),
+         movie_id))
+    conn.commit()
+    return True
+
+
+def enrich_local(conn, progress=None):
+    """Fill in posters, genres, directors and TMDB ids for anything new."""
+    if not CONFIG.get("tmdb_key"):
+        return 0
+    done = 0
+
+    # Anything left at matched=0 has no poster and no metadata, so a cap here
+    # would silently leave part of the library blank. Work through the lot.
+    # A path with a manual correction (see overrides table) is searched under
+    # that title instead of the one the filename parser guessed.
+    pending = conn.execute(
+        "SELECT m.id AS id, COALESCE(o.title, m.title) AS title,"
+        " COALESCE(o.year, m.year) AS year"
+        " FROM movies m LEFT JOIN overrides o ON o.path = m.path"
+        " WHERE m.matched=0").fetchall()
+    for index, row in enumerate(pending):
+        if progress:
+            progress(index + 1, len(pending), "looking up %s" % row["title"])
+        if apply_movie_match(conn, row["id"], row["title"], row["year"]):
+            done += 1
+    conn.commit()
+
+    shows_pending = conn.execute(
+        "SELECT id,title FROM shows WHERE matched=0").fetchall()
+    for index, row in enumerate(shows_pending):
+        if progress:
+            progress(index + 1, len(shows_pending), "looking up %s" % row["title"])
+        found = tmdb("/search/tv", {"query": row["title"]}) or {}
+        results = found.get("results") or []
+        if not results:
+            conn.execute("UPDATE shows SET matched=-1 WHERE id=?", (row["id"],))
+            continue
+        best = results[0]
+        detail = tmdb("/tv/%s" % best["id"], {"append_to_response": "credits"}) or {}
+        conn.execute(
+            "UPDATE shows SET tmdb_id=?,title=?,year=?,genres=?,plot=?,poster=?,"
+            "tmdb_rating=?,country=?,cast_names=?,creators=?,backdrop=?,"
+            "cast_profiles=?,creator_profiles=?,status=?,networks=?,first_air=?,"
+            "seasons_count=?,cast_ids=?,creator_ids=?,matched=1 WHERE id=?",
+            (str(best["id"]), detail.get("name") or row["title"],
+             int((detail.get("first_air_date") or "0000")[:4]) or None,
+             as_text([g["name"] for g in detail.get("genres") or []]),
+             (detail.get("overview") or "")[:1200],
+             POSTER + detail["poster_path"] if detail.get("poster_path") else None,
+             detail.get("vote_average") or 0,
+             as_text(detail.get("origin_country") or []),
+             as_text(cast_names(detail)),
+             as_text([c.get("name") for c in detail.get("created_by") or []]),
+             BACKDROP + detail["backdrop_path"] if detail.get("backdrop_path") else None,
+             as_text(cast_photos(detail)),
+             as_text([(PROFILE + c["profile_path"] if c.get("profile_path") else "")
+                      for c in detail.get("created_by") or []]),
+             detail.get("status") or "",
+             as_text([n.get("name") for n in detail.get("networks") or []][:3]),
+             detail.get("first_air_date") or "",
+             detail.get("number_of_seasons") or 0,
+             as_text(cast_ids(detail)),
+             as_text([str(c.get("id") or "") for c in detail.get("created_by") or []]),
+             row["id"]))
+        done += 1
+    conn.commit()
+    done += backfill_details(conn, progress)
+    done += backfill_show_details(conn, progress)
+    done += enrich_episode_titles(conn, progress)
+    cache_artwork(conn, progress)
+    if progress:
+        progress(1, 1, "saving artwork for your favourites")
+    cache_favourite_art()
+    return done
+
+
+def enrich_episode_titles(conn, progress=None):
+    """Real episode names and runtimes instead of "Episode 7" and a blank,
+    pulled one TMDB call per season rather than one per episode — a
+    season's episode list comes back in a single request, and everything
+    in it is cached afterwards."""
+    if not CONFIG.get("tmdb_key"):
+        return 0
+    seasons = conn.execute(
+        "SELECT DISTINCT e.show_id, e.season, s.tmdb_id"
+        " FROM episodes e JOIN shows s ON s.id = e.show_id"
+        " WHERE (e.title IS NULL OR e.runtime IS NULL) AND e.season > 0"
+        " AND s.tmdb_id IS NOT NULL").fetchall()
+    done = 0
+    for index, row in enumerate(seasons):
+        if progress:
+            progress(index + 1, len(seasons), "reading episode titles")
+        detail = tmdb("/tv/%s/season/%s" % (row["tmdb_id"], row["season"])) or {}
+        by_number = dict((e.get("episode_number"), e)
+                         for e in detail.get("episodes") or [])
+        if not by_number:
+            continue
+        eps = conn.execute(
+            "SELECT id,episode FROM episodes WHERE show_id=? AND season=?",
+            (row["show_id"], row["season"])).fetchall()
+        for ep in eps:
+            info = by_number.get(ep["episode"])
+            if not info:
+                continue
+            still = info.get("still_path")
+            conn.execute(
+                "UPDATE episodes SET title=?,plot=?,still=?,runtime=? WHERE id=?",
+                (info.get("name") or ("Episode %d" % ep["episode"]),
+                 (info.get("overview") or "")[:1000],
+                 POSTER + still if still else None,
+                 (info.get("runtime") or 0) * 60, ep["id"]))
+            done += 1
+    conn.commit()
+    return done
+
+
+def backfill_details(conn, progress=None):
+    """Libraries matched by an older version have no cast, themes or vote
+    count stored. Fill them in on the next scan — the lookups are cached,
+    so for anything the suggestion scan has already seen this costs
+    nothing."""
+    rows = conn.execute("SELECT id,tmdb_id FROM movies"
+                        " WHERE matched=1 AND tmdb_id IS NOT NULL"
+                        " AND (cast_names IS NULL OR keywords IS NULL"
+                        " OR vote_count IS NULL OR original_language IS NULL OR backdrop IS NULL OR cast_profiles IS NULL OR cast_ids IS NULL)").fetchall()
+    done = 0
+    for index, row in enumerate(rows):
+        if progress:
+            progress(index + 1, len(rows), "filling in cast and themes")
+        detail = movie_detail(row["tmdb_id"])
+        if not detail:
+            conn.execute("UPDATE movies SET cast_names='', keywords='',"
+                         " vote_count=0, original_language='', backdrop='',"
+                         " cast_profiles='' WHERE id=?", (row["id"],))
+            continue
+        conn.execute("UPDATE movies SET cast_names=?,keywords=?,tagline=?,"
+                     "country=?,vote_count=?,original_language=?,backdrop=?,"
+                     "cast_profiles=?,director_profiles=?,budget=?,revenue=?,"
+                     "companies=?,released=?,cast_ids=?,director_ids=? WHERE id=?",
+                     (as_text(cast_names(detail)), as_text(keyword_names(detail)),
+                      (detail.get("tagline") or "")[:200],
+                      as_text([c.get("name") for c in detail.get("production_countries") or []]),
+                      detail.get("vote_count") or 0,
+                      detail.get("original_language") or "",
+                      BACKDROP + detail["backdrop_path"] if detail.get("backdrop_path") else None,
+                      as_text(cast_photos(detail)), as_text(crew_photos(detail)),
+                      detail.get("budget") or 0, detail.get("revenue") or 0,
+                      as_text([c.get("name") for c in detail.get("production_companies") or []][:3]),
+                      detail.get("release_date") or "",
+                      as_text(cast_ids(detail)), as_text(crew_ids(detail)),
+                      row["id"]))
+        done += 1
+    conn.commit()
+    return done
+
+
+def backfill_show_details(conn, progress=None):
+    """Shows matched before country, cast and creator tracking existed have
+    none stored — one call per show catches up all three at once."""
+    rows = conn.execute("SELECT id,tmdb_id FROM shows"
+                        " WHERE matched=1 AND tmdb_id IS NOT NULL"
+                        " AND (country IS NULL OR cast_names IS NULL"
+                        " OR creators IS NULL OR backdrop IS NULL"
+                        " OR cast_profiles IS NULL OR cast_ids IS NULL)").fetchall()
+    done = 0
+    for index, row in enumerate(rows):
+        if progress:
+            progress(index + 1, len(rows), "reading cast and crew")
+        detail = tmdb("/tv/%s" % row["tmdb_id"], {"append_to_response": "credits"}) or {}
+        conn.execute(
+            "UPDATE shows SET country=?,cast_names=?,creators=?,backdrop=?,"
+            "cast_profiles=?,creator_profiles=?,status=?,networks=?,first_air=?,"
+            "seasons_count=?,cast_ids=?,creator_ids=? WHERE id=?",
+            (as_text(detail.get("origin_country") or []),
+             as_text(cast_names(detail)),
+             as_text([c.get("name") for c in detail.get("created_by") or []]),
+             BACKDROP + detail["backdrop_path"] if detail.get("backdrop_path") else None,
+             as_text(cast_photos(detail)),
+             as_text([(PROFILE + c["profile_path"] if c.get("profile_path") else "")
+                      for c in detail.get("created_by") or []]),
+             detail.get("status") or "",
+             as_text([n.get("name") for n in detail.get("networks") or []][:3]),
+             detail.get("first_air_date") or "",
+             detail.get("number_of_seasons") or 0,
+             as_text(cast_ids(detail)),
+             as_text([str(c.get("id") or "") for c in detail.get("created_by") or []]),
+             row["id"]))
+        done += 1
+    conn.commit()
+    return done
+
+
+ART_DIR = os.path.join(HERE, "nextup_art")
+# Tight on purpose: this name arrives from a URL and gets joined onto a path.
+_ART_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:jpg|jpeg|png|webp)$", re.I)
+
+# The app's three typefaces, downloaded once and served from here so the
+# page never waits on Google — text used to render in Segoe UI for a beat
+# on every launch while the real faces came over the wire, and stayed that
+# way with no connection at all. Same rule as the artwork: everything the
+# page needs is local. The same tight-name discipline as _ART_NAME_RE,
+# because these names arrive from a URL too.
+FONTS_DIR = os.path.join(HERE, "nextup_fonts")
+_FONT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:woff2|css)$")
+
+
+def art_filename(url):
+    """What a poster is cached under. TMDB's own path segment is unique and
+    content-addressed, so it doubles as the filename without inventing one."""
+    name = (url or "").rsplit("/", 1)[-1]
+    return name if name and ".." not in name and _ART_NAME_RE.match(name) else None
+
+
+def local_art(url):
+    """The copy on disk if there is one, otherwise the url it came from.
+
+    Falling back rather than failing is the point: a library populated before
+    artwork was cached, or a single image that wouldn't download, still shows
+    a poster as long as there's a connection — and shows the same blank tile
+    as before if there isn't.
+    """
+    name = art_filename(url)
+    if name and os.path.exists(os.path.join(ART_DIR, name)):
+        return "/art/" + name
+    return url or None
+
+
+def download_art(urls):
+    """Fetch whatever isn't already on disk. Returns how many arrived."""
+    wanted = {}
+    for url in urls:
+        name = art_filename(url)
+        if name and not os.path.exists(os.path.join(ART_DIR, name)):
+            wanted[name] = url
+    if not wanted:
+        return 0
+    try:
+        os.makedirs(ART_DIR, exist_ok=True)
+    except OSError:
+        return 0
+
+    def fetch(item):
+        name, url = item
+        target = os.path.join(ART_DIR, name)
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "NextUp"})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                data = resp.read()
+            if data:
+                # Written aside and moved into place, so a download cut off
+                # half way can't leave a broken image behind that then looks
+                # cached and never gets fetched again.
+                tmp = target + ".part"
+                with open(tmp, "wb") as fh:
+                    fh.write(data)
+                os.replace(tmp, target)
+        except Exception:
+            pass            # missing art is a blank space, not a failed scan
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(fetch, wanted.items()))
+    return len(wanted)
+
+
+def cache_favourite_art(kind=None, item_id=None):
+    """Backdrops and cast portraits, for favourites only.
+
+    Posters are pulled for the whole library because every screen shows them.
+    This lot is only ever seen on the favourites page, and fetching a wide
+    backdrop plus ten portraits for all 513 films to display perhaps five of
+    them would be daft. So it follows the heart: mark something, and its
+    pictures come down.
+    """
+    conn = db()
+    try:
+        urls = []
+        for table, extra in (("movies", "director_profiles"),
+                             ("shows", "creator_profiles")):
+            sql = ("SELECT backdrop, cast_profiles, %s AS crew FROM %s"
+                   " WHERE favourited_at IS NOT NULL" % (extra, table))
+            params = ()
+            if kind and item_id and table == ("movies" if kind == "movie" else "shows"):
+                sql += " AND id=?"
+                params = (item_id,)
+            elif kind:
+                continue
+            for row in conn.execute(sql, params):
+                # Backdrops are no longer shown, so there's nothing to be
+                # gained by pulling them down. The column stays populated in
+                # case it's ever wanted again.
+                urls.extend(as_list(row["cast_profiles"]))
+                urls.extend(as_list(row["crew"]))
+    finally:
+        conn.close()
+    return download_art([u for u in urls if u])
+
+
+def cache_artwork(conn, progress=None):
+    """Pull every poster and still down to disk.
+
+    Artwork was the last part of the library that still needed the internet
+    after a scan; everything else already lives in the database. Two thousand
+    images at roughly 27KB each is a rounding error beside the films
+    themselves, and it's the difference between a library that works on a
+    train and one that shows nothing but blank tiles.
+    """
+    try:
+        os.makedirs(ART_DIR, exist_ok=True)
+    except OSError as exc:
+        print("couldn't create the artwork folder: %s" % exc)
+        return 0
+
+    wanted = {}
+    for sql in ("SELECT poster FROM movies WHERE poster IS NOT NULL",
+                "SELECT poster FROM shows WHERE poster IS NOT NULL",
+                "SELECT still FROM episodes WHERE still IS NOT NULL"):
+        for row in conn.execute(sql):
+            name = art_filename(row[0])
+            if name and not os.path.exists(os.path.join(ART_DIR, name)):
+                wanted[name] = row[0]
+    if not wanted:
+        return 0
+
+    done = [0]
+    lock = threading.Lock()
+
+    def fetch(item):
+        name, url = item
+        target = os.path.join(ART_DIR, name)
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "NextUp"})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                data = resp.read()
+            if data:
+                # Written aside and moved into place, so a download cut off
+                # half way can't leave a broken image behind that then looks
+                # cached and never gets fetched again.
+                tmp = target + ".part"
+                with open(tmp, "wb") as fh:
+                    fh.write(data)
+                os.replace(tmp, target)
+        except Exception:
+            pass            # missing art is a blank tile, not a failed scan
+        with lock:
+            done[0] += 1
+            if progress and done[0] % 10 == 0:
+                progress(done[0], len(wanted), "saving artwork for offline use")
+
+    # A handful at a time: these come from a CDN rather than the API, and one
+    # at a time would take minutes for a library this size.
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(fetch, wanted.items()))
+    if progress:
+        progress(len(wanted), len(wanted), "saving artwork for offline use")
+    return len(wanted)
+
+
+def tmdb_find_movie(title, year):
+    params = {"query": title}
+    if year:
+        params["year"] = year
+    found = tmdb("/search/movie", params) or {}
+    results = found.get("results") or []
+    if not results and year:
+        found = tmdb("/search/movie", {"query": title}) or {}
+        results = found.get("results") or []
+    return results[0] if results else None
+
+
+# --- the library, in the shape the rest of the app expects ----------------
+
+class LocalLibrary(object):
+    """The SQLite store, presented as plain dictionaries for the rest of the
+    app to read."""
+
+    def __init__(self):
+        self.movies = []
+        self.shows = []
+        self.episodes = []
+        self.loaded_at = 0
+        self.error = None
+        self.lock = threading.Lock()
+
+    def load(self, force=False):
+        with self.lock:
+            # Check for new mpv activity before the freshness check, or you'd
+            # close a film and the app wouldn't notice for a minute.
+            if resume_dir_changed():
+                try:
+                    sync_playback_state()
+                except Exception:
+                    pass
+                self.loaded_at = 0
+            if not force and self.loaded_at and time.time() - self.loaded_at < 60:
+                return
+            conn = db()
+            # Everything is listed, including titles TMDB couldn't identify.
+            # A film with no poster is still a film you own; hiding it means
+            # you can't find or play it, which is worse than a blank tile.
+            self.movies = [self._movie(r) for r in
+                           conn.execute("SELECT * FROM movies")]
+            shows = list(conn.execute("SELECT * FROM shows"))
+            eps = list(conn.execute("SELECT * FROM episodes"))
+            conn.close()
+
+            self.shows = [self._show(r) for r in shows]
+            names = dict((r["id"], r["title"]) for r in shows)
+            posters = dict((r["id"], local_art(r["poster"])) for r in shows)
+            counts = defaultdict(int)
+            latest_added = defaultdict(str)
+            for e in eps:
+                counts[e["show_id"]] += 1
+                added = e["added"] or ""
+                if added > latest_added[e["show_id"]]:
+                    latest_added[e["show_id"]] = added
+            for show in self.shows:
+                show["episode"] = counts[show["tvshowid"]]
+                # A show's own row can predate its newest season by years —
+                # what "recently added" means for a show is its newest file.
+                show["dateadded"] = latest_added[show["tvshowid"]]
+
+            self.episodes = []
+            for e in eps:
+                row = self._episode(e)
+                row["showtitle"] = names.get(e["show_id"], "")
+                row["art"] = {"thumb": row["still"] or posters.get(e["show_id"])}
+                self.episodes.append(row)
+            self.loaded_at = time.time()
+            self.error = None
+
+    def _movie(self, r):
+        return {
+            "movieid": r["id"], "title": r["title"], "originaltitle": r["title"],
+            "year": r["year"], "released": r["released"] or "",
+            "genre": as_list(r["genres"]),
+            "director": as_list(r["directors"]), "rating": r["tmdb_rating"] or 0,
+            "userrating": r["userrating"] or 0, "runtime": r["runtime"] or 0,
+            "playcount": r["playcount"] or 0, "dateadded": r["added"],
+            "resume": {"position": r["resume_pos"] or 0, "total": r["resume_total"] or 0},
+            "last_played": r["last_played"] or "",
+            "art": {"poster": local_art(r["poster"])}, "plot": r["plot"] or "",
+            # TMDB's own one-line pitch — the poster line, "Earn. Spend.
+            # Party." It was in the table all along and only the detail page
+            # ever read it.
+            "tagline": r["tagline"] or "",
+            # Wide art rides along with the poster. It was only ever fetched for
+            # the detail page, which then never drew it.
+            "backdrop": local_art(r["backdrop"]),
+            "uniqueid": {"tmdb": r["tmdb_id"]} if r["tmdb_id"] else {},
+            "imdbnumber": "", "set": r["collection_name"] or "",
+            "setid": r["collection_id"] or 0, "file": r["path"],
+            "identified": (r["matched"] or 0) > 0,
+            "watchlisted": bool(r["watchlisted_at"]),
+            "country": as_list(r["country"]), "votes": r["vote_count"] or 0,
+            "language": r["original_language"] or "",
+            "favourited": bool(r["favourited_at"]),
+        }
+
+    def _show(self, r):
+        return {
+            "tvshowid": r["id"], "title": r["title"], "year": r["year"],
+            "genre": as_list(r["genres"]), "rating": r["tmdb_rating"] or 0,
+            "userrating": r["userrating"] or 0, "episode": 0,
+            "plot": r["plot"] or "", "art": {"poster": local_art(r["poster"])},
+            "backdrop": local_art(r["backdrop"]),
+            "uniqueid": {"tmdb": r["tmdb_id"]} if r["tmdb_id"] else {},
+            "imdbnumber": "", "dateadded": "",
+            "identified": (r["matched"] or 0) > 0,
+            "watchlisted": bool(r["watchlisted_at"]),
+            "country": as_list(r["country"]),
+            "cast_list": as_list(r["cast_names"]), "creators": as_list(r["creators"]),
+            "favourited": bool(r["favourited_at"]),
+        }
+
+    def _episode(self, r):
+        return {
+            "episodeid": r["id"], "tvshowid": r["show_id"],
+            "season": r["season"], "episode": r["episode"],
+            "title": r["title"] or ("Episode %d" % (r["episode"] or 0)),
+            "plot": r["plot"] or "", "still": local_art(r["still"]),
+            "playcount": r["playcount"] or 0, "runtime": r["runtime"] or 0,
+            "userrating": r["userrating"] or 0,
+            "resume": {"position": r["resume_pos"] or 0, "total": r["resume_total"] or 0},
+            "last_played": r["last_played"] or "",
+            "art": {}, "dateadded": r["added"], "file": r["path"],
+            "showtitle": "",
+        }
+
+    # -- reads and writes --------------------------------------------------
+    def field(self, kind, item_id, name):
+        table = {"movie": "movies", "episode": "episodes", "tvshow": "shows"}[kind]
+        conn = db()
+        row = conn.execute("SELECT %s v FROM %s WHERE id=?" % (name, table),
+                           (item_id,)).fetchone()
+        conn.close()
+        return row["v"] if row else None
+
+    def set_field(self, kind, item_id, field, value):
+        table = {"movie": "movies", "episode": "episodes", "tvshow": "shows"}[kind]
+        conn = db()
+        conn.execute("UPDATE %s SET %s=? WHERE id=?" % (table, field), (value, item_id))
+        conn.commit()
+        conn.close()
+        self.loaded_at = 0
+
+    def path_for(self, kind, item_id):
+        table = {"movie": "movies", "episode": "episodes"}.get(kind)
+        if not table:
+            return None
+        conn = db()
+        row = conn.execute("SELECT path FROM %s WHERE id=?" % table, (item_id,)).fetchone()
+        conn.close()
+        return row["path"] if row else None
+
+
+LOCAL = LocalLibrary()
+LIB = LOCAL
+
+
+# --- playback via mpv -----------------------------------------------------
+
+WATCH_LATER = os.path.join(HERE, "nextup_resume")
+
+# Shipped alongside the app first, so a self-contained install doesn't
+# depend on what else happens to be on the machine — but split by platform.
+# A .exe sitting next to us is NOT a candidate on a Unix box: os.path.isfile
+# says yes to it quite happily, and handing a PE32 binary to exec() fails
+# with nothing useful to read. That single line cost an evening.
+if os.name == "nt":
+    MPV_GUESSES = [
+        os.path.join(HERE, "mpv.exe"),
+        os.path.join(HERE, "mpv", "mpv.exe"),
+        r"C:\Program Files\MPV Player\mpv.exe",
+        r"C:\Program Files\mpv\mpv.exe",
+        r"C:\Program Files (x86)\MPV Player\mpv.exe",
+        r"C:\Program Files (x86)\mpv\mpv.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\mpv\mpv.exe"),
+    ]
+else:
+    MPV_GUESSES = [
+        # The bundled copy: an official mpv.app dropped in mac/ by whoever
+        # packaged this. The binary inside the bundle is an ordinary CLI mpv.
+        os.path.join(HERE, "mac", "mpv.app", "Contents", "MacOS", "mpv"),
+        os.path.join(HERE, "mpv.app", "Contents", "MacOS", "mpv"),
+        os.path.join(HERE, "mac", "mpv"),
+        "/Applications/mpv.app/Contents/MacOS/mpv",
+        os.path.expanduser("~/Applications/mpv.app/Contents/MacOS/mpv"),
+        "/opt/homebrew/bin/mpv", "/usr/local/bin/mpv", "/usr/bin/mpv",
+    ]
+
+
+# mpv's config lives in the app folder, not ~/.config/mpv: the point is a
+# folder you can move between machines with its playback settings intact,
+# and not to quietly fight any other mpv the user installs later.
+MPV_CONFIG_DIR = os.path.join(HERE, "mac", "mpv_config") \
+    if os.name != "nt" else ""
+
+
+def find_mpv():
+    """Work out where mpv actually is, and say something useful when it isn't
+    there. A blank setting is not a failure — the usual install locations get
+    checked before giving up."""
+    configured = (CONFIG.get("mpv_path") or "").strip().strip('"').strip("'")
+    if configured:
+        if os.path.isfile(configured):
+            return configured
+        raise AppError(
+            "No mpv at %s. Check the path on the Settings tab — it should end "
+            "in %s." % (configured, "mpv.exe" if os.name == "nt" else "mpv"))
+    for guess in MPV_GUESSES:
+        if os.path.isfile(guess):
+            return guess
+    found = shutil.which("mpv")
+    if found:
+        return found
+    if os.name == "nt":
+        raise AppError(
+            "Can't find mpv anywhere. Install it with "
+            "'winget install --id shinchiro.mpv -e' in PowerShell as administrator, "
+            "then put the full path to mpv.exe on the Settings tab.")
+    raise AppError(
+        "Can't find mpv anywhere. This copy should have come with one in "
+        "mac/mpv.app — if that folder is missing, install mpv with "
+        "'brew install mpv', then put the full path to it on the Settings tab.")
+
+
+def find_ytdlp():
+    """Where yt-dlp actually is, for the YouTube-hosted channel.
+
+    winget installing it only updates the registry's PATH — a process
+    already running (this one, most likely) won't see that until it
+    restarts. Rather than make you restart the app every time you install
+    something, check the one place winget actually put the file too."""
+    beside = (os.path.join(HERE, "yt-dlp.exe"), os.path.join(HERE, "yt-dlp")) \
+        if os.name == "nt" else (os.path.join(HERE, "mac", "yt-dlp"),
+                                 os.path.join(HERE, "yt-dlp"))
+    for cand in beside:
+        if os.path.isfile(cand):
+            return cand            # shipped alongside the app, same as mpv
+    found = shutil.which("yt-dlp") or shutil.which("youtube-dl")
+    if found:
+        return found
+    local = os.environ.get("LOCALAPPDATA", "")
+    if local:
+        hits = glob.glob(os.path.join(
+            local, "Microsoft", "WinGet", "Packages", "yt-dlp.yt-dlp_*", "yt-dlp.exe"))
+        if hits:
+            return hits[0]
+    return None
+
+
+# A stat against a drive that has spun down, or is reconnecting, or is gone,
+# doesn't fail — it waits for as long as the drive feels like. The watchdog
+# caught a channel change sitting six seconds inside a single os.path.exists.
+# Kept under the watchdog's six, so a slow drive reads as this message and
+# not as a stack dump.
+MEDIA_STAT_SECONDS = 3.0
+
+
+def media_file_check(path):
+    """os.path.exists with a deadline: True, False, or None for no answer.
+
+    The stat runs on a thread of its own so this can stop waiting; the
+    abandoned thread finishes whenever the drive gets round to it and costs
+    nothing in the meantime.
+    """
+    answer = []
+    probe = threading.Thread(
+        target=lambda: answer.append(bool(os.path.exists(path))), daemon=True)
+    probe.start()
+    probe.join(MEDIA_STAT_SECONDS)
+    return answer[0] if answer else None
+
+
+def require_media_file(path):
+    """The path, confirmed present — or the right complaint about why not.
+
+    A drive that isn't answering is a different fact from a file that isn't
+    there. Telling someone to rescan their folders because a disk was asleep
+    points them at the one action that would make it worse."""
+    present = media_file_check(path) if path else False
+    if present is None:
+        raise AppError("The drive holding that file isn't answering — asleep "
+                       "or unplugged, most likely. Give it a moment and try "
+                       "again.")
+    if not present:
+        raise AppError("That file has moved or been deleted. Rescan your "
+                       "folders on the Settings tab.")
+    return path
+
+
+# --- talking to a running mpv ---------------------------------------------
+#
+# mpv can open a small JSON control channel: a named pipe on Windows, a unix
+# socket everywhere else. Three things become possible that weren't before —
+# the next title can replace the current one in the SAME window, the position
+# is readable while something is playing rather than only once it stops, and
+# a file reaching its end is something we're told rather than something
+# inferred from what mpv left behind on disk.
+#
+# Every call opens the connection, asks one thing, and closes again. At one
+# poll a second that's a little wasteful, and it buys away the alternative: a
+# long-lived connection with a reader thread multiplexing replies against
+# asynchronous events, which is a lot of machinery to get subtly wrong.
+
+_PLAY_LOCK = threading.Lock()
+_PLAY_PROC = [None]
+_KEEP_OPEN = [False]      # is the current window set to wait for a next item?
+
+# Deliberately NOT tagged with this process's id. mpv outlives the app — it's
+# a separate process — so restarting Next Up used to leave a player running
+# that the new instance had no way of reaching. A channel would then reach the
+# end of a programme with nobody listening, and just sit there on an empty
+# window. A fixed name means a fresh instance can find it again.
+if os.name == "nt":
+    IPC_PATH = r"\\.\pipe\nextup-mpv"
+else:
+    IPC_PATH = os.path.join(tempfile.gettempdir(), "nextup-mpv.sock")
+
+# What was playing, kept on disk so a restart can pick the thread back up.
+PLAY_STATE_PATH = os.path.join(HERE, "nextup_playing.json")
+_ADOPTED = [False]      # talking to an mpv a previous run started
+
+_IPC_SEQ = [0]      # mpv matches each reply to a request by this
+
+
+def mpv_alive():
+    proc = _PLAY_PROC[0]
+    if proc is not None:
+        return proc.poll() is None
+    # No handle of our own — but a player left behind by a previous run may
+    # still be there and reachable over the control channel.
+    return _ADOPTED[0]
+
+
+def remember_playing(kind, item_id, channel_id, keep_open):
+    """Write down what's on, so a restart can pick the thread back up."""
+    save_json(PLAY_STATE_PATH, {"kind": kind, "id": item_id,
+                                "channel_id": channel_id,
+                                "keep_open": bool(keep_open)})
+
+
+def forget_playing():
+    try:
+        if os.path.exists(PLAY_STATE_PATH):
+            os.remove(PLAY_STATE_PATH)
+    except OSError:
+        pass
+
+
+def adopt_orphan_mpv():
+    """Reconnect to a player a previous run of this app left behind.
+
+    Closing Next Up doesn't close mpv, and until this existed the new
+    instance had no idea the old player was there. A channel would reach the
+    end of a programme with nothing listening and stop dead on an empty
+    window — which is exactly what it did.
+
+    An idle one gets closed: it's showing nothing, and nobody wants a blank
+    window left over from a session that ended. One still playing is adopted
+    instead, so what's on carries on and the channel keeps advancing.
+    """
+    _ADOPTED[0] = True                 # so mpv_command will try the pipe
+    try:
+        playing = mpv_get("path")
+        idle = mpv_get("idle-active")
+    except Exception:
+        playing, idle = None, None
+    if playing is None and not idle:
+        _ADOPTED[0] = False            # nothing there at all
+        forget_playing()
+        return
+
+    if idle or not playing:
+        print("  mpv    : closing an empty player left over from last time")
+        mpv_command("quit")
+        _ADOPTED[0] = False
+        forget_playing()
+        return
+
+    state = load_json(PLAY_STATE_PATH, {}) or {}
+    kind, item_id = state.get("kind"), state.get("id")
+    if not kind or not item_id:
+        _ADOPTED[0] = False
+        return
+    _KEEP_OPEN[0] = bool(state.get("keep_open"))
+    title, sub, art = _play_display(kind, item_id)
+    with _PLAY_LOCK:
+        NOW_PLAYING.update(type=kind, id=item_id, title=title or "Playing",
+                           sub=sub, art=art, started_at=time.time(),
+                           channel=state.get("channel_name"),
+                           channel_id=state.get("channel_id"),
+                           position=None, duration=None)
+    print("  mpv    : picked up %s already playing" % (title or kind))
+
+
+def _ipc_open():
+    if os.name == "nt":
+        return open(IPC_PATH, "r+b", buffering=0)
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(4)
+    sock.connect(IPC_PATH)
+    return sock.makefile("rwb", buffering=0)
+
+
+# mpv being ALIVE is not the same as mpv being ready to talk. Loading a
+# file, resolving a YouTube URL, or rebuilding the audio chain after a track
+# change all occupy it for seconds at a time, and a command sent into one of
+# those moments waits.
+IPC_REPLY_TIMEOUT = 5.0
+
+# One connection, and ONE thread that does all the talking on it: write the
+# command, then read until that command's answer turns up.
+#
+# Both halves in the same thread is the part that matters. A Windows named
+# pipe handle opened without overlapped I/O is synchronous, and a synchronous
+# handle serialises everything: while a ReadFile is pending, a WriteFile on
+# the same handle waits for it. A permanent reader thread with separate
+# writers therefore doesn't share a connection, it deadlocks one — the reader
+# sits waiting for mpv, the writer sits waiting for the reader, and mpv sits
+# waiting for a command that was never sent. That is what stopped the remote
+# seeing anything; nothing was wrong with the reading itself.
+#
+# A connection per command avoided that by never overlapping, and cost a
+# thread every time a caller timed out, because an abandoned pipe read never
+# ends. Here nothing is ever abandoned: callers queue a request and wait on
+# an event, and the one worker carries on regardless of whether anyone is
+# still listening. Giving up costs a discarded reply and nothing else.
+_IPC_QUEUE = queue.Queue()
+_IPC_STARTED = threading.Lock()
+_IPC_WORKER = [None]
+
+# If the worker is stuck on a player that stopped answering, callers still
+# return on time but their requests pile up behind it. Past this many, stop
+# accepting: the answer is already "mpv isn't talking", and a queue is a poor
+# place to learn it.
+IPC_MAX_QUEUED = 64
+
+
+class _IpcRequest(object):
+    __slots__ = ("args", "rid", "reply", "done", "abandoned")
+
+    def __init__(self, args, rid):
+        self.args = args
+        self.rid = rid
+        self.reply = None
+        self.done = threading.Event()
+        self.abandoned = False
+
+    def finish(self, reply):
+        self.reply = reply
+        self.done.set()
+
+
+def _ipc_worker():
+    """The only thing that ever touches the pipe."""
+    conn = None
+    buffered = b""
+    while True:
+        request = _IPC_QUEUE.get()
+        if request.abandoned:
+            continue                    # caller gave up before we reached it
+        if conn is None:
+            try:
+                conn = _ipc_open()
+                buffered = b""
+            except Exception:
+                request.finish(None)
+                continue
+        reply = None
+        try:
+            conn.write((json.dumps({"command": list(request.args),
+                                    "request_id": request.rid}) + "\n").encode())
+            reply, buffered = _ipc_await(conn, request.rid, buffered)
+        except Exception:
+            reply = None
+        if reply is None:
+            # A connection that failed once is finished with. Closing it here
+            # is safe precisely because this thread is the only reader.
+            try:
+                conn.close()
+            except Exception:
+                pass
+            conn, buffered = None, b""
+        request.finish(reply)
+
+
+def _ipc_await(conn, rid, buffered):
+    """Read until the answer to rid arrives. Events, and answers to requests
+    whose callers have already given up, go past."""
+    while True:
+        while b"\n" in buffered:
+            line, buffered = buffered.split(b"\n", 1)
+            if not line.strip():
+                continue
+            try:
+                message = json.loads(line.decode("utf-8", "replace"))
+            except ValueError:
+                continue
+            if "event" in message:
+                continue
+            if message.get("request_id") == rid:
+                return message, buffered
+        chunk = conn.read(65536)
+        if not chunk:
+            return None, b""            # mpv closed its end
+        buffered += chunk
+
+
+def _ipc_start():
+    if _IPC_WORKER[0] is not None:
+        return
+    with _IPC_STARTED:
+        if _IPC_WORKER[0] is None:
+            worker = threading.Thread(target=_ipc_worker, daemon=True,
+                                      name="mpv-ipc")
+            worker.start()
+            _IPC_WORKER[0] = worker
+
+
+def mpv_command(*args):
+    """Send one command, wait for its reply. None if mpv can't be reached
+    or didn't answer in time."""
+    if not mpv_alive():
+        return None
+    if _IPC_QUEUE.qsize() >= IPC_MAX_QUEUED:
+        return None
+    _ipc_start()
+    with _IPC_STARTED:
+        _IPC_SEQ[0] += 1
+        request = _IpcRequest(args, _IPC_SEQ[0])
+    _IPC_QUEUE.put(request)
+    if not request.done.wait(IPC_REPLY_TIMEOUT):
+        request.abandoned = True
+        return None
+    return request.reply
+
+
+def mpv_get(name, default=None):
+    reply = mpv_command("get_property", name)
+    if not reply or reply.get("error") != "success":
+        return default
+    value = reply.get("data")
+    return default if value is None else value
+
+
+def _mpv_load(path, start, keep_open):
+    """Put a file into the window that's already open. True if it landed.
+
+    The per-file options form of loadfile is the tidy way to open part way
+    in, but the argument list for it changed shape between mpv releases, so
+    a plain load followed by a seek is kept as the fallback for older ones.
+    """
+    mpv_command("write-watch-later-config")   # save where the outgoing file got to
+    mpv_command("set_property", "idle", "yes" if keep_open else "no")
+
+    seek = int(start) if start and start > 5 else 0
+    # start is sent on EVERY load, including as 0, and never left unsaid.
+    # It's a global option on the mpv instance rather than something scoped
+    # to the file it was launched with, so tuning into a channel 25 minutes
+    # deep would drop every following programme 25 minutes in as well —
+    # inheriting the offset you happened to join at, forever.
+    options = {"start": str(seek)}
+    if keep_open:
+        # And on a channel, mpv's own resume must not get a vote either: what
+        # plays is decided by the schedule, not by where you last left this
+        # particular episode. Positions are still SAVED, so it keeps showing
+        # up in Continue — this only stops them being read back here.
+        options["resume-playback"] = "no"
+    reply = mpv_command("loadfile", path, "replace", -1, options)
+    if reply and reply.get("error") == "success":
+        return True
+
+    # Older mpv, without per-file options on loadfile. Clear the inherited
+    # start by hand instead, then seek once the file is actually up.
+    mpv_command("set_property", "start", "none")
+    reply = mpv_command("loadfile", path, "replace")
+    if not (reply and reply.get("error") == "success"):
+        return False
+    if seek:
+        for _ in range(25):         # wait for it to be far enough along to seek
+            if mpv_get("duration"):
+                break
+            time.sleep(0.2)
+        mpv_command("seek", seek, "absolute")
+    return True
+
+
+def mpv_environment():
+    """The environment every mpv we launch is given.
+
+    mpv looks for yt-dlp on its OWN PATH as it starts, so a copy sitting
+    beside the app — the packaged build ships one — is invisible to it
+    however plainly this process can see it. Handing it an environment where
+    that directory is on PATH is what makes the live channel work.
+
+    Done for every launch rather than only the live one on purpose: it means
+    the window already open can be handed a stream later without having to
+    be replaced by one that can.
+    """
+    try:
+        ytdlp = find_ytdlp()
+    except Exception:
+        ytdlp = None
+    if not ytdlp:
+        return None
+    env = dict(os.environ)
+    env["PATH"] = (os.path.dirname(os.path.abspath(ytdlp))
+                   + os.pathsep + env.get("PATH", ""))
+    return env
+
+
+def mpv_play(path, start=0, keep_open=False):
+    """Play a file — in the window that's already open, if there is one.
+
+    start: seconds in to open at — how a channel "tunes in" mid-programme.
+
+    keep_open: when this file ends, hold the window open and wait instead of
+    closing. That's what a channel wants, so the next programme can arrive in
+    the same window a moment later. Something picked by hand doesn't: when
+    it's finished, it's finished.
+
+    Returns the process handle, so callers can tell when it exits."""
+    import subprocess
+    exe = find_mpv()
+    try:
+        os.makedirs(WATCH_LATER, exist_ok=True)
+    except OSError as exc:
+        raise AppError("Couldn't create the resume folder: %s" % exc)
+
+    if mpv_alive() and _mpv_load(path, start, keep_open):
+        _KEEP_OPEN[0] = keep_open
+        return _PLAY_PROC[0]
+
+    # Nothing running, or it stopped answering — start one.
+    stop_current_playback()
+    args = [
+        exe, path,
+        "--save-position-on-quit",
+        "--write-filename-in-watch-later-config",
+        "--watch-later-directory=" + WATCH_LATER,
+        "--osc=yes",
+        "--input-ipc-server=" + IPC_PATH,
+        "--idle=" + ("yes" if keep_open else "no"),
+    ]
+    if MPV_CONFIG_DIR:
+        args.append("--config-dir=" + MPV_CONFIG_DIR)
+    if keep_open:
+        # Same reasoning as in _mpv_load: on a channel the schedule decides
+        # where to come in, not a half-watched position saved earlier.
+        args.append("--resume-playback=no")
+    if start and start > 5:
+        args.append("--start=%d" % int(start))
+    try:
+        proc = subprocess.Popen(args, env=mpv_environment())
+    except OSError as exc:
+        raise AppError("mpv is at %s but wouldn't start: %s" % (exe, exc))
+    _KEEP_OPEN[0] = keep_open
+    _ADOPTED[0] = False
+    return proc
+
+
+def _ytdl_reachable():
+    """Can the mpv that's ALREADY open find yt-dlp?
+
+    Yes if it's on this process's PATH, because that window inherited it.
+    Yes if we started that window ourselves, because every launch now gets
+    an environment that includes it. A player adopted from an older run of
+    the app is the one case that can't be vouched for — and a stream loaded
+    into an mpv that can't resolve it fails silently, with a black window and
+    no error, so it's worth not guessing.
+    """
+    if shutil.which("yt-dlp") or shutil.which("youtube-dl"):
+        return True
+    return _PLAY_PROC[0] is not None
+
+
+def mpv_play_url(url):
+    """Play a stream instead of a file — in the window that's already open,
+    if there is one.
+
+    No resume tracking: a live broadcast has no length and no position that
+    means anything later. keep_open stays off for the same reason — there's
+    no next programme to hold the window for, so when a stream ends mpv
+    closes and the monitor tidies up, exactly as it always has.
+    """
+    import subprocess
+    exe = find_mpv()
+    needs_ytdlp = "youtube.com" in url or "youtu.be" in url
+    if needs_ytdlp and not find_ytdlp():
+        raise AppError(
+            "This channel streams from YouTube, which mpv can only open "
+            "with yt-dlp installed. Install it with "
+            "'winget install yt-dlp.yt-dlp' in PowerShell as administrator, "
+            "then try again.")
+
+    # Into the window that's already up, the same as every other channel
+    # change. Without this a live channel shut the window and opened another
+    # — and that replacement was started without a control channel, so from
+    # then on nothing could reach it: not the progress bar, not the remote,
+    # and not tuning back off the live channel afterwards.
+    if mpv_alive() and (not needs_ytdlp or _ytdl_reachable()):
+        if _mpv_load(url, 0, False):
+            _KEEP_OPEN[0] = False
+            return _PLAY_PROC[0]
+
+    # Nothing running, or it stopped answering — start one.
+    stop_current_playback()
+    args = [exe, url, "--osc=yes", "--input-ipc-server=" + IPC_PATH]
+    if MPV_CONFIG_DIR:
+        args.append("--config-dir=" + MPV_CONFIG_DIR)
+    try:
+        proc = subprocess.Popen(args, env=mpv_environment())
+    except OSError as exc:
+        raise AppError("mpv is at %s but wouldn't start: %s" % (exe, exc))
+    _KEEP_OPEN[0] = False
+    _ADOPTED[0] = False
+    return proc
+
+
+# --- "currently playing", for the banner every tab shares -----------------
+#
+# The position here comes from asking mpv directly over the control channel
+# above, so it's live rather than a guess from how long ago we launched
+# something. When mpv can't be reached — an older build, a connection that
+# didn't come up — position stays None and everything still works, just
+# without the progress bar. The watch-later files remain the fallback record
+# of where you got to, exactly as before.
+
+NOW_PLAYING = {"type": None, "id": None, "title": None, "sub": None,
+               "art": None, "started_at": 0, "channel": None,
+               "channel_id": None, "position": None, "duration": None}
+
+
+def stop_current_playback():
+    """Ask whatever we last launched to close before starting something
+    new, so two things never play over each other.
+
+    Both branches below ask politely rather than terminating outright, so
+    mpv still runs its own quit path and --save-position-on-quit still
+    fires. A hard kill would skip that and silently lose your position,
+    which is exactly why there's no "stop" button elsewhere in this app;
+    here it's unavoidable, so it has to be the gentle kind."""
+    with _PLAY_LOCK:
+        proc = _PLAY_PROC[0]
+    if not proc or proc.poll() is not None:
+        return
+    import subprocess
+    try:
+        if os.name == "nt":
+            # taskkill WITHOUT /F: Windows sends the process's window a close
+            # request instead of killing it.
+            subprocess.run(["taskkill", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=5)
+        else:
+            # The same bargain on mac and Linux: SIGTERM, which mpv handles
+            # with its own orderly shutdown. Not proc.kill(), which is
+            # SIGKILL and would lose the position.
+            proc.terminate()
+    except Exception:
+        pass
+
+
+def _play_display(kind, item_id):
+    """Title, a subtitle line, and a poster for whatever just started."""
+    LIB.load()
+    if kind == "episode":
+        ep = next((e for e in LIB.episodes if e.get("episodeid") == item_id), None)
+        if not ep:
+            return None, None, None
+        show = next((s for s in LIB.shows
+                     if s.get("tvshowid") == ep.get("tvshowid")), None)
+        code = "S%02dE%02d" % (ep.get("season") or 0, ep.get("episode") or 0)
+        title = (show or {}).get("title") or ep.get("showtitle") or "Episode"
+        sub = "%s · %s" % (code, ep.get("title") or "")
+        art = art_url((show or {}).get("art", {}).get("poster")
+                      or ep.get("art", {}).get("thumb"))
+        return title, sub, art
+    movie = next((m for m in LIB.movies if m.get("movieid") == item_id), None)
+    if not movie:
+        return None, None, None
+    return (movie.get("title"), str(movie.get("year") or ""),
+            art_url(movie.get("art", {}).get("poster")))
+
+
+def note_now_playing(proc, kind, item_id, fallback_title, channel=None,
+                     channel_id=None):
+    afk_new_file()
+    title, sub, art = _play_display(kind, item_id)
+    with _PLAY_LOCK:
+        _PLAY_PROC[0] = proc
+        NOW_PLAYING.update(type=kind, id=item_id, title=title or fallback_title,
+                           sub=sub, art=art, started_at=time.time(),
+                           channel=channel, channel_id=channel_id,
+                           position=None, duration=None)
+    remember_playing(kind, item_id, channel_id, _KEEP_OPEN[0])
+
+
+def note_live_playing(proc, title, channel):
+    with _PLAY_LOCK:
+        _PLAY_PROC[0] = proc
+        NOW_PLAYING.update(type="live", id=None, title=title, sub="Live",
+                           art=None, started_at=time.time(), channel=channel,
+                           channel_id=None, position=None, duration=None)
+
+
+# Below this, something that closed without leaving a resume point was far
+# more likely opened and shut than watched. mpv writes no watch-later file
+# when you quit almost immediately either, so from the outside those two
+# cases look identical — and claiming you watched something you didn't is
+# the worse of the two errors to make.
+MIN_WATCH_SECONDS = 60
+
+
+# Close enough to the end to call it watched. Credits, or a few seconds
+# trimmed off the file, shouldn't cost you the play.
+WATCHED_FRACTION = 0.97
+
+
+def _record_play(table, kind, item_id, **watched):
+    title = LOCAL.field(kind, item_id, "title")
+    conn = db()
+    conn.execute("UPDATE %s SET playcount=COALESCE(playcount,0)+1,resume_pos=0,"
+                 "resume_total=0,last_played=? WHERE id=?" % table,
+                 (now_stamp(), item_id))
+    conn.commit()
+    conn.close()
+    LOCAL.loaded_at = 0
+    log_event(kind, item_id, title, "watched", **watched)
+
+
+def _record_position(table, kind, item_id, position, duration, ran_for=None):
+    """Where you got to, taken from mpv itself rather than from the
+    watch-later file it may not have written yet.
+
+    This also goes in the history. Stopping half way through is a thing you
+    did with an evening, and a watch history that only lists what you saw
+    through to the end is missing most of them."""
+    conn = db()
+    conn.execute("UPDATE %s SET resume_pos=?,resume_total=? WHERE id=?" % table,
+                 (position, duration or 0, item_id))
+    conn.commit()
+    conn.close()
+    LOCAL.loaded_at = 0
+    log_event(kind, item_id, LOCAL.field(kind, item_id, "title"), "stopped",
+              seconds=ran_for, position=position, total=duration)
+
+
+def note_playback_finished(kind, item_id, ran_for, position=None, duration=None):
+    try:
+        _note_playback_finished(kind, item_id, ran_for, position, duration)
+    finally:
+        # Every sitting moves every score, since they're relative.
+        if kind in ("movie", "episode") and item_id:
+            refresh_watch_scores()
+
+
+def _note_playback_finished(kind, item_id, ran_for, position=None, duration=None):
+    """Close the books on something that has stopped playing.
+
+    When the control channel is up this isn't inference at all: the position
+    and the duration were both read from mpv while it played, so "you
+    finished it" and "you got forty minutes in" are things we watched
+    happen.
+
+    Without it — an older mpv, a connection that never came up — it falls
+    back to reading what mpv left on disk. mpv writes a watch-later file
+    when you quit part way and deletes it at the end of a file, so no file
+    after a decent stretch of playing means you saw it out. That reading is
+    the reason MIN_WATCH_SECONDS exists; the observed path needs no such
+    guess.
+    """
+    if kind not in ("movie", "episode") or not item_id:
+        return          # a live stream has no position and nothing to record
+    table = "movies" if kind == "movie" else "episodes"
+    try:
+        if position is not None and duration:
+            if position >= duration * WATCHED_FRACTION:
+                _record_play(table, kind, item_id, seconds=ran_for,
+                             position=position, total=duration)
+            else:
+                _record_position(table, kind, item_id, position, duration,
+                                 ran_for=ran_for)
+            return
+
+        if ran_for < MIN_WATCH_SECONDS:
+            return
+        # If a position was already on record, then quitting part way is
+        # what sync_playback_state itself handles — let it, rather than
+        # counting the same play twice.
+        prior = LOCAL.field(kind, item_id, "resume_pos") or 0
+        sync_playback_state()
+        if prior:
+            return
+        path = LOCAL.path_for(kind, item_id)
+        if not path or os.path.normcase(path) in read_resume_points():
+            return      # mpv saved a position, so you stopped part way
+        # No position and no duration on this path — how long the player was
+        # open is the one number that was actually observed, so it's the only
+        # one recorded.
+        _record_play(table, kind, item_id, seconds=ran_for)
+    except Exception:
+        # Bookkeeping must never take down the route that polls this.
+        pass
+
+
+PLAY_POLL_SECONDS = 1.0
+
+
+def playback_monitor():
+    """Watch whatever is playing, once a second, for as long as the app runs.
+
+    Two jobs. It keeps the position fresh so the banner can show a real
+    progress bar. And it notices the moment a programme ends — which on a
+    channel is not the moment mpv closes, because a channel leaves the
+    window open on purpose. mpv goes idle instead, and that idle moment is
+    the cue to put the next scheduled programme on.
+    """
+    while True:
+        time.sleep(PLAY_POLL_SECONDS)
+        try:
+            _monitor_tick()
+        except Exception:
+            log_problem("playback monitor")
+
+
+# A file that has just been handed over takes a moment to start. Until it
+# does, mpv still reports itself idle — and believing that would read as
+# "the programme ended" the instant it began, skipping through a channel as
+# fast as it could load.
+LOAD_GRACE_SECONDS = 4
+
+
+def _monitor_tick():
+    # First, because an unanswered question outlives the thing that raised
+    # it: by now NOW_PLAYING is empty and every check below would return.
+    afk_tick()
+    with _PLAY_LOCK:
+        proc = _PLAY_PROC[0]
+        playing = NOW_PLAYING.get("type")
+        started = NOW_PLAYING.get("started_at") or 0
+    if playing is None:
+        return
+    if proc is None and not _ADOPTED[0]:
+        return
+
+    if proc is not None and proc.poll() is not None:
+        _finish_current("closed")       # mpv gone entirely — window closed
+        return
+    if proc is None and mpv_get("path", "__gone__") == "__gone__" \
+            and not mpv_get("idle-active"):
+        # Adopted player, and the pipe has stopped answering: it has been
+        # closed. Without this check nothing would ever notice, because
+        # there's no process handle here to poll.
+        _ADOPTED[0] = False
+        _finish_current("closed")
+        return
+    if playing == "live":
+        return                          # a stream has no position to measure
+
+    settling = (time.time() - started) < LOAD_GRACE_SECONDS
+    if not settling and mpv_get("idle-active"):
+        _finish_current("ended")        # holding the window open, file over
+        return
+
+    position = mpv_get("time-pos")
+    if position is None:
+        return                          # no control channel, or still loading
+    afk_watch_mpv(position)
+    duration = mpv_get("duration")
+    with _PLAY_LOCK:
+        if _PLAY_PROC[0] is proc:
+            NOW_PLAYING["position"] = position
+            NOW_PLAYING["duration"] = duration
+
+
+_SHUTDOWN_DONE = [False]
+
+
+def shutdown_playback():
+    """Take mpv with us when the app closes.
+
+    mpv is an ordinary child process, and nothing was ending it — so closing
+    the window left a player running with nothing driving it, and the sitting
+    it was in the middle of never got an ending written either. Both of those
+    are the same missing step.
+
+    Order matters three ways:
+
+      * the position is read FIRST, while mpv is still there to ask.
+      * stop_current_playback() goes next. It asks politely, so mpv runs its
+        own quit path and --save-position-on-quit still fires.
+      * _finish_current LAST, and with "closed" rather than "ended": "ended"
+        means the programme finished and is the cue to start the next
+        episode, which is not a thing to do on the way out the door. It also
+        clears the process handle, so calling it first would leave nothing
+        for stop_current_playback to stop.
+    """
+    if _SHUTDOWN_DONE[0]:
+        return
+    _SHUTDOWN_DONE[0] = True
+    try:
+        position = mpv_get("time-pos")
+        duration = mpv_get("duration")
+        if position is not None:
+            with _PLAY_LOCK:
+                if NOW_PLAYING.get("type") is not None:
+                    NOW_PLAYING["position"] = position
+                    NOW_PLAYING["duration"] = duration
+    except Exception:
+        pass
+    try:
+        stop_current_playback()
+    except Exception:
+        pass
+    try:
+        # A player we adopted rather than started has no process handle here,
+        # so the control channel is the only way to reach it.
+        mpv_command("quit")
+    except Exception:
+        pass
+    try:
+        _finish_current("closed")
+    except Exception:
+        pass
+
+
+def next_episode_after(episode_id):
+    """The next episode of the same show that you actually own.
+
+    By season and episode number rather than by whatever order the database
+    hands back, and skipping season 0 — specials sit outside the run and
+    aren't what "next" means to anyone watching.
+    """
+    LIB.load()
+    here = next((e for e in LIB.episodes if e.get("episodeid") == episode_id), None)
+    if not here:
+        return None
+    later = sorted(
+        [e for e in LIB.episodes
+         if e.get("tvshowid") == here.get("tvshowid")
+         and (e.get("season") or 0) > 0
+         and episode_order(e) > episode_order(here)],
+        key=episode_order)
+    return later[0] if later else None
+
+
+def previous_episode_before(episode_id):
+    """The one before, by the same reckoning as next_episode_after."""
+    LIB.load()
+    here = next((e for e in LIB.episodes if e.get("episodeid") == episode_id), None)
+    if not here:
+        return None
+    earlier = sorted(
+        [e for e in LIB.episodes
+         if e.get("tvshowid") == here.get("tvshowid")
+         and (e.get("season") or 0) > 0
+         and episode_order(e) < episode_order(here)],
+        key=episode_order)
+    return earlier[-1] if earlier else None
+
+
+def step_episode(step):
+    """Move to the next or previous episode of what's on, by hand.
+
+    Deliberately drops the channel: stepping through a series is a different
+    activity from watching a schedule, and if the app went on claiming you
+    were on a channel then the moment this episode ended the channel would
+    take the window back and put its own next programme on. Playing on means
+    playing on — when this one finishes the series carries into the one
+    after, which is what _finish_current already does for an episode with no
+    channel behind it.
+    """
+    playing = now_playing_snapshot()
+    if not playing or playing.get("type") != "episode":
+        raise AppError("That isn't an episode, so there's no run to move along.")
+    finder = next_episode_after if step > 0 else previous_episode_before
+    target = finder(playing.get("id"))
+    if not target:
+        raise AppError("That's the %s episode of this show you own."
+                       % ("last" if step > 0 else "first"))
+    episode_id = target["episodeid"]
+    path = require_media_file(LOCAL.path_for("episode", episode_id))
+    # keep_open, so the window survives the swap the way it does everywhere
+    # else — and so the end of this episode rolls into the next.
+    proc = mpv_play(path, keep_open=True)
+    title = LOCAL.field("episode", episode_id, "title")
+    LOCAL.set_field("episode", episode_id, "last_played", now_stamp())
+    log_event("episode", episode_id, title,
+              "next episode" if step > 0 else "previous episode")
+    note_now_playing(proc, "episode", episode_id, title)
+    return target
+
+
+def continue_series(episode_id):
+    """Roll into the next episode, or close the window when the run is out."""
+    try:
+        nxt = next_episode_after(episode_id)
+        path = LOCAL.path_for("episode", nxt["episodeid"]) if nxt else None
+        if not path or not media_file_check(path):
+            # End of what you own, the file has gone, or the drive isn't
+            # answering — all three end the run the same way.
+            mpv_command("quit")
+            return
+        proc = mpv_play(path, keep_open=True)
+        title = LOCAL.field("episode", nxt["episodeid"], "title")
+        LOCAL.set_field("episode", nxt["episodeid"], "last_played", now_stamp())
+        log_event("episode", nxt["episodeid"], title, "next episode")
+        note_now_playing(proc, "episode", nxt["episodeid"], title)
+    except Exception:
+        mpv_command("quit")
+
+
+# --- the queue ---------------------------------------------------------------
+#
+# Things to play after what's on, in order. It hands over only when the
+# current thing ENDS: closing the player mid-film is stopping, not skipping,
+# and a queue that marched on after you shut the window would be starting
+# films in an empty room. Channels are left alone entirely — a channel is
+# its own schedule, and the queue waits until you're back on something you
+# picked yourself.
+#
+# A film is normally launched to close at its end. With anything queued it
+# is launched (or switched, if the queue grows while it plays) to hold the
+# window open instead, because an mpv that has exited looks exactly the
+# same whether the film finished or you closed it — and only the finished
+# case should hand over. Idle is unambiguous; exit isn't.
+
+_QUEUE_LOCK = threading.RLock()
+
+
+def resolve_playable(kind, item_id, after_episodes=()):
+    """What pressing play on this means, as (kind, item_id).
+
+    A film is itself. A show is an episode: where you got to, or the first
+    one — the same answer the Now tab and the Rate tab give. When episodes
+    of the show are already queued, it's the one after the last of those,
+    so queueing Seinfeld three times queues three episodes, not one three
+    times."""
+    item_id = int(item_id)
+    if kind in ("movie", "episode"):
+        if not LOCAL.path_for(kind, item_id):
+            raise AppError("That isn't in the library any more.")
+        return kind, item_id
+    if kind != "tvshow":
+        raise AppError("Can't queue a %s." % kind)
+    LIB.load()
+    queued = [e for e in LIB.episodes
+              if e.get("tvshowid") == item_id and e.get("episodeid") in set(after_episodes)]
+    if queued:
+        last = max(queued, key=episode_order)
+        nxt = next_episode_after(last.get("episodeid"))
+        if not nxt:
+            raise AppError("Every episode of this after the ones already "
+                           "queued is already queued.")
+        return "episode", nxt["episodeid"]
+    by_show = defaultdict(list)
+    for e in LIB.episodes:
+        by_show[e.get("tvshowid")].append(e)
+    ep = show_next_episode(by_show, item_id)
+    if not ep:
+        raise AppError("None of this show is on disk to queue.")
+    return "episode", ep["episodeid"]
+
+
+def queue_rows():
+    conn = db()
+    rows = [dict(r) for r in conn.execute(
+        "SELECT id,pos,kind,item_id FROM queue ORDER BY pos ASC, id ASC")]
+    conn.close()
+    return rows
+
+
+def queue_count():
+    conn = db()
+    n = conn.execute("SELECT COUNT(*) FROM queue").fetchone()[0]
+    conn.close()
+    return n
+
+
+def queue_state():
+    """The queue as the page draws it. Built from the library lists already
+    in memory — no disk is touched, so drawing the queue can never wait on a
+    media drive that has spun down."""
+    LIB.load()
+    films = {m.get("movieid"): m for m in LIB.movies}
+    eps = {e.get("episodeid"): e for e in LIB.episodes}
+    items, total = [], 0
+    for r in queue_rows():
+        title, sub, art = _play_display(r["kind"], r["item_id"])
+        if title is None:
+            continue        # left the library since it was queued; skipped at play time too
+        thing = (films if r["kind"] == "movie" else eps).get(r["item_id"]) or {}
+        # Stored in seconds for films and episodes alike.
+        minutes = int(round((thing.get("runtime") or 0) / 60.0))
+        resume = (thing.get("resume") or {}).get("position") or 0
+        total += minutes
+        items.append({"qid": r["id"], "kind": r["kind"], "id": r["item_id"],
+                      "title": title, "sub": sub, "art": art,
+                      "minutes": minutes, "resume": int(resume),
+                      "show_id": thing.get("tvshowid")})
+    return {"items": items, "count": len(items), "minutes": total,
+            "tucked": bool(CONFIG.get("queue_tucked"))}
+
+
+def _hold_window_for_queue():
+    """Something is queued: make sure whatever's playing now holds its
+    window open when it ends, so the end can be seen for what it is. Not on
+    a channel, which holds its window anyway and isn't handed over."""
+    with _PLAY_LOCK:
+        playing = NOW_PLAYING.get("type")
+        channel = NOW_PLAYING.get("channel_id")
+    if playing in ("movie", "episode") and not channel and not _KEEP_OPEN[0]:
+        mpv_command("set_property", "idle", "yes")
+        _KEEP_OPEN[0] = True
+
+
+def queue_add(kind, item_id, first=False):
+    with _QUEUE_LOCK:
+        rows = queue_rows()
+        queued_eps = [r["item_id"] for r in rows if r["kind"] == "episode"]
+        k, i = resolve_playable(kind, item_id, queued_eps)
+        if any(r["kind"] == k and r["item_id"] == i for r in rows):
+            raise AppError("That's already in the queue.")
+        if first:
+            pos = (min(r["pos"] for r in rows) - 1.0) if rows else 0.0
+        else:
+            pos = (max(r["pos"] for r in rows) + 1.0) if rows else 0.0
+        conn = db()
+        conn.execute("INSERT INTO queue (pos,kind,item_id,added_at) VALUES (?,?,?,?)",
+                     (pos, k, i, now_stamp()))
+        conn.commit()
+        conn.close()
+    _hold_window_for_queue()
+    title, sub, _ = _play_display(k, i)
+    state = queue_state()
+    where = 1 if first else state["count"]
+    return {"title": title, "sub": sub if k == "episode" else "",
+            "position": where, "state": state}
+
+
+def queue_remove(qid):
+    with _QUEUE_LOCK:
+        conn = db()
+        conn.execute("DELETE FROM queue WHERE id=?", (int(qid),))
+        conn.commit()
+        conn.close()
+    return queue_state()
+
+
+def queue_move(qid, to_index):
+    """Put one item at a position in the list, and renumber the lot — pos is
+    only ever compared, so tidy integers after a move cost nothing."""
+    with _QUEUE_LOCK:
+        rows = queue_rows()
+        moving = next((r for r in rows if r["id"] == int(qid)), None)
+        if not moving:
+            raise AppError("That isn't in the queue any more.")
+        rows.remove(moving)
+        to_index = max(0, min(len(rows), int(to_index)))
+        rows.insert(to_index, moving)
+        conn = db()
+        conn.executemany("UPDATE queue SET pos=? WHERE id=?",
+                         [(float(n), r["id"]) for n, r in enumerate(rows)])
+        conn.commit()
+        conn.close()
+    return queue_state()
+
+
+def queue_clear():
+    with _QUEUE_LOCK:
+        conn = db()
+        conn.execute("DELETE FROM queue")
+        conn.commit()
+        conn.close()
+    return queue_state()
+
+
+def _queue_take(qid=None):
+    """Remove and return the next row to play — or a particular one — as
+    (kind, item_id, path), skipping anything whose file has gone. A queued
+    film that's since been deleted is dropped, not played as an error."""
+    with _QUEUE_LOCK:
+        rows = queue_rows()
+        if qid is not None:
+            rows = [r for r in rows if r["id"] == int(qid)]
+            if not rows:
+                raise AppError("That isn't in the queue any more.")
+        conn = db()
+        try:
+            for r in rows:
+                conn.execute("DELETE FROM queue WHERE id=?", (r["id"],))
+                conn.commit()
+                path = LOCAL.path_for(r["kind"], r["item_id"])
+                if path and media_file_check(path):
+                    return r["kind"], r["item_id"], path
+                if qid is not None:
+                    raise AppError("That file isn't where it was. Is the drive "
+                                   "plugged in?")
+        finally:
+            conn.close()
+    return None
+
+
+def play_item(kind, item_id, path, event="played"):
+    """Start one thing, the way everything picked by hand starts: from where
+    you got to, holding the window open if an episode (the run follows) or
+    anything is still queued behind it (the queue follows)."""
+    start = resume_position(kind, item_id)
+    keep_open = kind == "episode" or queue_count() > 0
+    proc = mpv_play(path, start=start, keep_open=keep_open)
+    title = LOCAL.field(kind, item_id, "title")
+    LOCAL.set_field(kind, item_id, "last_played", now_stamp())
+    log_event(kind, item_id, title, event)
+    note_now_playing(proc, kind, item_id, title)
+    return title
+
+
+def play_from_queue(qid=None):
+    """Play the head of the queue, or a particular item in it, now.
+
+    If something is on, its sitting is closed first, with where it got to —
+    otherwise swapping in the next thing would leave the last one looking
+    as though it were still playing."""
+    taken = _queue_take(qid)
+    if not taken:
+        return None
+    with _PLAY_LOCK:
+        busy = NOW_PLAYING.get("type") in ("movie", "episode")
+    if busy:
+        _finish_current("skipped")
+    kind, item_id, path = taken
+    play_item(kind, item_id, path)
+    return {"kind": kind, "id": item_id}
+
+
+# --- "are you still watching?" -----------------------------------------------
+#
+# Television carries on by itself, and so do the queue and a channel — which
+# is the point of them and also the problem. An episode started at half past
+# midnight can run a whole season out into an empty room, and mpv holds the
+# machine awake while it does it, so the PC doesn't even sleep afterwards.
+#
+# So playback is allowed to carry on unattended for a while, and then it
+# stops and asks. Two decisions shape everything below:
+#
+#   * It asks BETWEEN programmes, never during one. A question over the
+#     middle of a film would be a worse interruption than the thing it's
+#     protecting you from, and a hand-over is the one moment where stopping
+#     costs nothing.
+#   * How long "a while" is depends on the clock AT THE MOMENT OF THE
+#     QUESTION, not the clock when you pressed play. A film started at half
+#     eleven ends at two, and two in the morning is the number that matters.
+
+AFK_DEFAULTS = {
+    "enabled": True,
+    "day": 240,        # 6am – 6pm
+    "evening": 150,    # 6pm – midnight
+    "late": 90,        # midnight – 6am — two episodes of nearly anything
+    "grace": 5,        # minutes to answer in before the player is closed
+}
+
+AFK_BAND_NAMES = {"late": "after midnight", "day": "the afternoon",
+                  "evening": "the evening"}
+
+
+def afk_settings():
+    """The timer's settings with the defaults filled in.
+
+    Anything missing or nonsense reads as the default rather than as zero:
+    a config that got mangled should leave the timer ordinary, not quietly
+    switch it off. A band deliberately set to 0 does mean "never ask then",
+    which is the one way to have it off in the daytime only."""
+    out = dict(AFK_DEFAULTS)
+    saved = CONFIG.get("afk")
+    if isinstance(saved, dict):
+        for key, value in saved.items():
+            if key == "enabled":
+                out["enabled"] = bool(value)
+            elif key in out:
+                try:
+                    out[key] = max(0, int(value))
+                except (TypeError, ValueError):
+                    pass
+    return out
+
+
+def afk_band(when=None):
+    """Which part of the day it is. Read when the question is asked."""
+    hour = time.localtime(when or time.time()).tm_hour
+    if hour < 6:
+        return "late"
+    if hour < 18:
+        return "day"
+    return "evening"
+
+
+# A seek, or a drive that stopped answering? mpv's position should advance in
+# step with the wall clock, so a gap between the two means something happened.
+# A FORWARD gap is unambiguous — only a person makes the film jump ahead of
+# the clock. A backward gap isn't: E: going quiet for a few seconds looks
+# exactly the same. So going backwards only counts when the position itself
+# moves backwards, which no stall can do.
+AFK_JUMP = 3.0
+
+_LAST_SEEN = [time.time()]
+_MPV_SEEN = {"at": 0.0, "pos": None, "paused": None}
+_APP_WINDOW = [None]        # the pywebview window, once there is one
+
+_ASK_LOCK = threading.Lock()
+ASK = {"active": False, "since": 0.0, "current": None, "follow_on": None,
+       "band": "", "idle": 0, "title": "", "next": ""}
+
+
+def seen_you():
+    """Somebody is there. Every button in the app arrives here."""
+    _LAST_SEEN[0] = time.time()
+
+
+def afk_idle():
+    return time.time() - _LAST_SEEN[0]
+
+
+def afk_watch_mpv(position):
+    """The other half of "somebody is there": the player's own keyboard.
+
+    Pausing and seeking happen inside mpv's window, where nothing else in
+    this app can see them — and an hour of watching a film is an hour of
+    touching nothing here. Without this, a normal evening would read as an
+    empty room."""
+    now = time.time()
+    paused = bool(mpv_get("pause"))
+    last = _MPV_SEEN
+    if last["paused"] is not None and paused != last["paused"]:
+        seen_you()                                  # the space bar
+    elif last["pos"] is not None and not paused and not last["paused"]:
+        if (position - last["pos"]) - (now - last["at"]) > AFK_JUMP:
+            seen_you()                              # jumped ahead of the clock
+        elif position < last["pos"] - 1:
+            seen_you()                              # went back
+    last.update(at=now, pos=position, paused=paused)
+
+
+def afk_should_ask():
+    s = afk_settings()
+    if not s.get("enabled"):
+        return False
+    limit = int(s.get(afk_band()) or 0)
+    return limit > 0 and afk_idle() >= limit * 60
+
+
+def _follow_label(current, follow_on):
+    """What answering "yes" would put on, so the question can name it.
+
+    Worked out once, as the question is asked, rather than on every poll
+    behind it."""
+    try:
+        if follow_on:
+            channel = next((c for c in CHANNELS if c["id"] == follow_on), None)
+            return ("Whatever's on " + channel["name"]) if channel else ""
+        if queue_count() > 0:
+            items = queue_state().get("items") or []
+            return (items[0].get("title") or "") if items else ""
+        if current.get("type") == "episode":
+            nxt = next_episode_after(current.get("id"))
+            if nxt:
+                title, sub, _art = _play_display("episode", nxt["episodeid"])
+                return " · ".join(x for x in (title, sub) if x)
+    except Exception:
+        pass
+    return ""
+
+
+def raise_app_window():
+    """Bring the app forward to ask.
+
+    On its own thread: pywebview hands this to the GUI thread, and nothing
+    about asking a question is worth risking the one thread that watches
+    playback."""
+    def lift():
+        try:
+            window = _APP_WINDOW[0]
+            if window is not None:
+                window.restore()
+        except Exception:
+            pass
+    threading.Thread(target=lift, daemon=True).start()
+
+
+def afk_ask(current, follow_on):
+    """Hold the hand-over and put the question up.
+
+    In three places at once, because there's no telling which one is in
+    front of you: mpv comes out of fullscreen (the app is usually directly
+    behind it), the question goes on mpv's own display for whoever is
+    looking at that, and the app raises its window and draws it properly."""
+    idle = int(afk_idle() / 60)
+    with _ASK_LOCK:
+        ASK.update(active=True, since=time.time(), current=dict(current),
+                   follow_on=follow_on, band=afk_band(), idle=idle,
+                   title=current.get("title") or "",
+                   next=_follow_label(current, follow_on))
+    try:
+        mpv_command("set_property", "fullscreen", "no")
+        mpv_command("show-text",
+                    "Are you still watching?\n\nNext Up has the next one "
+                    "waiting \u2014 answer there to carry on.", 600000)
+    except Exception:
+        pass
+    raise_app_window()
+
+
+def afk_new_file():
+    """A different file is starting. Two things follow from that.
+
+    Any question left hanging over the last one has been answered, by the
+    act of putting something else on.
+
+    And the position tracker has to forget where it was. Every hand-over
+    rewinds the clock from the end of one file to the start of the next,
+    and from the outside that is indistinguishable from somebody seeking
+    backwards — which would mark you present at every single episode change
+    and quietly stop the timer ever firing at all."""
+    afk_clear()
+    _MPV_SEEN.update(at=0.0, pos=None, paused=None)
+
+
+def afk_clear():
+    """Forget the question without answering it."""
+    with _ASK_LOCK:
+        if not ASK["active"]:
+            return
+        ASK.update(active=False, current=None, follow_on=None)
+    try:
+        mpv_command("show-text", "", 1)
+    except Exception:
+        pass
+
+
+def afk_answer(still):
+    """Yes, carry on — or no, that's enough."""
+    with _ASK_LOCK:
+        if not ASK["active"]:
+            return False
+        current, follow_on = ASK["current"], ASK["follow_on"]
+        ASK.update(active=False, current=None, follow_on=None)
+    seen_you()
+    try:
+        mpv_command("show-text", "", 1)
+    except Exception:
+        pass
+    if still:
+        _hand_over(current, follow_on)
+    else:
+        mpv_command("quit")
+    return True
+
+
+def afk_tick():
+    """Nobody answered. Close the player — which is the half of this that
+    lets the machine go to sleep afterwards, and the reason the question
+    isn't simply left up all night."""
+    with _ASK_LOCK:
+        if not ASK["active"]:
+            return
+        grace = max(1, int(afk_settings().get("grace") or 5)) * 60
+        gone = not mpv_alive()
+        if not gone and time.time() - ASK["since"] < grace:
+            return
+        ASK.update(active=False, current=None, follow_on=None)
+    if not gone:
+        try:
+            mpv_command("quit")
+        except Exception:
+            pass
+
+
+def afk_state():
+    """What the page needs to draw the question, or None when there isn't
+    one to draw."""
+    with _ASK_LOCK:
+        if not ASK["active"]:
+            return None
+        grace = max(1, int(afk_settings().get("grace") or 5)) * 60
+        return {"title": ASK["title"], "next": ASK["next"], "idle": ASK["idle"],
+                "band": AFK_BAND_NAMES.get(ASK["band"], ""),
+                "left": max(0, int(ASK["since"] + grace - time.time()))}
+
+
+def _would_follow(current, follow_on):
+    """Is there actually something to hand over to?
+
+    Asked before the question is, because "are you still watching?" over a
+    player that was about to close anyway is a question with nothing
+    riding on it."""
+    if follow_on or queue_count() > 0:
+        return True
+    if current.get("type") != "episode":
+        return False
+    try:
+        return bool(next_episode_after(current.get("id")))
+    except Exception:
+        return True
+
+
+def _hand_over(current, follow_on):
+    """Put on whatever follows what just ended.
+
+    Split out from _finish_current so the AFK timer can hold it and run it
+    later, unchanged, if you say you're still there."""
+    if follow_on:
+        advance_channel(follow_on,
+                        after=(current.get("type"), current.get("id")))
+    elif queue_count() > 0:
+        # Something you picked finished and there's a queue: that wins over
+        # an episode rolling into its next one. You asked for this next.
+        try:
+            if not play_from_queue():
+                mpv_command("quit")     # everything queued had gone from disk
+        except Exception:
+            log_problem("queue hand-over")
+            mpv_command("quit")
+    elif current.get("type") == "episode":
+        # Television carries on by itself. An episode picked from the library
+        # rolls into the next one you own, the way it would anywhere else;
+        # a film ends and that's that.
+        continue_series(current.get("id"))
+    else:
+        mpv_command("quit")
+
+
+def _finish_current(reason):
+    """Write down what happened, then put the next thing on."""
+    with _PLAY_LOCK:
+        current = dict(NOW_PLAYING)
+        if current.get("type") is None:
+            return
+        follow_on = current.get("channel_id") if _KEEP_OPEN[0] else None
+        if reason == "closed":
+            _PLAY_PROC[0] = None
+        NOW_PLAYING.update(type=None, id=None, title=None, sub=None, art=None,
+                           started_at=0, channel=None, channel_id=None,
+                           position=None, duration=None)
+
+    forget_playing()
+    note_playback_finished(
+        current.get("type"), current.get("id"),
+        time.time() - (current.get("started_at") or time.time()),
+        position=current.get("position"), duration=current.get("duration"))
+
+    if reason != "ended":
+        return
+    if not _would_follow(current, follow_on):
+        # Held the window open but there's nothing to follow with. Don't
+        # leave an empty one sitting on the desktop.
+        mpv_command("quit")
+    elif afk_should_ask():
+        # Nobody has touched anything for long enough that this would be
+        # playing to an empty room. Hold it here and ask.
+        afk_ask(current, follow_on)
+    else:
+        _hand_over(current, follow_on)
+
+
+def now_playing_snapshot():
+    """What's playing right now. The monitor thread above keeps this
+    current and does the recording; this only reads it, so a request never
+    waits on database work."""
+    with _PLAY_LOCK:
+        proc = _PLAY_PROC[0]
+        if NOW_PLAYING["type"] is None:
+            return None
+        if proc is None and not _ADOPTED[0]:
+            return None
+        if proc is not None and proc.poll() is not None:
+            return None     # gone; the monitor tidies up on its next tick
+        return dict(NOW_PLAYING,
+                    elapsed=int(time.time() - NOW_PLAYING["started_at"]))
+
+
+_RESUME_SEEN = [None]
+
+
+def resume_dir_changed():
+    """Cheap check: has mpv touched the resume folder since we last looked?
+    Saves walking the whole library on every request while still noticing the
+    moment you quit a film."""
+    try:
+        stamp = os.path.getmtime(WATCH_LATER)
+    except OSError:
+        stamp = 0.0
+    if stamp != _RESUME_SEEN[0]:
+        _RESUME_SEEN[0] = stamp
+        return True
+    return False
+
+
+def read_resume_points():
+    """mpv writes one small file per part-watched video. It deletes that file
+    when you watch something to the end, so its absence means finished."""
+    points = {}
+    if not os.path.isdir(WATCH_LATER):
+        return points
+    for name in os.listdir(WATCH_LATER):
+        full = os.path.join(WATCH_LATER, name)
+        try:
+            with open(full, "r", encoding="utf-8", errors="replace") as fh:
+                lines = fh.read().splitlines()
+        except OSError:
+            continue
+        path, position = None, None
+        for line in lines:
+            if line.startswith("# ") and not path:
+                path = line[2:].strip()
+            elif line.startswith("start="):
+                try:
+                    position = float(line.split("=", 1)[1])
+                except ValueError:
+                    pass
+        if path and position:
+            points[os.path.normcase(path)] = position
+    return points
+
+
+def sync_playback_state():
+    """Fold mpv's resume files back into the library.
+
+    This is the only place progress comes from, and it only ever records what
+    actually happened in this app: a saved position means you're part way
+    through, and a position that has vanished after being there means you
+    reached the end. Files it has never seen played stay blank — no guessing.
+    """
+    points = read_resume_points()
+    conn = db()
+    for table in ("movies", "episodes"):
+        for row in conn.execute("SELECT id,path,runtime,resume_pos FROM %s" % table):
+            key = os.path.normcase(row["path"] or "")
+            position = points.get(key)
+            if position:
+                conn.execute(
+                    "UPDATE %s SET resume_pos=?,resume_total=? WHERE id=?" % table,
+                    (position, row["runtime"] or 0, row["id"]))
+            elif row["resume_pos"]:
+                conn.execute(
+                    "UPDATE %s SET resume_pos=0,resume_total=0,"
+                    "playcount=COALESCE(playcount,0)+1,"
+                    "last_played=? WHERE id=?" % table, (now_stamp(), row["id"]))
+    conn.commit()
+    conn.close()
+    LOCAL.loaded_at = 0
+
+
+# ===========================================================================
+# BROWSE — the library itself, searchable
+# ===========================================================================
+
+def search_score(query, item, people, genres):
+    """How well this title answers the search. Title matches beat everything;
+    a name or genre match still counts, because "farrell" and "horror" are
+    both reasonable things to type into a film search."""
+    if not query:
+        return 1
+    title = norm_title(item.get("title") or "")
+    plain = re.sub(r"[^a-z0-9 ]", "", (item.get("title") or "").lower())
+    if title == query or plain == query:
+        return 100
+    if title.startswith(query) or plain.startswith(query):
+        return 80
+    if query in title or query in plain:
+        return 60
+    for name in people:
+        if query in norm_title(name):
+            return 40
+    for genre in genres:
+        if query in norm_title(genre):
+            return 25
+    return 0
+
+
+def browse_library(kind, query, sort, shelf, limit, offset):
+    LIB.load()
+    query = norm_title(query or "")
+
+    conn = db()
+    extra = {}
+    for r in conn.execute("SELECT id,cast_names,directors FROM movies"):
+        extra[r["id"]] = (as_list(r["cast_names"]), as_list(r["directors"]))
+    conn.close()
+
+    # "all" mixes films and shows into one grid. Favourites is a place rather
+    # than a filter, and splitting somebody's favourites down the middle by
+    # format would be an odd way to show them.
+    rows = []
+    if kind in ("tv", "all"):
+        episodes_by_show = defaultdict(list)
+        for e in LIB.episodes:
+            episodes_by_show[e.get("tvshowid")].append(e)
+        for s in LIB.shows:
+            score = search_score(query, s, [], s.get("genre") or [])
+            if not score:
+                continue
+            progress = series_progress(episodes_by_show, s.get("tvshowid"))
+            rows.append({
+                "score": score, "kind": "tvshow", "id": s.get("tvshowid"),
+                "title": s.get("title"), "year": s.get("year"),
+                "poster": s.get("art", {}).get("poster"),
+                "tmdb": round(s.get("rating") or 0, 1),
+                "userrating": s.get("userrating") or 0,
+                "genres": (s.get("genre") or [])[:3],
+                "plot": (s.get("plot") or "")[:300],
+                "episodes": s.get("episode") or 0,
+                "in_progress": bool(progress),
+                "progress_note": ("S%02dE%02d" % (progress["episode"].get("season") or 0,
+                                                  progress["episode"].get("episode") or 0))
+                                 if progress else "",
+                "percent": (progress or {}).get("percent") or 0,
+                "sort_added": s.get("dateadded") or "",
+                "watchlisted": bool(s.get("watchlisted")),
+                "favourited": bool(s.get("favourited")),
+            })
+    if kind != "tv":
+        for m in LIB.movies:
+            cast, directors = extra.get(m.get("movieid"), ([], []))
+            score = search_score(query, m, cast + directors, m.get("genre") or [])
+            if not score:
+                continue
+            resume = m.get("resume") or {}
+            percent = 0
+            if resume.get("position") and resume.get("total"):
+                percent = int(100 * resume["position"] / resume["total"])
+            rows.append({
+                "score": score, "kind": "movie", "id": m.get("movieid"),
+                "title": m.get("title"), "year": m.get("year"),
+                "poster": m.get("art", {}).get("poster"),
+                "tmdb": round(m.get("rating") or 0, 1),
+                "userrating": m.get("userrating") or 0,
+                "genres": (m.get("genre") or [])[:3],
+                "plot": (m.get("plot") or "")[:300],
+                "runtime": minutes(m.get("runtime")),
+                "directors": directors[:2],
+                "cast": cast[:3],
+                "in_progress": percent > 0,
+                "percent": percent,
+                "identified": m.get("identified", True),
+                "sort_added": m.get("dateadded") or "",
+                "watchlisted": bool(m.get("watchlisted")),
+                "favourited": bool(m.get("favourited")),
+            })
+
+    # Anything the snapshot says exists on the main device but isn't here.
+    # Appended rather than merged in: these carry no local id, and every
+    # sort and filter below treats them like any other row.
+    if CONFIG.get("show_elsewhere", True):
+        try:
+            rows.extend(elsewhere_rows(kind, query))
+        except Exception:
+            pass        # a snapshot problem must never take the Library down
+
+    if shelf == "unrated":
+        rows = [r for r in rows if not r["userrating"]]
+    elif shelf == "rated":
+        rows = [r for r in rows if r["userrating"]]
+    elif shelf == "progress":
+        rows = [r for r in rows if r.get("in_progress")]
+    elif shelf == "watchlist":
+        rows = [r for r in rows if r.get("watchlisted")]
+    elif shelf == "favourite":
+        rows = [r for r in rows if r.get("favourited")]
+    # A separate step, not another branch of the chain above. It used to be
+    # an `if` sitting in the middle of that chain, which made the watchlist
+    # and favourites branches after it unreachable: both shelves quietly
+    # showed the whole library from v0.1.20 until this was noticed.
+    if shelf in ("progress", "watchlist", "favourite"):
+        rows = [r for r in rows if not r.get("elsewhere")]
+
+    if query:
+        # Relevance first when searching; ties fall back to the chosen order.
+        rows.sort(key=lambda r: (-r["score"], norm_title(r["title"])))
+    else:
+        keys = {
+            "title": lambda r: norm_title(r["title"]),
+            "year": lambda r: -(r["year"] or 0),
+            "tmdb": lambda r: -(r["tmdb"] or 0),
+            "mine": lambda r: -(r["userrating"] or 0),
+            "runtime": lambda r: r.get("runtime") or 0,
+        }
+        if sort == "added":
+            # A stable sort keeps things bunched under the same import date
+            # (a bulk-scanned library shares one) in alphabetical order,
+            # rather than whatever order the database happened to return.
+            rows.sort(key=lambda r: norm_title(r["title"]))
+            rows.sort(key=lambda r: r["sort_added"], reverse=True)
+        else:
+            rows.sort(key=keys.get(sort, keys["title"]))
+
+    total = len(rows)
+    page = rows[offset:offset + limit]
+    for r in page:
+        r.pop("score", None)
+        r.pop("sort_added", None)
+    return {"items": page, "total": total, "offset": offset, "limit": limit}
+
+
+LANGUAGES = {
+    "en": "English", "ja": "Japanese", "fr": "French", "ko": "Korean",
+    "it": "Italian", "es": "Spanish", "ru": "Russian", "de": "German",
+    "zh": "Chinese", "cn": "Chinese", "sv": "Swedish", "da": "Danish",
+    "pt": "Portuguese", "lv": "Latvian", "sr": "Serbian", "nl": "Dutch",
+    "pl": "Polish", "hi": "Hindi", "no": "Norwegian", "fi": "Finnish",
+}
+
+
+def money(value):
+    if not value:
+        return None
+    if value >= 1000000000:
+        return "$%.2fbn" % (value / 1000000000.0)
+    if value >= 1000000:
+        return "$%.0fm" % (value / 1000000.0)
+    return "$%s" % format(int(value), ",")
+
+
+def movie_facts(row, item):
+    """The handful of things TMDB actually knows, said plainly.
+
+    Not trivia — TMDB has no trivia to give. These are its own fields turned
+    into sentences, which is honest about where they came from and still
+    tells you something you didn't necessarily know.
+    """
+    facts = []
+    if not row:
+        return facts
+    released = (row["released"] or "")[:10]
+    if released:
+        facts.append({"label": "Released", "value": released})
+    lang = row["original_language"] or ""
+    if lang:
+        facts.append({"label": "Language", "value": LANGUAGES.get(lang, lang.upper())})
+    budget, revenue = money(row["budget"]), money(row["revenue"])
+    if budget:
+        facts.append({"label": "Budget", "value": budget})
+    if revenue:
+        facts.append({"label": "Box office", "value": revenue})
+    if row["budget"] and row["revenue"] and row["budget"] > 0:
+        facts.append({"label": "Made back", "value": "%.1fx its budget"
+                      % (row["revenue"] / float(row["budget"]))})
+    companies = as_list(row["companies"])
+    if companies:
+        facts.append({"label": "Studio", "value": ", ".join(companies)})
+    if row["vote_count"]:
+        facts.append({"label": "TMDB votes", "value": format(row["vote_count"], ",")})
+    if item.get("set"):
+        facts.append({"label": "Part of", "value": item["set"]})
+    return facts
+
+
+def movie_detail_payload(movie_id):
+    """Everything about one film worth showing on its detail page — the
+    full plot rather than the 300-char teaser the library grid uses, and
+    each cast member cross-referenced against your own shelf, so "who's in
+    it" can lead somewhere instead of just being a list of names."""
+    LIB.load()
+    movie_id = int(movie_id)
+    item = next((m for m in LIB.movies if m.get("movieid") == movie_id), None)
+    if not item:
+        return {"error": "That film isn't in the library any more."}
+
+    ensure_cast_lists()
+    conn = db()
+    row = conn.execute(
+        "SELECT tagline,backdrop,cast_profiles,director_profiles,budget,revenue,"
+        "companies,released,vote_count,original_language,cast_ids,director_ids"
+        " FROM movies WHERE id=?",
+        (movie_id,)).fetchone()
+    conn.close()
+    photos = as_list(row["cast_profiles"]) if row else []
+    crew_pics = as_list(row["director_profiles"]) if row else []
+    photo_ids = as_list(row["cast_ids"]) if row else []
+    crew_person_ids = as_list(row["director_ids"]) if row else []
+
+    people, directors_map = library_index()
+    cast = []
+    for index, name in enumerate((item.get("cast_list") or [])[:10]):
+        others = [e for e in people.get(name, []) if e["id"] != movie_id]
+        others.sort(key=lambda e: -e["score"])
+        cast.append({
+            "name": name,
+            "photo": local_art(photos[index]) if index < len(photos) else None,
+            "person_id": photo_ids[index] if index < len(photo_ids) else "",
+            "other_films": [{"id": e["id"], "title": e["title"], "score": e["score"]}
+                            for e in others[:8]],
+        })
+
+    directors_detail = []
+    for index, name in enumerate(item.get("director") or []):
+        others = [e for e in directors_map.get(name, []) if e["id"] != movie_id]
+        others.sort(key=lambda e: -e["score"])
+        directors_detail.append({
+            "name": name, "role": "director",
+            "photo": local_art(crew_pics[index]) if index < len(crew_pics) else None,
+            "person_id": crew_person_ids[index] if index < len(crew_person_ids) else "",
+            "other_films": [{"id": e["id"], "title": e["title"], "score": e["score"]}
+                            for e in others[:8]],
+        })
+
+    # Other films you own that run on the same fuel — shared keywords count
+    # for more than a shared genre, since "genre: Drama" matches half the
+    # shelf and says nothing, while a shared keyword usually means something.
+    my_keywords = set(item.get("keyword_list") or [])
+    my_genres = set(item.get("genre") or [])
+    similar = []
+    for m in LIB.movies:
+        if m.get("movieid") == movie_id:
+            continue
+        weight = (2 * len(my_keywords & set(m.get("keyword_list") or []))
+                 + len(my_genres & set(m.get("genre") or [])))
+        if weight <= 0:
+            continue
+        similar.append({
+            "id": m.get("movieid"), "title": m.get("title"), "year": m.get("year"),
+            "poster": art_url(m.get("art", {}).get("poster")),
+            "score": m.get("userrating") or 0,
+            "tmdb": round(m.get("rating") or 0, 1),
+            "weight": weight,
+        })
+    similar.sort(key=lambda x: (-x["weight"], -x["score"], -x["tmdb"]))
+
+    resume = item.get("resume") or {}
+    return {
+        "id": movie_id, "title": item.get("title"), "year": item.get("year"),
+        "poster": item.get("art", {}).get("poster"),
+        "plot": item.get("plot") or "",
+        "tagline": (row["tagline"] if row else "") or "",
+        "tmdb": round(item.get("rating") or 0, 1),
+        "userrating": item.get("userrating") or 0,
+        "genres": item.get("genre") or [],
+        "runtime": minutes(item.get("runtime")),
+        "directors": item.get("director") or [],
+        "directors_detail": directors_detail,
+        "cast": cast,
+        "similar": similar[:10],
+        "in_progress": bool(resume.get("position")),
+        "identified": item.get("identified", True),
+        "watchlisted": bool(item.get("watchlisted")),
+        "favourited": bool(item.get("favourited")),
+        "backdrop": local_art(row["backdrop"]) if row else None,
+        "facts": movie_facts(row, item),
+    }
+
+
+def person_profile(person_id, name):
+    """Who someone is, and everything of theirs on your own shelf.
+
+    TMDB is asked for the biography; the filmography is NOT — that comes from
+    your library, because "eleven films of his, you rated four of them" is the
+    part worth knowing here. What he made that you don't own belongs on the
+    Recommendations tab, not on a page about what you have.
+    """
+    LIB.load()
+    ensure_cast_lists()
+    detail = tmdb("/person/%s" % person_id) if person_id else None
+    detail = detail or {}
+
+    people, directors_map = library_index()
+    seen = {}
+    for entry in (people.get(name) or []) + (directors_map.get(name) or []):
+        seen.setdefault(entry["id"], entry)
+    films = sorted(seen.values(), key=lambda e: -(e.get("score") or 0))
+
+    shows = [{"id": s.get("tvshowid"), "title": s.get("title"),
+              "score": s.get("userrating") or 0,
+              "poster": s.get("art", {}).get("poster")}
+             for s in LIB.shows
+             if name in (s.get("cast_list") or []) + (s.get("creators") or [])]
+
+    by_id = dict((m.get("movieid"), m) for m in LIB.movies)
+    born = (detail.get("birthday") or "")[:10]
+    died = (detail.get("deathday") or "")[:10]
+    life = []
+    if born:
+        life.append("Born %s%s" % (born, (" in " + detail["place_of_birth"])
+                                   if detail.get("place_of_birth") else ""))
+    if died:
+        life.append("Died %s" % died)
+
+    return {
+        "id": person_id,
+        "name": detail.get("name") or name,
+        "photo": local_art(PROFILE + detail["profile_path"])
+                 if detail.get("profile_path") else None,
+        "role": detail.get("known_for_department") or "",
+        "life": life,
+        "bio": (detail.get("biography") or "").strip(),
+        "films": [{"id": e["id"], "title": e["title"], "year": e.get("year"),
+                   "score": e.get("score") or 0,
+                   "poster": (by_id.get(e["id"]) or {}).get("art", {}).get("poster")}
+                  for e in films],
+        "shows": shows,
+        "offline": not detail,
+    }
+
+
+def show_facts(row):
+    facts = []
+    if not row:
+        return facts
+    if row["first_air"]:
+        facts.append({"label": "First aired", "value": row["first_air"][:10]})
+    if row["status"]:
+        facts.append({"label": "Status", "value": row["status"]})
+    if row["seasons_count"]:
+        facts.append({"label": "Seasons", "value": str(row["seasons_count"])})
+    nets = as_list(row["networks"])
+    if nets:
+        facts.append({"label": "Network", "value": ", ".join(nets)})
+    countries = as_list(row["country"])
+    if countries:
+        facts.append({"label": "Made in", "value": ", ".join(countries)})
+    return facts
+
+
+def show_detail(show_id):
+    """Everything you own of one series, so you can jump straight to an
+    episode rather than hunting through folders."""
+    LIB.load()
+    show_id = int(show_id)
+    show = next((s for s in LIB.shows if s.get("tvshowid") == show_id), None)
+    if not show:
+        return {"error": "No such show."}
+
+    conn = db()
+    row = conn.execute(
+        "SELECT backdrop,cast_profiles,creator_profiles,status,networks,"
+        "first_air,seasons_count,country,cast_ids,creator_ids"
+        " FROM shows WHERE id=?", (show_id,)).fetchone()
+    conn.close()
+    photos = as_list(row["cast_profiles"]) if row else []
+    maker_pics = as_list(row["creator_profiles"]) if row else []
+    show_cast_ids = as_list(row["cast_ids"]) if row else []
+    maker_ids = as_list(row["creator_ids"]) if row else []
+    cast = [{"name": n, "photo": local_art(photos[i]) if i < len(photos) else None,
+             "person_id": show_cast_ids[i] if i < len(show_cast_ids) else ""}
+            for i, n in enumerate((show.get("cast_list") or [])[:10])]
+    creators = [{"name": n,
+                 "photo": local_art(maker_pics[i]) if i < len(maker_pics) else None,
+                 "person_id": maker_ids[i] if i < len(maker_ids) else ""}
+                for i, n in enumerate(show.get("creators") or [])]
+
+    episodes = [e for e in LIB.episodes if e.get("tvshowid") == show_id]
+    episodes.sort(key=lambda e: (e.get("season") or 0, e.get("episode") or 0))
+
+    by_show = defaultdict(list)
+    for e in LIB.episodes:
+        by_show[e.get("tvshowid")].append(e)
+    progress = series_progress(by_show, show_id)
+    next_up = progress["episode"].get("episodeid") if progress else None
+
+    seasons = {}
+    for e in episodes:
+        resume = e.get("resume") or {}
+        percent = 0
+        if resume.get("position") and resume.get("total"):
+            percent = int(100 * resume["position"] / resume["total"])
+        seasons.setdefault(e.get("season") or 0, []).append({
+            "id": e.get("episodeid"), "season": e.get("season"),
+            "episode": e.get("episode"), "title": e.get("title"),
+            "runtime": minutes(e.get("runtime")),
+            "played": bool(e.get("playcount")), "percent": percent,
+            "code": "S%02dE%02d" % (e.get("season") or 0, e.get("episode") or 0),
+        })
+
+    return {
+        "id": show_id, "title": show.get("title"), "year": show.get("year"),
+        "poster": show.get("art", {}).get("poster"),
+        "plot": show.get("plot") or "",
+        "tmdb": round(show.get("rating") or 0, 1),
+        "userrating": show.get("userrating") or 0,
+        "watchlisted": bool(show.get("watchlisted")),
+        "favourited": bool(show.get("favourited")),
+        "genres": show.get("genre") or [],
+        "backdrop": local_art(row["backdrop"]) if row else None,
+        "facts": show_facts(row),
+        "cast": cast,
+        "creators": creators,
+        "next_up": next_up,
+        "progress_note": (("%d%% through " % progress["percent"]) if progress and
+                          progress["state"] == "resume" else
+                          ("up to " if progress else "")) +
+                         ("S%02dE%02d" % (progress["episode"].get("season") or 0,
+                                          progress["episode"].get("episode") or 0)
+                          if progress else ""),
+        "seasons": [{"season": n, "episodes": seasons[n]} for n in sorted(seasons)],
+    }
+
+
+# ===========================================================================
+# WHY THIS ONE — reasons to watch tonight's suggestion
+# ===========================================================================
+#
+# Two cards under the main pick. The good ones connect the film to your own
+# shelf, because "you own four of this director's and rated two of them 9"
+# is a far better argument than a plot summary you could read anywhere.
+#
+# Each builder returns a card or None. They're scored, and the best two win,
+# so a film with a famous cast and one with a personal connection each get
+# the argument that actually applies to them.
+
+
+def ordinal_pct(value, population):
+    """Where this sits against your own shelf, as a percentage."""
+    if not population:
+        return None
+    below = sum(1 for v in population if v < value)
+    return int(round(100.0 * below / len(population)))
+
+
+def ensure_cast_lists():
+    """Attach each owned film's cast and keyword lists to the in-memory
+    library, once per load rather than once per query — library_index() and
+    the cast section on a film's detail page both need this."""
+    if getattr(LIB, "cast_attached_at", None) == LIB.loaded_at:
+        return
+    conn = db()
+    by_id = dict((r["id"], r) for r in
+                conn.execute("SELECT id,cast_names,keywords FROM movies"))
+    conn.close()
+    for m in LIB.movies:
+        row = by_id.get(m.get("movieid"))
+        cast_list = as_list(row["cast_names"]) if row else []
+        m["cast_list"] = cast_list
+        m["keyword_list"] = as_list(row["keywords"]) if row else []
+        # TMDB's cast order is billing order — only the single top-billed
+        # name counts as the lead. Two spots would still catch Gwyneth
+        # Paltrow across the Iron Man films (billed second in two of three)
+        # despite Tony Stark clearly being the star, not a co-lead.
+        m["lead_cast"] = cast_list[:1]
+
+    # How many of the names just under the top billing are themselves
+    # top-billed somewhere else on your shelf. It's the difference between a
+    # film someone carries and a film they share: Robert Downey Jr. heads the
+    # cast list of both Iron Man and Avengers, so billing order alone can't
+    # tell them apart, but Avengers has Chris Evans and Chris Hemsworth right
+    # behind him and Iron Man doesn't.
+    leads = set()
+    for m in LIB.movies:
+        if m.get("cast_list"):
+            leads.add(m["cast_list"][0])
+    for m in LIB.movies:
+        others = (m.get("cast_list") or [])[1:5]
+        m["co_leads"] = sum(1 for name in others if name in leads)
+
+    LIB.cast_attached_at = LIB.loaded_at
+
+
+def library_index():
+    """Actors and directors mapped to the films of theirs you own, along with
+    whatever you scored them."""
+    ensure_cast_lists()
+    people = defaultdict(list)
+    directors = defaultdict(list)
+    for m in LIB.movies:
+        entry = {"title": m.get("title"), "year": m.get("year"),
+                 "score": m.get("userrating") or 0,
+                 "played": bool(m.get("playcount")),
+                 "id": m.get("movieid")}
+        for name in (m.get("cast_list") or []):
+            people[name].append(entry)
+        for name in (m.get("director") or []):
+            directors[name].append(entry)
+    return people, directors
+
+
+def rated_bits(entries, limit=3):
+    """Turn a list of owned films into a readable phrase, favouring the ones
+    you actually scored."""
+    scored = sorted([e for e in entries if e["score"]],
+                    key=lambda e: -e["score"])
+    rest = [e for e in entries if not e["score"]]
+    out = []
+    for e in scored[:limit]:
+        out.append("%s (you gave it %s)" % (e["title"], fmt_score(e["score"])))
+    for e in rest[:max(0, limit - len(out))]:
+        out.append(e["title"])
+    return out
+
+
+def fmt_score(value):
+    value = round(float(value) * 2) / 2
+    return str(int(value)) if value == int(value) else str(value)
+
+
+def card(kind, heading, body, chips=None, weight=0):
+    return {"kind": kind, "heading": heading, "body": body,
+            "chips": chips or [], "weight": weight}
+
+
+def build_reasons(kind, item_id):
+    """Up to two arguments for watching the thing we just suggested."""
+    LIB.load()
+    item_id = int(item_id)
+
+    if kind == "movie":
+        item = next((m for m in LIB.movies if m.get("movieid") == item_id), None)
+    else:
+        episode = next((e for e in LIB.episodes if e.get("episodeid") == item_id), None)
+        if not episode:
+            return []
+        item = next((s for s in LIB.shows
+                     if s.get("tvshowid") == episode.get("tvshowid")), None)
+        if item:
+            item = dict(item)
+            item["_episode"] = episode
+    if not item:
+        return []
+
+    if kind == "movie":
+        ensure_cast_lists()
+        conn = db()
+        row = conn.execute("SELECT tagline,country FROM movies"
+                           " WHERE id=?", (item_id,)).fetchone()
+        conn.close()
+        item["tagline"] = row["tagline"] if row else ""
+        item["country_list"] = as_list(row["country"]) if row else []
+
+    builders = [reason_director, reason_cast, reason_reception,
+                reason_themes, reason_series, reason_standout, reason_pitch]
+    cards = []
+    for build in builders:
+        try:
+            made = build(item, kind)
+        except Exception:
+            made = None
+        if made:
+            cards.append(made)
+
+    cards.sort(key=lambda c: -c["weight"])
+    # Never show two cards making the same argument.
+    seen, chosen = set(), []
+    for c in cards:
+        if c["kind"] in seen:
+            continue
+        seen.add(c["kind"])
+        chosen.append(c)
+        if len(chosen) == 2:
+            break
+
+    if not chosen:
+        chosen.append(fallback_card(item, kind))
+    return chosen
+
+
+def fallback_card(item, kind):
+    """There is always something to say, even about a file we know nothing
+    about — and if we know nothing, say why rather than showing a blank."""
+    if not CONFIG.get("tmdb_key"):
+        return card("pitch", "Not much to go on",
+                    "There's no TMDB key set, so all this knows about the file "
+                    "is its name. Add one on the Settings tab and rescan, and "
+                    "this fills up with cast, themes and connections to the "
+                    "rest of your shelf.", [], 0)
+    facts = []
+    if item.get("year"):
+        facts.append(str(item["year"]))
+    genres = item.get("genre") or []
+    if genres:
+        facts.append(" / ".join(genres[:2]))
+    runtime = minutes(item.get("runtime"))
+    if runtime:
+        facts.append("%d minutes" % runtime)
+    body = ("Nothing much is known about this one beyond %s. It matched TMDB "
+            "thinly, which usually means an odd filename."
+            % (", ".join(facts) if facts else "the filename"))
+    return card("pitch", "A bit of a mystery", body, genres[:3], 0)
+
+
+# --- the builders ---------------------------------------------------------
+
+def reason_director(item, kind):
+    if kind != "movie":
+        return None
+    names = item.get("director") or []
+    if not names:
+        return None
+    _, directors = library_index()
+    for name in names:
+        others = [e for e in directors.get(name, [])
+                  if e["id"] != item.get("movieid")]
+        if not others:
+            continue
+        scored = [e for e in others if e["score"]]
+        bits = rated_bits(others)
+        if scored:
+            best = max(scored, key=lambda e: e["score"])
+            body = ("You own %d other %s of theirs and you rated %s %s. "
+                    "If that held up, this should too."
+                    % (len(others), "film" if len(others) == 1 else "films",
+                       best["title"], fmt_score(best["score"])))
+            weight = 10 + min(4, len(others)) + best["score"] / 4.0
+        else:
+            body = ("You've already got %d other %s of theirs, so clearly "
+                    "something about them lands." % (len(others),
+                    "film" if len(others) == 1 else "films"))
+            weight = 6 + min(3, len(others))
+        return card("director", "Same hand behind it", body,
+                    [name] + bits[:3], weight)
+    return None
+
+
+def reason_cast(item, kind):
+    cast = item.get("cast_list") or []
+    if not cast:
+        return None
+    people, _ = library_index()
+    overlaps = []
+    for name in cast[:6]:
+        others = [e for e in people.get(name, [])
+                  if e["id"] != item.get("movieid")]
+        if others:
+            overlaps.append((name, others))
+    top = ", ".join(cast[:3])
+
+    if overlaps:
+        name, others = max(overlaps, key=lambda x: len(x[1]))
+        scored = [e for e in others if e["score"]]
+        if scored:
+            best = max(scored, key=lambda e: e["score"])
+            body = ("%s stars, and you've got %d other %s of theirs — you gave "
+                    "%s a %s." % (name, len(others),
+                                  "film" if len(others) == 1 else "films",
+                                  best["title"], fmt_score(best["score"])))
+            weight = 9 + best["score"] / 4.0
+        else:
+            body = ("%s stars, and turns up in %d other %s on your shelf."
+                    % (name, len(others),
+                       "film" if len(others) == 1 else "films"))
+            weight = 7
+        return card("cast", "Faces you already like", body,
+                    cast[:4], weight)
+
+    return card("cast", "Who's in it", "Led by %s." % top, cast[:4], 3)
+
+
+def reason_reception(item, kind):
+    rating = item.get("rating") or 0
+    if not rating:
+        return None
+    others = [m.get("rating") or 0 for m in LIB.movies
+              if (m.get("rating") or 0) and m.get("movieid") != item.get("movieid")]
+    pct = ordinal_pct(rating, others)
+    chips = ["TMDB %.1f" % rating]
+
+    if pct is None:
+        return card("reception", "How it landed",
+                    "Scores %.1f on TMDB." % rating, chips, 3)
+
+    if pct >= 98:
+        body = ("At %.1f it's the best-rated thing in your entire library, and "
+                "and you still haven't rated it." % rating)
+        weight = 11
+    elif pct >= 75:
+        body = ("Scores %.1f on TMDB, better than %d%% of everything else you "
+                "own. One of the stronger files sitting there." % (rating, pct))
+        weight = 8 + (pct - 75) / 12.0
+    elif pct <= 5:
+        body = ("At %.1f it's about the worst-rated thing you own. Either a "
+                "guilty pleasure or a mistake — only one way to find out."
+                % rating)
+        weight = 5
+    elif pct <= 25:
+        body = ("Scores %.1f, which only beats %d%% of your library. Low "
+                "expectations are the right approach." % (rating, pct))
+        weight = 4
+    else:
+        body = "Scores %.1f on TMDB, middle of the pack for your shelf." % rating
+        weight = 3
+
+    # A percentile is only worth printing when it's actually flattering or
+    # actually damning — "top 100%" means nothing.
+    if pct >= 60:
+        chips.append("better than %d%% of your shelf" % pct)
+    elif pct <= 20:
+        chips.append("bottom %d%% of your shelf" % max(1, pct + 1))
+    return card("reception", "How it landed", body, chips, weight)
+
+
+def reason_themes(item, kind):
+    mine = set(item.get("keyword_list") or [])
+    if not mine:
+        return None
+    hits = []
+    for m in LIB.movies:
+        if m.get("movieid") == item.get("movieid"):
+            continue
+        if (m.get("userrating") or 0) < 7.5:
+            continue
+        shared = mine & set(m.get("keyword_list") or [])
+        if shared:
+            hits.append((m, shared))
+    if not hits:
+        return None
+    hits.sort(key=lambda x: (-(len(x[1])), -(x[0].get("userrating") or 0)))
+    best, shared = hits[0]
+    themes = ", ".join(sorted(shared)[:3])
+    body = ("Shares %s with %s, which you rated %s. That's %d %s on your shelf "
+            "pulling in the same direction."
+            % (themes, best.get("title"), fmt_score(best.get("userrating")),
+               len(hits), "film" if len(hits) == 1 else "films"))
+    return card("themes", "Runs on the same fuel", body,
+                sorted(shared)[:4], 11 + min(4, len(hits)))
+
+
+def reason_series(item, kind):
+    if kind != "movie" or not item.get("set"):
+        return None
+    name = item.get("set")
+    siblings = [m for m in LIB.movies
+                if m.get("set") == name and m.get("movieid") != item.get("movieid")]
+    if not siblings:
+        return None
+    rated = [m for m in siblings if m.get("userrating")]
+    body = ("Part of %s. You own %d films of it, and you've scored %d of them."
+            % (name, len(siblings) + 1, len(rated)))
+    return card("series", "It's part of something", body,
+                [m.get("title") for m in siblings[:3]], 7)
+
+
+def reason_standout(item, kind):
+    """The little facts that make something feel like a choice rather than a
+    row in a list."""
+    bits, weight = [], 2
+    runtime = minutes(item.get("runtime"))
+    year = item.get("year")
+
+    if runtime:
+        runtimes = sorted(minutes(m.get("runtime")) for m in LIB.movies
+                          if minutes(m.get("runtime")))
+        if runtimes and len(runtimes) > 4:
+            if runtime <= runtimes[max(0, len(runtimes) // 10)]:
+                bits.append("At %d minutes it's among the shortest things you own — "
+                            "no commitment required." % runtime)
+                weight = 6
+            elif runtime >= runtimes[-max(1, len(runtimes) // 10)]:
+                bits.append("At %d minutes it's one of the longest on your shelf. "
+                            "Clear the evening." % runtime)
+                weight = 6
+
+    if year:
+        years = sorted(m.get("year") for m in LIB.movies if m.get("year"))
+        if years and len(years) > 4:
+            if year <= years[max(0, len(years) // 20)]:
+                bits.append("It's also one of the oldest films you've got.")
+                weight = max(weight, 5)
+            elif year >= years[-1]:
+                bits.append("It's the newest thing in your library.")
+                weight = max(weight, 5)
+
+    countries = item.get("country_list") or []
+    if countries:
+        same = [m for m in LIB.movies
+                if countries[0] in (m.get("country_list") or [])]
+        if 0 < len(same) <= 4 and countries[0] not in ("United States of America",
+                                                       "United Kingdom"):
+            bits.append("One of only a handful of %s films on your shelf."
+                        % countries[0])
+            weight = max(weight, 7)
+
+    if not bits:
+        return None
+    return card("standout", "Worth knowing", " ".join(bits[:2]), [], weight)
+
+
+def reason_pitch(item, kind):
+    """Last resort so there's always something to read: the tagline, or the
+    opening of the plot."""
+    tagline = (item.get("tagline") or "").strip()
+    if kind != "movie":
+        episode = item.get("_episode") or {}
+        owned = item.get("episode") or 0
+        body = ("You own %d %s of this series."
+                % (owned, "episode" if owned == 1 else "episodes"))
+        return card("pitch", "What you've got", body, [], 5)
+    if tagline:
+        return card("pitch", "How they sold it", tagline, [], 4)
+    plot = (item.get("plot") or "").strip()
+    if plot:
+        return card("pitch", "The short version", plot[:200] + "…", [], 1)
+    return None
+
+
+# ===========================================================================
+# GET MORE — what's worth downloading
+# ===========================================================================
+
+# Suggestions used to live only in memory, so closing the app threw away
+# work that costs a few hundred TMDB lookups to rebuild — and with it the
+# list of episodes you're missing, which barely changes week to week and is
+# the least disposable part of it.
+RECS_PATH = os.path.join(HERE, "nextup_recs.json")
+
+SCAN = {
+    "running": False,
+    "step": "",
+    "done": 0,
+    "total": 0,
+    "finished_at": 0,
+    "result": None,
+    "error": None,
+}
+
+
+def load_saved_recs():
+    saved = load_json(RECS_PATH, None)
+    if isinstance(saved, dict) and saved.get("result"):
+        SCAN["result"] = saved["result"]
+        SCAN["finished_at"] = saved.get("finished_at") or 0
+
+
+def save_recs():
+    if SCAN.get("result"):
+        save_json(RECS_PATH, {"result": SCAN["result"],
+                              "finished_at": SCAN.get("finished_at") or time.time()})
+
+
+LIBSCAN = {"running": False, "step": "", "done": 0, "total": 0,
+           "result": None, "error": None}
+
+
+# ===========================================================================
+# SORTING NEW DOWNLOADS
+# ===========================================================================
+#
+# There is already a script for this, living in the downloads folder and
+# written for the job: it moves releases into MOVIES/ and TV/, strips junk,
+# quarantines extras, runs ffprobe quality checks and keeps a spreadsheet.
+# This does NOT reimplement any of that. It runs it, shows you what it
+# intends to do before it does anything, and then finishes the one thing
+# the script itself says it cannot do:
+#
+#   "NOT automated here (needs live web lookup): fetching missing TV
+#    episode titles ... Until filled in, TV episodes are named
+#    'SxxEyy - Show (Year).ext'."
+#
+# That lookup needed a person or a scheduled assistant reading Wikipedia.
+# This app already holds a TMDB key, a cached client and the code that maps
+# a show to its TMDB id, so the titles come from there instead — no
+# scraping, and nothing invented when TMDB doesn't know.
+
+SORTER_SCRIPT = "process_new_movies.py"
+SORTER_STATE_FILE = ".process_new_movies_state.json"
+# Folders in the downloads root that are the library itself, not new items.
+SORTER_NOT_ITEMS = {"MOVIES", "TV", "Applications", "Incomplete - Delete",
+                    "_EXTRAS_QUARANTINE", "__pycache__", "_DUPLICATES"}
+# Where the sorter puts the losing copy when a download duplicates something
+# you already have, and its log of what and why. The script never deletes a
+# video; this app is what asks.
+SORTER_ASIDE_DIR = "_DUPLICATES"
+SORTER_ASIDE_LOG = "PENDING.jsonl"
+SORT = {"running": False, "step": "", "report": [], "renamed": [],
+        "error": None, "finished_at": 0}
+_SORT_LOCK = threading.Lock()
+# The script names episodes it has no title for exactly like this.
+_UNTITLED_EP = re.compile(r"^S(\d{2})E(\d{2,3}) - (.+)$")
+
+
+def downloads_root():
+    folder = (CONFIG.get("downloads_folder") or "").strip()
+    return folder if folder and os.path.isdir(folder) else None
+
+
+def sorter_python():
+    """An interpreter that can run the script — which needs openpyxl for the
+    spreadsheet. The packaged build is its own frozen python with no such
+    thing, so this looks for a real installation rather than sys.executable.
+    """
+    import subprocess
+    tried = []
+    candidates = []
+    if not getattr(sys, "frozen", False):
+        candidates.append(sys.executable)
+    candidates += ["python", "python3", "py"]
+    for exe in candidates:
+        if not exe or exe in tried:
+            continue
+        tried.append(exe)
+        try:
+            out = subprocess.run([exe, "-c", "import openpyxl,sys;print(sys.executable)"],
+                                 capture_output=True, text=True, timeout=25,
+                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except Exception:
+            continue
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip(), None
+    return None, ("No Python with openpyxl was found. The sorter needs it for "
+                  "the film spreadsheet — install it with: pip install openpyxl")
+
+
+def sorter_waiting():
+    """What's sitting in the downloads folder waiting to be sorted. Names
+    only, from one listing — nothing is opened and no file is touched."""
+    root = downloads_root()
+    if not root:
+        return []
+    try:
+        return sorted(name for name in os.listdir(root)
+                      if name not in SORTER_NOT_ITEMS
+                      and not name.startswith(".")
+                      and os.path.isdir(os.path.join(root, name)))
+    except OSError:
+        return []
+
+
+def sorter_suggestion():
+    """A downloads folder worth offering, when none is set.
+
+    The library folders are usually inside it — MOVIES/ and TV/ sit in the
+    same place the downloads land — so their common parent is the obvious
+    candidate. Only offered when the sorter script is actually there, so a
+    wrong guess can't be mistaken for a working setup.
+    """
+    folders = [f for f in (CONFIG.get("media_folders") or []) if f.strip()]
+    seen = []
+    for folder in folders:
+        parent = os.path.dirname(os.path.normpath(folder))
+        if parent and parent not in seen:
+            seen.append(parent)
+    for parent in seen:
+        if os.path.isfile(os.path.join(parent, SORTER_SCRIPT)):
+            return parent
+    return ""
+
+
+def _aside_entries():
+    """Everything the sorter has set aside that is still there, oldest first.
+
+    Read from the script's own log rather than by listing the folder: the log
+    is what knows WHY each file is there and which copy was kept instead."""
+    root = downloads_root()
+    if not root:
+        return []
+    path = os.path.join(root, SORTER_ASIDE_DIR, SORTER_ASIDE_LOG)
+    out = []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if entry.get("file") and os.path.isfile(entry["file"]):
+                    out.append(entry)
+    except OSError:
+        pass
+    return out
+
+
+def sorter_aside():
+    """What the page needs to ask about the set-aside copies."""
+    entries = _aside_entries()
+    items = []
+    for e in entries:
+        items.append({
+            "name": os.path.basename(e["file"]),
+            "size": e.get("size") or 0,
+            "why": e.get("why") or "",
+            "upgrade": bool(e.get("replaced")),
+            "kept": os.path.basename(e.get("kept") or ""),
+            "release": e.get("release") or "",
+        })
+    return {"count": len(items), "bytes": sum(i["size"] for i in items),
+            "upgrades": sum(1 for i in items if i["upgrade"]), "items": items}
+
+
+def sorter_carry_upgrades(conn=None):
+    """When a better copy replaced one of yours, point the library at it.
+
+    The library knows a film by its path, and your rating, play count and
+    resume point live on that row. An upgrade keeps your filename — so
+    usually the path doesn't change at all — but a better .mkv replacing an
+    .mp4 changes the extension, and the next scan would read that as one film
+    gone and a stranger arrived: rating lost. Moving the row to the new path
+    first means the scan finds it already known. Safe to run any number of
+    times; returns how many rows it moved."""
+    moved = 0
+    entries = [e for e in _aside_entries() if e.get("replaced") and e.get("by")]
+    if not entries:
+        return 0
+    own = conn is None
+    conn = conn or db()
+    try:
+        for e in entries:
+            old = os.path.normpath(e["replaced"])
+            new = os.path.normpath(e["by"])
+            if old == new or not os.path.isfile(new):
+                continue
+            for table in ("movies", "episodes"):
+                if conn.execute("SELECT 1 FROM %s WHERE path=?" % table, (new,)).fetchone():
+                    continue        # the new file is already known; leave both alone
+                cur = conn.execute("UPDATE %s SET path=? WHERE path=?" % table, (new, old))
+                moved += cur.rowcount
+        conn.commit()
+    finally:
+        if own:
+            conn.close()
+    if moved:
+        LOCAL.loaded_at = 0
+    return moved
+
+
+def sorter_bin_aside():
+    """Send every set-aside copy to the Recycle Bin. The only place this
+    feature removes anything, and only because you pressed the button that
+    says so — and even then it's the bin, where you can get them back."""
+    root = downloads_root()
+    if not root:
+        raise AppError("Set the downloads folder first.")
+    sorter_carry_upgrades()         # before the log that describes them goes
+    binned, failed, freed = 0, [], 0
+    for e in _aside_entries():
+        try:
+            size = os.path.getsize(e["file"])
+            send_to_trash(e["file"])
+            binned += 1
+            freed += size
+        except (OSError, AppError) as exc:
+            failed.append("%s: %s" % (os.path.basename(e["file"]), exc))
+    # Keep only the lines for files still there, and tidy away the release
+    # folders the files came out of, if emptying them left them empty.
+    base = os.path.join(root, SORTER_ASIDE_DIR)
+    left = _aside_entries()
+    try:
+        with open(os.path.join(base, SORTER_ASIDE_LOG), "w", encoding="utf-8") as fh:
+            for e in left:
+                fh.write(json.dumps(e) + "\n")
+    except OSError:
+        pass
+    try:
+        for name in os.listdir(base):
+            folder = os.path.join(base, name)
+            if os.path.isdir(folder) and not os.listdir(folder):
+                os.rmdir(folder)
+    except OSError:
+        pass
+    return {"binned": binned, "freed": freed, "failed": failed}
+
+
+def sorter_open_aside():
+    """Open the holding folder, for anyone who'd rather look than trust."""
+    root = downloads_root()
+    folder = os.path.join(root or "", SORTER_ASIDE_DIR)
+    if not root or not os.path.isdir(folder):
+        raise AppError("Nothing has been set aside.")
+    if os.name == "nt":
+        os.startfile(folder)
+    else:
+        import subprocess
+        subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", folder])
+
+
+def sorter_state():
+    root = downloads_root()
+    script = os.path.join(root, SORTER_SCRIPT) if root else None
+    return {
+        "folder": CONFIG.get("downloads_folder") or "",
+        "suggestion": "" if CONFIG.get("downloads_folder") else sorter_suggestion(),
+        "reachable": bool(root),
+        "script": bool(script and os.path.isfile(script)),
+        "waiting": sorter_waiting(),
+        "running": SORT["running"],
+        "step": SORT["step"],
+        "report": SORT["report"],
+        "renamed": SORT["renamed"],
+        "error": SORT["error"],
+        "aside": sorter_aside(),
+    }
+
+
+def _run_sorter(args, root, timeout):
+    """One run of the script, output captured. Returns (lines, error)."""
+    import subprocess
+    exe, why = sorter_python()
+    if not exe:
+        return [], why
+    # UTF-8, forced, both ways. The script reports with "⚠️" in it, and a
+    # python writing to a pipe on Windows encodes in the system codepage —
+    # cp1252 here, which can't hold that character, so the script died on
+    # its own final print with every file already moved. Its output never
+    # goes through a console when the app runs it, so nothing else would
+    # have said so.
+    #
+    # TORRENTS_ROOT is not a nicety either. The script finds its own root
+    # from a list that starts with the environment and then falls back to a
+    # hardcoded E:\Torrents — so running it with a working directory of
+    # somewhere else silently sorts the hardcoded folder instead. Saying
+    # which folder we mean is the only way to mean it.
+    env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1",
+               TORRENTS_ROOT=root)
+    try:
+        out = subprocess.run([exe, SORTER_SCRIPT] + args, cwd=root,
+                             capture_output=True, timeout=timeout, env=env,
+                             encoding="utf-8", errors="replace",
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except subprocess.TimeoutExpired:
+        return [], "The sorter took longer than %d minutes and was stopped." % (timeout // 60)
+    except OSError as exc:
+        return [], "Couldn't start the sorter: %s" % exc
+    text = (out.stdout or "") + (out.stderr or "")
+    lines = [l.rstrip() for l in text.splitlines() if l.strip()]
+    if out.returncode != 0:
+        return lines, "The sorter stopped with an error:\n%s" % ("\n".join(lines[-6:]) or "no output")
+    return lines, None
+
+
+def sorter_preview():
+    """What the script would do, changing nothing.
+
+    Its own --dry-run is nearly read-only, but not quite: items it skips
+    (still downloading, no video yet, an incomplete season pack) have a
+    counter bumped in its state file, and at three it starts flagging them.
+    Looking should not age that, so the state file is put back exactly as it
+    was afterwards.
+    """
+    root = downloads_root()
+    if not root:
+        raise AppError("Set the downloads folder first — Settings, under Your media folders.")
+    if not os.path.isfile(os.path.join(root, SORTER_SCRIPT)):
+        raise AppError("There's no %s in %s. That script is what does the sorting."
+                       % (SORTER_SCRIPT, root))
+    state_path = os.path.join(root, SORTER_STATE_FILE)
+    try:
+        with open(state_path, "rb") as fh:
+            saved = fh.read()
+    except OSError:
+        saved = None
+    try:
+        lines, error = _run_sorter(["--dry-run"], root, 600)
+    finally:
+        try:
+            if saved is None:
+                if os.path.isfile(state_path):
+                    os.remove(state_path)
+            else:
+                with open(state_path, "wb") as fh:
+                    fh.write(saved)
+        except OSError:
+            pass
+    if error:
+        raise AppError(error)
+    items, notes = [], []
+    for line in lines:
+        if "->" in line:
+            left, right = line.split("->", 1)
+            items.append({"name": left.strip(),
+                          "dest": right.replace("[DRY RUN]", "").strip()})
+        elif "No new items" not in line:
+            notes.append(line)
+    return {"items": items, "notes": notes, "waiting": sorter_waiting()}
+
+
+def _tmdb_episode_titles(show_name):
+    """{(season, episode): title} for a show, from TMDB. Empty when the show
+    can't be identified — a missing title is left as the script wrote it
+    rather than guessed at."""
+    LIB.load()
+    bare = re.sub(r"\s*\((?:19|20)\d{2}\)\s*$", "", show_name).strip()
+    tid = None
+    for s in LIB.shows:
+        if norm_title(s.get("title") or "") == norm_title(bare):
+            tid = tmdb_id_for_show(s)
+            break
+    if not tid:
+        found = tmdb("/search/tv", {"query": bare}) or {}
+        results = found.get("results") or []
+        if results:
+            tid = str(results[0]["id"])
+    if not tid:
+        return {}
+    titles = {}
+    detail = tmdb("/tv/%s" % tid) or {}
+    for season in detail.get("seasons") or []:
+        number = season.get("season_number")
+        if number is None:
+            continue
+        data = tmdb("/tv/%s/season/%s" % (tid, number)) or {}
+        for ep in data.get("episodes") or []:
+            name = (ep.get("name") or "").strip()
+            if name:
+                titles[(number, ep.get("episode_number"))] = name
+    return titles
+
+
+def _safe_title(name):
+    """A TMDB episode title as a filename: the library's own convention is no
+    colons and no apostrophes."""
+    name = name.replace(":", " -").replace("'", "").replace('"', "")
+    name = re.sub(r'[\\/*?<>|]', " ", name)
+    return re.sub(r"\s+", " ", name).strip(" .")
+
+
+def sorter_name_episodes(shows):
+    """Give the episodes the script just moved their real names.
+
+    Renames only files it wrote itself and only when TMDB has a title for
+    that exact episode; anything else is left alone. Subtitles carrying the
+    same episode code follow their episode.
+    """
+    root = downloads_root()
+    done = []
+    for show in shows:
+        folder = os.path.join(root, "TV", show)
+        if not os.path.isdir(folder):
+            continue
+        titles = _tmdb_episode_titles(show)
+        if not titles:
+            done.append("%s: TMDB had no episode list, names left as they are" % show)
+            continue
+        renamed = 0
+        for here, _dirs, files in os.walk(folder):
+            for name in files:
+                stem, ext = os.path.splitext(name)
+                match = _UNTITLED_EP.match(stem)
+                if not match or ext.lower() not in (".mkv", ".mp4", ".avi"):
+                    continue
+                season, episode, show_part = int(match.group(1)), int(match.group(2)), match.group(3)
+                title = titles.get((season, episode))
+                if not title:
+                    continue
+                new_stem = "S%02dE%02d %s - %s" % (season, episode, _safe_title(title), show_part)
+                target = os.path.join(here, new_stem + ext)
+                if os.path.exists(target):
+                    continue
+                try:
+                    os.rename(os.path.join(here, name), target)
+                    renamed += 1
+                except OSError:
+                    continue
+                subs = os.path.join(here, "Subs")
+                if os.path.isdir(subs):
+                    for sub in os.listdir(subs):
+                        if sub.startswith(stem):
+                            try:
+                                os.rename(os.path.join(subs, sub),
+                                          os.path.join(subs, new_stem + sub[len(stem):]))
+                            except OSError:
+                                pass
+        if renamed:
+            done.append("%s: named %d episode%s from TMDB" % (show, renamed, "" if renamed == 1 else "s"))
+    return done
+
+
+def sorter_worker():
+    """The real run, then the titles, then a library scan so the new things
+    turn up in the app without being asked for twice."""
+    try:
+        root = downloads_root()
+        SORT.update(running=True, error=None, report=[], renamed=[],
+                    step="Sorting what's downloaded")
+        lines, error = _run_sorter([], root, 3600)
+        SORT["report"] = lines
+        if error:
+            SORT["error"] = error
+            return
+        shows = []
+        for line in lines:
+            match = re.search(r"-> TV/([^\[]+)", line)
+            if match:
+                shows.append(match.group(1).strip())
+        if shows and CONFIG.get("tmdb_key"):
+            SORT["step"] = "Looking up episode titles"
+            try:
+                SORT["renamed"] = sorter_name_episodes(shows)
+            except Exception as exc:
+                SORT["renamed"] = ["Couldn't finish the episode titles: %s" % exc]
+        try:
+            sorter_carry_upgrades()
+        except Exception:
+            log_problem("sorter carry upgrades")
+        if any("->" in l for l in lines):
+            SORT["step"] = "Adding them to your library"
+            try:
+                library_scan_worker()
+            except Exception:
+                log_problem("sorter scan")
+        SORT["step"] = "Done"
+    except Exception as exc:
+        SORT["error"] = str(exc)
+        log_problem("sorter")
+    finally:
+        SORT["running"] = False
+        SORT["finished_at"] = time.time()
+
+
+def library_scan_worker():
+    """Walk the media folders and match everything to TMDB."""
+    try:
+        LIBSCAN.update(running=True, error=None, result=None,
+                       step="Looking through your folders", done=0, total=0)
+
+        def progress(done, total, label):
+            LIBSCAN.update(done=done, total=total, step=label)
+
+        LIBSCAN["result"] = scan_local_library(progress)
+        LIBSCAN["step"] = "Done"
+        cache_flush()
+        LOCAL.loaded_at = 0
+        # Anything another device shared about a film this library didn't
+        # have is still waiting in the inbox — this scan may have brought it.
+        SYNC["apply_pending"] = True
+        _SYNC_WAKE.set()
+    except Exception as exc:
+        LIBSCAN["error"] = str(exc)
+    finally:
+        LIBSCAN["running"] = False
+
+
+def scan_worker(hide_obvious):
+    try:
+        SCAN.update(running=True, error=None, step="Reading your library",
+                    done=0, total=9)
+        LIB.load(force=True)
+        budget = Budget(BUDGET)
+        owned = owned_movie_keys(LIB.movies)
+        has_key = bool(CONFIG.get("tmdb_key"))
+
+        SCAN.update(step="Checking seasons for missing episodes", done=1)
+        gaps = find_episode_gaps(budget, has_key)
+
+        SCAN.update(step="Checking collections you own part of", done=2)
+        collections = find_collection_gaps(budget, owned) if has_key else []
+
+        SCAN.update(step="Looking up directors you collect", done=3)
+        directors = find_director_gaps(budget, owned, hide_obvious) if has_key else []
+
+        SCAN.update(step="Looking up actors you collect", done=4)
+        actors = find_actor_gaps(budget, owned, hide_obvious) if has_key else []
+
+        SCAN.update(step="Working out what you actually like", done=5)
+        profile = build_taste_profile(budget) if has_key else None
+
+        SCAN.update(step="Searching outward from your taste", done=6)
+        bangers = find_bangers(budget, owned, hide_obvious, profile) if has_key else []
+
+        owned_shows = owned_show_keys(LIB.shows)
+        SCAN.update(step="Finding shows you might like", done=7)
+        shows = find_show_recs(budget, owned_shows, hide_obvious, profile) if has_key else []
+
+        SCAN.update(step="Seeing what would fill your channels", done=8)
+        channels = find_channel_fill(budget, owned, owned_shows, hide_obvious) if has_key else []
+
+        SCAN["result"] = {
+            "has_key": has_key,
+            "gaps": gaps,
+            "collections": collections,
+            "directors": directors,
+            "actors": actors,
+            "bangers": bangers,
+            "shows": shows,
+            "channels": channels,
+            "profile": profile_summary(profile) if profile else None,
+            "counts": {
+                "movies": len(LIB.movies),
+                "shows": len(LIB.shows),
+                "episodes": len(LIB.episodes),
+            },
+        }
+        SCAN.update(step="Done", done=9, finished_at=time.time())
+        save_recs()
+        cache_flush()
+    except Exception as exc:
+        SCAN["error"] = str(exc)
+    finally:
+        SCAN["running"] = False
+
+
+# ===========================================================================
+# DOCKING STATION — copying chosen films and shows onto a plugged-in drive
+# ===========================================================================
+#
+# One-way and additive only: this reads from the library's own drives and
+# writes to somewhere else. Nothing here ever deletes or moves the original,
+# so the worst a mistake costs is a re-run.
+
+DOCK_CHUNK = 4 * 1024 * 1024
+
+DOCK = {
+    "running": False, "step": "", "done": 0, "total": 0,
+    "bytes_done": 0, "bytes_total": 0, "errors": [], "finished_at": 0,
+}
+DOCK_CANCEL = threading.Event()
+
+_DOCK_UNSAFE = re.compile(r'[<>:"/\\|?*]')
+
+
+def dock_safe_name(name):
+    """A title, made safe to sit inside a Windows path. Punctuation a film
+    title can legally contain — a colon in a subtitle, a slash in a Best
+    Of/Worst Of — is exactly what a folder name can't."""
+    return _DOCK_UNSAFE.sub("_", name or "").strip(" .") or "Untitled"
+
+
+class DockCancelled(Exception):
+    pass
+
+
+def dock_root(dest):
+    """A destination as a real root. The drive picker hands over a bare
+    "G:", and os.path.join("G:", "MOVIES") is "G:MOVIES" — a DRIVE-RELATIVE
+    path, resolved against whatever that drive's current directory happens
+    to be. It has worked only because that directory happened to be the
+    root; the paths it produced were wrong to look at either way."""
+    dest = (dest or "").strip()
+    if re.match(r"^[A-Za-z]:$", dest):
+        return dest + os.sep
+    return dest
+
+
+def _list_dock_drives_mac():
+    """The /Volumes equivalent of the drive-letter walk below.
+
+    Every mounted volume apart from the boot disk shows up in /Volumes, so
+    the listing is the easy part. The exclusions are the same idea as on
+    Windows — don't offer the system disk, don't offer whatever the library
+    or this folder already lives on — worked out by comparing the device
+    each path is mounted from rather than by string-matching prefixes.
+
+    A read-only mount is dropped. macOS mounts NTFS read-only, which is
+    exactly the drive someone is most likely to plug in here, and offering
+    it as a copy target would fail at the first write with no clue why.
+    """
+    import subprocess
+
+    def device_of(path):
+        try:
+            return os.stat(path).st_dev
+        except OSError:
+            return None
+
+    exclude = set()
+    for path in ["/"] + list(CONFIG.get("media_folders") or []) + [HERE]:
+        dev = device_of(path)
+        if dev is not None:
+            exclude.add(dev)
+
+    # Which mounts are read-only, straight from the mount table.
+    readonly = set()
+    try:
+        out = subprocess.run(["/sbin/mount"], capture_output=True, text=True,
+                             timeout=5).stdout
+        for line in out.splitlines():
+            if " on " not in line:
+                continue
+            mp = line.split(" on ", 1)[1]
+            mp = mp.rsplit(" (", 1)[0] if " (" in mp else mp
+            opts = line.rsplit("(", 1)[-1].rstrip(")") if "(" in line else ""
+            if "read-only" in opts:
+                readonly.add(mp)
+    except Exception:
+        pass
+
+    drives = []
+    try:
+        names = sorted(os.listdir("/Volumes"))
+    except OSError:
+        return []
+    for name in names:
+        root = os.path.join("/Volumes", name)
+        if not os.path.isdir(root) or os.path.islink(root):
+            continue
+        dev = device_of(root)
+        if dev is None or dev in exclude:
+            continue
+        if root in readonly:
+            continue
+        try:
+            total, _used, free = shutil.disk_usage(root)
+        except OSError:
+            continue
+        # "letter" is what the picker hands back as the destination; on a Mac
+        # the mount point is the thing that plays that role. dock_root leaves
+        # it alone, having nothing drive-relative to repair.
+        drives.append({
+            "letter": root, "label": name,
+            "removable": True, "free": free, "total": total,
+        })
+    return drives
+
+
+def list_dock_drives():
+    """Drives worth offering as a copy target. Excludes the system drive and
+    anything the library itself already lives on — the point is to move
+    files off this machine, not to offer the shelf as a place to put them
+    back down. Windows only: nothing here needs stdlib beyond ctypes, but
+    the drive letters and GetDriveTypeW calls are meaningless elsewhere, so
+    macOS gets its own walk of /Volumes below."""
+    if sys.platform == "darwin":
+        return _list_dock_drives_mac()
+    if os.name != "nt":
+        return []
+    import ctypes
+
+    exclude = set()
+    sysdrive = os.environ.get("SystemDrive", "C:")
+    exclude.add(sysdrive[:2].upper())
+    for folder in CONFIG.get("media_folders") or []:
+        drive = os.path.splitdrive(folder)[0]
+        if drive:
+            exclude.add(drive.upper())
+    here_drive = os.path.splitdrive(HERE)[0]
+    if here_drive:
+        exclude.add(here_drive.upper())
+
+    kernel32 = ctypes.windll.kernel32
+    mask = kernel32.GetLogicalDrives()
+    drives = []
+    for i in range(26):
+        if not (mask >> i) & 1:
+            continue
+        letter = "%s:" % chr(65 + i)
+        if letter.upper() in exclude:
+            continue
+        root = letter + "\\"
+        # 2 = removable, 3 = fixed — most USB hard drives enumerate as fixed
+        # once formatted, so both are offered. 4 (network) and 5 (CD) never
+        # are; a network share is a different job and a disc can't be
+        # written to.
+        kind = kernel32.GetDriveTypeW(root)
+        if kind not in (2, 3):
+            continue
+        try:
+            total, _used, free = shutil.disk_usage(root)
+        except OSError:
+            continue
+        label_buf = ctypes.create_unicode_buffer(261)
+        kernel32.GetVolumeInformationW(root, label_buf, 260, None, None, None, None, 0)
+        drives.append({
+            "letter": letter, "label": label_buf.value or "",
+            "removable": kind == 2, "free": free, "total": total,
+        })
+    return drives
+
+
+def dock_plan_items(selection):
+    """Selection is [{'kind':'movie'|'tvshow','id':...}, ...]. Resolves each
+    into the source files it means — one for a film, every episode file
+    owned for a show — with the folder each should land in on the target
+    drive. Anything no longer in the library is dropped with a warning
+    rather than stopping the rest."""
+    LOCAL.load()
+    movies = dict((m["movieid"], m) for m in LOCAL.movies)
+    shows = dict((s["tvshowid"], s) for s in LOCAL.shows)
+    eps_by_show = defaultdict(list)
+    for e in LOCAL.episodes:
+        eps_by_show[e["tvshowid"]].append(e)
+
+    plan = []
+    warnings = []
+    for sel in (selection or []):
+        kind = sel.get("kind")
+        try:
+            item_id = int(sel.get("id"))
+        except (TypeError, ValueError):
+            continue
+        if kind == "movie":
+            m = movies.get(item_id)
+            if not m or not m.get("file"):
+                warnings.append("A film in the selection is no longer in the library.")
+                continue
+            folder = os.path.join("Films", dock_safe_name(
+                "%s (%s)" % (m["title"], m["year"]) if m.get("year") else m["title"]))
+            plan.append({
+                "src": m["file"],
+                "dest_rel": os.path.join(folder, os.path.basename(m["file"])),
+                "label": m["title"], "key": "movie:%d" % item_id,
+                "lib_kind": "movie", "lib_id": item_id,
+            })
+        elif kind == "tvshow":
+            s = shows.get(item_id)
+            if not s:
+                warnings.append("A show in the selection is no longer in the library.")
+                continue
+            episodes = sorted(eps_by_show.get(item_id, []),
+                              key=lambda e: (e.get("season") or 0, e.get("episode") or 0))
+            if not episodes:
+                warnings.append("%s has no episode files to copy." % s["title"])
+                continue
+            for e in episodes:
+                if not e.get("file"):
+                    continue
+                folder = os.path.join("TV Shows", dock_safe_name(s["title"]),
+                                      "Season %02d" % (e.get("season") or 0))
+                plan.append({
+                    "src": e["file"],
+                    "dest_rel": os.path.join(folder, os.path.basename(e["file"])),
+                    "label": "%s S%02dE%02d" % (s["title"], e.get("season") or 0,
+                                                e.get("episode") or 0),
+                    "key": "tvshow:%d" % item_id,
+                    "lib_kind": "episode", "lib_id": e["episodeid"],
+                })
+    return plan, warnings
+
+
+# A drive's video files, by name, with the sizes seen for each. Built by
+# walking the whole drive once, because the drive's own layout is not the
+# app's: Akira sat at G:\MOVIES\Akira (1988)\ while the app looked only at
+# G:\Films\Akira (1988)\, and a copy it didn't make itself was invisible to
+# it. A media file's name and size together are identity enough — the two
+# Kurosawa featurettes with "Akira" in the name matched nothing.
+#
+# Cached per drive for a couple of minutes, and thrown away when a copy to
+# that drive finishes, so the files it just wrote are seen next time. The
+# walk has a budget; a drive too big to finish inside it is indexed as far
+# as it got and says so, rather than hanging the page.
+_DOCK_INDEX = {}
+DOCK_INDEX_TTL = 120
+DOCK_INDEX_BUDGET = 45
+_DOCK_SKIP_DIRS = {"$RECYCLE.BIN", "System Volume Information"}
+
+
+def dock_drive_index(root):
+    """{basename_lower: {size: path}} for every video file on the drive."""
+    root = os.path.normpath(root)
+    cached = _DOCK_INDEX.get(root)
+    if cached and time.time() - cached["at"] < DOCK_INDEX_TTL:
+        return cached
+    index, partial, started = {}, False, time.time()
+    for dirpath, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in _DOCK_SKIP_DIRS and not d.startswith(".")]
+        for name in files:
+            if os.path.splitext(name)[1].lower() not in VIDEO_EXT:
+                continue
+            if name.endswith(".nextup-part"):
+                continue                # a copy that never finished
+            full = os.path.join(dirpath, name)
+            try:
+                size = os.path.getsize(full)
+            except OSError:
+                continue
+            index.setdefault(name.lower(), {})[size] = full
+        if time.time() - started > DOCK_INDEX_BUDGET:
+            partial = True
+            break
+    entry = {"at": time.time(), "files": index, "partial": partial,
+             "took": time.time() - started}
+    _DOCK_INDEX[root] = entry
+    return entry
+
+
+def dock_index_forget(root):
+    _DOCK_INDEX.pop(os.path.normpath(root), None)
+
+
+def dock_found_on_drive(index, item, size=None):
+    """The path on the drive that already holds this planned file, or None.
+    With a size, only an exact-size twin counts — the test the copy applies.
+    Without one, any file of that name counts — the glance the posters get."""
+    sizes = index["files"].get(os.path.basename(item["dest_rel"]).lower())
+    if not sizes:
+        return None
+    if size is None:
+        return next(iter(sizes.values()))
+    return sizes.get(size)
+
+
+def dock_presence(selection, dest):
+    """For each selected item, how much of it is already on `dest`.
+
+    Answers from the destination alone — a file is "there" if something
+    sits at its planned path with a size above zero — so the media drive is
+    never woken to answer a question about a different drive. A copy that
+    stopped partway leaves a .nextup-part beside the real name and nothing
+    at it, so it correctly reads as not there. Returns {key: {have, of}}.
+    """
+    if not dest or not os.path.isdir(dest):
+        return {}
+    if media_file_check(dest) is None:
+        return {"_stalled": True}
+    index = dock_drive_index(dest)
+    catalogue, matched = _drive_catalogue(dest)
+    folders = dict((g["key"], g.get("where")) for g in catalogue["films"] + catalogue["shows"])
+    plan, _ = dock_plan_items(selection)
+    out = {}
+    for item in plan:
+        slot = out.setdefault(item["key"], {"have": 0, "of": 0})
+        slot["of"] += 1
+        if dock_item_on_drive(item, matched, index):
+            slot["have"] += 1
+            where = folders.get(item["key"]) or dock_found_on_drive(index, item)
+            if where:
+                slot.setdefault("where", where)
+    if index["partial"]:
+        out["_partial"] = True
+    return out
+
+
+def _cat_key(title):
+    """A title for matching across spellings: "&" read as "and", articles off
+    the front, accents folded, punctuation gone — so a folder called
+    "Pokemon" finds the show TMDB spells with an accent, "Love Death and
+    Robots" finds "Love, Death & Robots", and "The Wire" sorts under W."""
+    title = re.sub(r"\s*&\s*", " and ", title or "")
+    return _daytime_key(re.sub(r"^\s*(the|a|an)\s+", "", title, flags=re.I))
+
+
+# A folder that is one season of something rather than the something itself.
+_CAT_SEASONISH = re.compile(r"season|series|specials|\bs\d{1,2}\b", re.I)
+# An episode number in a name the parser couldn't place: "921 & 922" (season
+# 9, episodes 21-22) or a double episode like "S01E01E02". Resolutions are
+# gone by then — this is read from the parsed title, not the raw filename.
+_CAT_EPISODE_SIGNAL = re.compile(r"(?:^|\D)\d{3,4}(?:\D|$)|\bs\d{1,2}e\d{1,3}", re.I)
+# The season and episode those signals name, for the same strays: "S01E01E02"
+# is season 1 episode 1, "921 & 922" is season 9 episode 21.
+_CAT_EP_NUMBER = re.compile(r"\bs(\d{1,2})e(\d{1,3})|(?:^|\D)(\d{1,2})(\d{2})(?:\D|$)", re.I)
+
+
+def _stray_episode(title):
+    hit = _CAT_EP_NUMBER.search(title or "")
+    if not hit:
+        return None
+    if hit.group(1):
+        return int(hit.group(1)), int(hit.group(2))
+    return int(hit.group(3)), int(hit.group(4))
+
+
+def drive_catalogue(root):
+    """The Drives view's answer: what's on a drive, grouped and matched."""
+    return _drive_catalogue(root)[0]
+
+
+def _drive_catalogue(root):
+    """What is on a drive, in the Library's own shape: films and shows, each
+    matched to the library where it can be so it wears the poster it already
+    has here, and plainly marked where it can't.
+
+    Reads the drive through dock_drive_index — the same single walk the copy
+    tray does, sharing its cache — and never touches the media drive: every
+    match below is made from names, and none needs a stat of the original.
+
+    Matching is tried from the most certain to the least, and each looser
+    step is fenced so it can only ever pick out one thing:
+
+      1. the same filename as a library file;
+      2. the same filename with punctuation and extension folded away, when
+         only one library file has it — a Windows-safe rename swaps ":" for
+         a lookalike, and a remux changes .mkv to .mp4;
+      3. the title parsed from the path, as the scan parses it, on the same
+         year or one either side — festival and release years disagree;
+      4. a title that is a shortened or prefixed form of a library title
+         ("Dr Strangelove", "Star Wars - Episode VI - Return of the Jedi"),
+         only on the exact year, and only when it names one film;
+      5. and a file that still reads as a film but sits inside a show's own
+         folder with an episode number in its name belongs to that show.
+
+    Anything left over is shown by its own name and marked as not in the
+    library, which is the honest answer rather than a wrong poster.
+    """
+    LIB.load()
+    index = dock_drive_index(root)
+
+    lib_by_name, lib_by_stem = {}, {}
+
+    def remember(path, hit):
+        base = os.path.basename(path)
+        lib_by_name.setdefault(base.lower(), hit)
+        stem = _daytime_key(os.path.splitext(base)[0])
+        if len(stem) < 8:
+            return                          # "s01e01" names a hundred things
+        prev = lib_by_stem.get(stem)
+        if prev is None:
+            lib_by_stem[stem] = hit
+        elif prev is not False and prev[1] is not hit[1]:
+            lib_by_stem[stem] = False       # two library files share it: no guess
+
+    for m in LIB.movies:
+        if m.get("file"):
+            remember(m["file"], ("movie", m))
+    shows = dict((s["tvshowid"], s) for s in LIB.shows)
+    eps_per_show = Counter()
+    for e in LIB.episodes:
+        eps_per_show[e.get("tvshowid")] += 1
+        if e.get("file"):
+            remember(e["file"], ("episode", e))
+
+    film_keys = [(_cat_key(m.get("title")), m) for m in LIB.movies]
+    films_by_key = defaultdict(list)
+    for k, m in film_keys:
+        films_by_key[k].append(m)
+    shows_by_key = {}
+    for s in LIB.shows:
+        shows_by_key.setdefault(_cat_key(s.get("title")), s)
+    # Which library episode a (show, season, episode) names, so a file
+    # matched by its parsed name counts as THAT episode being on the drive —
+    # not merely "something of this show" — and the copy can skip exactly it.
+    lib_ep_by_num = {}
+    for e in LIB.episodes:
+        lib_ep_by_num.setdefault((e.get("tvshowid"), e.get("season"), e.get("episode")), e["episodeid"])
+    matched = {"movie": set(), "episode": set()}
+
+    def find_film(title, year):
+        key = _cat_key(title)
+        cands = films_by_key.get(key) or []
+        if year:
+            close = [c for c in cands if c.get("year") and abs(c["year"] - year) <= 1]
+            if close:
+                return min(close, key=lambda c: abs(c["year"] - year))
+        # A lone candidate with no year on either side is the same film; with
+        # two different years it's a remake, not a match.
+        if len(cands) == 1 and not (year and cands[0].get("year")):
+            return cands[0]
+        # The shorter of the two names has to be distinctive on its own:
+        # "drstrangelove" and "returnofthejedi" are, "return" is not — a film
+        # called Return from 1983 would otherwise be taken for the Jedi.
+        if year and len(key) >= 10:
+            loose = [m for k, m in film_keys
+                     if m.get("year") == year and min(len(k), len(key)) >= 10
+                     and (k.startswith(key) or key.startswith(k) or key.endswith(k))]
+            if len(loose) == 1:
+                return loose[0]
+        return None
+
+    groups = {}
+    show_dirs = defaultdict(set)            # folder -> keys of shows found in it
+    unidentified, strays = [], []
+
+    def film_group(m):
+        key = "movie:%d" % m["movieid"]
+        if key not in groups:
+            groups[key] = {"key": key, "kind": "movie", "id": m["movieid"],
+                           "title": m.get("title"), "year": m.get("year"), "in_library": True,
+                           "poster": art_url(m.get("art", {}).get("poster"))}
+        return groups[key]
+
+    def show_group(s):
+        key = "tvshow:%d" % s["tvshowid"]
+        if key not in groups:
+            groups[key] = {"key": key, "kind": "tvshow", "id": s["tvshowid"],
+                           "title": s.get("title"), "year": s.get("year"), "in_library": True,
+                           "poster": art_url(s.get("art", {}).get("poster")),
+                           "of": eps_per_show[s["tvshowid"]]}
+        return groups[key]
+
+    def stranger(key, kind, title, year):
+        if key not in groups:
+            groups[key] = {"key": key, "kind": kind, "id": None, "title": title,
+                           "year": year, "in_library": False, "poster": None}
+        return groups[key]
+
+    def add(g, path, size):
+        g["files"] = g.get("files", 0) + 1
+        g["bytes"] = g.get("bytes", 0) + size
+        g.setdefault("where", os.path.dirname(path))
+        if g["kind"] == "tvshow":
+            g["episodes"] = g.get("episodes", 0) + 1
+            folder = os.path.dirname(path)
+            show_dirs[folder].add(g["key"])
+            if _CAT_SEASONISH.search(os.path.basename(folder)):
+                show_dirs[os.path.dirname(folder)].add(g["key"])
+
+    for name, sizes in index["files"].items():
+        stem_hit = lib_by_stem.get(_daytime_key(os.path.splitext(name)[0])) or None
+        for size, path in sizes.items():
+            rel = os.path.relpath(path, root)
+            if any(is_extras_dir(part) for part in rel.split(os.sep)[:-1]):
+                continue                    # featurettes, as the scan skips them
+            if is_staging_path(path) or size < 50 * 1024 * 1024:
+                continue                    # half-downloaded, or samples and trailers
+            hit = lib_by_name.get(name) or stem_hit
+            if hit and hit[0] == "movie":
+                matched["movie"].add(hit[1]["movieid"])
+                add(film_group(hit[1]), path, size)
+                continue
+            if hit and hit[0] == "episode" and hit[1].get("tvshowid") in shows:
+                matched["episode"].add(hit[1]["episodeid"])
+                add(show_group(shows[hit[1]["tvshowid"]]), path, size)
+                continue
+            kind, parsed = classify(path)
+            if kind == "episode":
+                s = shows_by_key.get(_cat_key(parsed[0]))
+                if s:
+                    ep_id = lib_ep_by_num.get((s["tvshowid"], parsed[1], parsed[2]))
+                    if ep_id:
+                        matched["episode"].add(ep_id)
+                add(show_group(s) if s else stranger(
+                    "newshow:" + _cat_key(parsed[0]), "tvshow", parsed[0], None), path, size)
+            elif kind == "movie":
+                m = find_film(*parsed)
+                if m:
+                    matched["movie"].add(m["movieid"])
+                    add(film_group(m), path, size)
+                else:
+                    strays.append((path, size, parsed))   # decided once every show is known
+            else:
+                unidentified.append(rel)
+
+    for path, size, (title, year) in strays:
+        folder = os.path.dirname(path)
+        owners = set(show_dirs.get(folder, ()))
+        if not owners and _CAT_SEASONISH.search(os.path.basename(folder)):
+            owners = set(show_dirs.get(os.path.dirname(folder), ()))
+        if len(owners) == 1 and _CAT_EPISODE_SIGNAL.search(title or ""):
+            g = groups[owners.pop()]
+            num = _stray_episode(title)
+            if g["id"] is not None and num:
+                ep_id = lib_ep_by_num.get((g["id"], num[0], num[1]))
+                if ep_id:
+                    matched["episode"].add(ep_id)
+            add(g, path, size)
+        else:
+            add(stranger("newfilm:%s:%s" % (_cat_key(title), year or ""),
+                         "movie", title, year), path, size)
+
+    def order(g):
+        return (_cat_key(g["title"]), g.get("year") or 0)
+
+    films = sorted((g for g in groups.values() if g["kind"] == "movie"), key=order)
+    show_list = sorted((g for g in groups.values() if g["kind"] == "tvshow"), key=order)
+    try:
+        usage = shutil.disk_usage(root)
+        free, total = usage.free, usage.total
+    except OSError:
+        free = total = None
+    unidentified.sort()
+    return {
+        "root": root, "films": films, "shows": show_list,
+        "episodes": sum(g.get("episodes", 0) for g in show_list),
+        "bytes": sum(g.get("bytes", 0) for g in groups.values()),
+        "unidentified": len(unidentified), "unidentified_sample": unidentified[:20],
+        "partial": index["partial"], "free": free, "total": total,
+    }, matched
+
+
+def dock_item_on_drive(item, matched, index, size=None):
+    """Is this planned file already on the drive? One answer for the SELECT
+    marks, the price and the copy alike, so a tick on a poster always means
+    the copy will leave it be.
+
+    Yes if the drive's catalogue matched this exact library film or episode
+    — however the drive's own copy is named or packaged — or if a file of
+    the same name sits anywhere on it (the same size, when a size is given).
+    """
+    ids = matched.get(item.get("lib_kind")) or ()
+    if item.get("lib_id") in ids:
+        return True
+    return bool(dock_found_on_drive(index, item, size))
+
+
+def dock_size_plan(plan):
+    """Stats every source file before committing to a copy, under the same
+    stall guard playback uses — a sleeping drive gets one wait, not one per
+    chunk, and an item it never wakes up for is dropped with a warning
+    instead of hanging the whole job."""
+    sized = []
+    warnings = []
+    for item in plan:
+        present = media_file_check(item["src"])
+        if not present:
+            warnings.append("%s — %s" % (item["label"],
+                "the drive holding it isn't answering" if present is None
+                else "file has moved or been deleted"))
+            continue
+        try:
+            size = os.path.getsize(item["src"])
+        except OSError as exc:
+            warnings.append("%s — couldn't read its size (%s)" % (item["label"], exc))
+            continue
+        sized.append(dict(item, size=size))
+    return sized, warnings
+
+
+def dock_copy_file(src, dest, size):
+    """Copied in chunks rather than in one shutil call, so a multi-gigabyte
+    film reports progress as it goes — a USB hard drive can take minutes per
+    file — and so a cancel partway through stops within a chunk instead of
+    running to completion first. Written to a .nextup-part sibling and
+    renamed into place at the end, so a cancelled or failed copy never
+    leaves something at the real name that looks finished but isn't."""
+    tmp = dest + ".nextup-part"
+    try:
+        with open(src, "rb") as fsrc, open(tmp, "wb") as fdst:
+            while True:
+                if DOCK_CANCEL.is_set():
+                    raise DockCancelled()
+                chunk = fsrc.read(DOCK_CHUNK)
+                if not chunk:
+                    break
+                fdst.write(chunk)
+                DOCK["bytes_done"] += len(chunk)
+        shutil.copystat(src, tmp)
+        os.replace(tmp, dest)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def dock_copy_worker(plan, dest_root):
+    try:
+        DOCK.update(running=True, step="Working out what to copy", done=0,
+                    total=0, bytes_done=0, bytes_total=0, errors=[], finished_at=0)
+        sized, warnings = dock_size_plan(plan)
+        DOCK["errors"] = list(warnings)
+        DOCK["total"] = len(sized)
+        DOCK["bytes_total"] = sum(i["size"] for i in sized)
+        index = dock_drive_index(dest_root)
+        _, matched = _drive_catalogue(dest_root)
+        for i, item in enumerate(sized):
+            if DOCK_CANCEL.is_set():
+                DOCK["step"] = "Cancelled"
+                break
+            DOCK["step"] = item["label"]
+            DOCK["done"] = i
+            dest = os.path.join(dest_root, item["dest_rel"])
+            try:
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                if (os.path.exists(dest) and os.path.getsize(dest) == item["size"]) \
+                        or dock_item_on_drive(item, matched, index, item["size"]):
+                    # Already on the drive — at the planned path from an
+                    # earlier run of this job, under its own name at its own
+                    # size, or as the drive's own copy of this very film or
+                    # episode however that copy is named. Exactly what the
+                    # SELECT marks showed as ticked, so a tick is a promise.
+                    DOCK["bytes_done"] += item["size"]
+                else:
+                    dock_copy_file(item["src"], dest, item["size"])
+            except DockCancelled:
+                DOCK["step"] = "Cancelled"
+                break
+            except Exception as exc:
+                DOCK["errors"].append("%s — %s" % (item["label"], exc))
+        else:
+            DOCK["done"] = DOCK["total"]
+            DOCK["step"] = "Done"
+    except Exception as exc:
+        DOCK["errors"].append(str(exc))
+    finally:
+        DOCK["running"] = False
+        DOCK["finished_at"] = time.time()
+        dock_index_forget(dest_root)     # the drive has new files on it now
+
+
+def find_episode_gaps(budget, has_key):
+    """Seasons with holes in them. Works without TMDB for interior holes;
+    with TMDB it also catches missing tails and whole missing seasons."""
+    by_show = defaultdict(list)
+    for e in LIB.episodes:
+        by_show[e.get("tvshowid")].append(e)
+
+    out = []
+    by_show_eps = defaultdict(list)
+    for e in LIB.episodes:
+        by_show_eps[e.get("tvshowid")].append(e)
+    shows = sorted(LIB.shows, key=lambda s: -(s.get("userrating") or 0))
+    for show in shows:
+        eps = by_show.get(show.get("tvshowid")) or []
+        if not eps:
+            continue
+        owned_by_season = defaultdict(set)
+        for e in eps:
+            season = e.get("season") or 0
+            if season <= 0:
+                continue
+            owned_by_season[season].add(e.get("episode") or 0)
+        if not owned_by_season:
+            continue
+
+        real_counts = {}
+        if has_key and budget.take("shows"):
+            tid = tmdb_id_for_show(show)
+            if tid:
+                detail = tmdb("/tv/%s" % tid) or {}
+                for season in detail.get("seasons") or []:
+                    num = season.get("season_number")
+                    if num and num > 0:
+                        real_counts[num] = season.get("episode_count") or 0
+                # A season still airing lists episodes that don't exist yet.
+                # Recount the latest season using actual air dates so a show
+                # you're up to date with doesn't read as full of holes.
+                if real_counts:
+                    latest = max(real_counts)
+                    today = time.strftime("%Y-%m-%d")
+                    season_detail = tmdb("/tv/%s/season/%s" % (tid, latest)) or {}
+                    aired = [e for e in (season_detail.get("episodes") or [])
+                             if (e.get("air_date") or "9999") <= today]
+                    if aired:
+                        real_counts[latest] = max(
+                            e.get("episode_number") or 0 for e in aired)
+                    elif season_detail:
+                        real_counts.pop(latest, None)
+
+        seasons = []
+        missing_total = 0
+        all_seasons = set(owned_by_season) | set(real_counts)
+        for num in sorted(all_seasons):
+            owned_eps = owned_by_season.get(num, set())
+            total = real_counts.get(num) or (max(owned_eps) if owned_eps else 0)
+            if total <= 0:
+                continue
+            missing = [n for n in range(1, total + 1) if n not in owned_eps]
+            # A whole season you don't have at all is only worth flagging if
+            # you own the seasons around it.
+            if not owned_eps:
+                lower = [s for s in owned_by_season if s < num]
+                if not lower:
+                    continue
+            missing_total += len(missing)
+            seasons.append({
+                "season": num, "total": total,
+                "owned": sorted(owned_eps), "missing": missing,
+            })
+
+        if missing_total:
+            out.append({
+                "key": "show:%s" % show.get("tvshowid"),
+                "title": show.get("title"),
+                "year": show.get("year"),
+                "art": art_url(show.get("art", {}).get("poster")),
+                "missing_total": missing_total,
+                "seasons": seasons,
+                "in_progress": bool(series_progress(by_show_eps, show.get("tvshowid"))),
+                "yours": show.get("userrating") or 0,
+                "genres": show.get("genre") or [],
+                "rating": round(show.get("rating") or 0, 1),
+                "source": "tmdb" if real_counts else "local",
+            })
+
+    out.sort(key=lambda s: (not s["in_progress"], -s["yours"], s["missing_total"]))
+    return [s for s in out if s["key"] not in DISMISSED][:40]
+
+
+def fresh_gaps(gaps):
+    """The saved missing-episode list, re-checked against the library as it
+    is now.
+
+    A recommendations scan asks TMDB how long every season is, which costs
+    budget and takes a while, so its result is saved and shown until the next
+    one. The season lengths keep. What you OWN doesn't: fill a gap and the
+    saved list went on listing it until you happened to scan again — Futurama
+    still showed 91 missing a week after Seasons 6 to 8 and S02E20 arrived.
+    So the lengths come from the scan and the owned episodes from the
+    library, every time the page asks. Cheap: no TMDB, one pass over the
+    episodes. A show with nothing left missing drops off the list; a gap
+    that opened AFTER the scan still needs a scan to be found.
+    """
+    LIB.load()
+    owned = defaultdict(lambda: defaultdict(set))
+    by_show = defaultdict(list)
+    for e in LIB.episodes:
+        by_show[e.get("tvshowid")].append(e)
+        if (e.get("season") or 0) > 0:
+            owned[e.get("tvshowid")][e["season"]].add(e.get("episode") or 0)
+    out = []
+    for gap in gaps or []:
+        try:
+            show_id = int(str(gap.get("key", "")).split(":", 1)[1])
+        except (IndexError, ValueError):
+            out.append(gap)
+            continue
+        if show_id not in owned:
+            continue            # the show has left the library
+        seasons, missing_total = [], 0
+        for season in gap.get("seasons") or []:
+            have = owned[show_id].get(season["season"], set())
+            missing = [n for n in range(1, (season.get("total") or 0) + 1) if n not in have]
+            missing_total += len(missing)
+            seasons.append(dict(season, owned=sorted(have), missing=missing))
+        if missing_total:
+            out.append(dict(gap, seasons=seasons, missing_total=missing_total,
+                            in_progress=bool(series_progress(by_show, show_id))))
+    return out
+
+
+def find_collection_gaps(budget, owned):
+    """Franchises where you have some but not all."""
+    seen_collections = {}
+    ranked = sorted(LIB.movies,
+                    key=lambda m: -((m.get("userrating") or 0) * 1.5 + (m.get("rating") or 0)))
+    for movie in ranked:
+        if not budget.take("collections"):
+            break
+        tid = tmdb_id_for_movie(movie)
+        if not tid:
+            continue
+        detail = movie_detail(tid)
+        coll = detail.get("belongs_to_collection")
+        if not coll:
+            continue
+        cid = str(coll["id"])
+        if cid in seen_collections:
+            continue
+        full = tmdb("/collection/%s" % cid) or {}
+        parts = full.get("parts") or []
+        if len(parts) < 2:
+            continue
+        missing = []
+        have = 0
+        for part in parts:
+            if not part.get("release_date"):
+                continue
+            key_title = norm_title(part.get("title", ""))
+            key_year = key_title + "|" + part["release_date"][:4]
+            if str(part["id"]) in owned or key_title in owned or key_year in owned:
+                have += 1
+                continue
+            missing.append({
+                "id": str(part["id"]),
+                "title": part.get("title"),
+                "year": part["release_date"][:4],
+                "rating": round(part.get("vote_average") or 0, 1),
+                "genres": tmdb_genre_names(part.get("genre_ids")),
+                "poster": POSTER + part["poster_path"] if part.get("poster_path") else None,
+            })
+        if missing and have:
+            seen_collections[cid] = {
+                "key": "coll:%s" % cid,
+                "name": full.get("name"),
+                "have": have,
+                "total": have + len(missing),
+                "missing": missing,
+            }
+    out = list(seen_collections.values())
+    out.sort(key=lambda c: (-c["have"], len(c["missing"])))
+    return [c for c in out if c["key"] not in DISMISSED][:20]
+
+
+def find_director_gaps(budget, owned, hide_obvious):
+    """Directors you own two or more of — what else did they make."""
+    counts = Counter()
+    for m in LIB.movies:
+        for d in (m.get("director") or []):
+            counts[d] += 1
+    candidates = [(d, n) for d, n in counts.items() if n >= 2]
+    candidates.sort(key=lambda x: -x[1])
+
+    out = []
+    for name, owned_count in candidates:
+        if not budget.take("directors"):
+            break
+        search = tmdb("/search/person", {"query": name}) or {}
+        results = search.get("results") or []
+        if not results:
+            continue
+        person = results[0]
+        credits = tmdb("/person/%s/movie_credits" % person["id"]) or {}
+        directed = [c for c in (credits.get("crew") or [])
+                    if c.get("job") == "Director" and c.get("release_date")]
+        missing = []
+        for film in directed:
+            key_title = norm_title(film.get("title", ""))
+            key_year = key_title + "|" + film["release_date"][:4]
+            if str(film["id"]) in owned or key_title in owned or key_year in owned:
+                continue
+            if (film.get("vote_count") or 0) < 120:
+                continue
+            if hide_obvious and (film.get("vote_count") or 0) > OBVIOUS_VOTES:
+                continue
+            missing.append({
+                "id": str(film["id"]),
+                "title": film.get("title"),
+                "year": film["release_date"][:4],
+                "rating": round(film.get("vote_average") or 0, 1),
+                "votes": film.get("vote_count") or 0,
+                "genres": tmdb_genre_names(film.get("genre_ids")),
+                "poster": POSTER + film["poster_path"] if film.get("poster_path") else None,
+            })
+        missing.sort(key=lambda f: -f["rating"])
+        if missing:
+            out.append({
+                "key": "dir:%s" % person["id"],
+                "name": name,
+                "owned": owned_count,
+                "owned_titles": sorted(
+                    m.get("title") for m in LIB.movies
+                    if name in (m.get("director") or [])),
+                "missing": missing[:8],
+            })
+    out.sort(key=lambda d: -d["owned"])
+    return [d for d in out if d["key"] not in DISMISSED][:14]
+
+
+def find_actor_gaps(budget, owned, hide_obvious):
+    """Actors you own two or more films of — what else they've starred in,
+    not just appeared in. Billing order (both here and in what TMDB hands
+    back for their filmography) keeps this about roles that made you
+    notice them, not every background part on their page."""
+    ensure_cast_lists()
+    counts = Counter()
+    for m in LIB.movies:
+        for name in (m.get("cast_list") or [])[:5]:
+            counts[name] += 1
+    candidates = [(a, n) for a, n in counts.items() if n >= 2]
+    candidates.sort(key=lambda x: -x[1])
+
+    out = []
+    for name, owned_count in candidates:
+        if not budget.take("actors"):
+            break
+        search = tmdb("/search/person", {"query": name}) or {}
+        results = search.get("results") or []
+        if not results:
+            continue
+        person = results[0]
+        credits = tmdb("/person/%s/movie_credits" % person["id"]) or {}
+        starred = [c for c in (credits.get("cast") or [])
+                   if c.get("release_date")
+                   and (c.get("order") if c.get("order") is not None else 99) < 5]
+        missing = []
+        for film in starred:
+            key_title = norm_title(film.get("title", ""))
+            key_year = key_title + "|" + film["release_date"][:4]
+            if str(film["id"]) in owned or key_title in owned or key_year in owned:
+                continue
+            if (film.get("vote_count") or 0) < 120:
+                continue
+            if hide_obvious and (film.get("vote_count") or 0) > OBVIOUS_VOTES:
+                continue
+            missing.append({
+                "id": str(film["id"]),
+                "title": film.get("title"),
+                "year": film["release_date"][:4],
+                "rating": round(film.get("vote_average") or 0, 1),
+                "votes": film.get("vote_count") or 0,
+                "genres": tmdb_genre_names(film.get("genre_ids")),
+                "poster": POSTER + film["poster_path"] if film.get("poster_path") else None,
+            })
+        missing.sort(key=lambda f: -f["rating"])
+        if missing:
+            out.append({
+                "key": "actor:%s" % person["id"],
+                "name": name,
+                "owned": owned_count,
+                "owned_titles": sorted(
+                    m.get("title") for m in LIB.movies
+                    if name in (m.get("cast_list") or [])[:5]),
+                "missing": missing[:8],
+            })
+    out.sort(key=lambda d: -d["owned"])
+    return [d for d in out if d["key"] not in DISMISSED][:14]
+
+
+# Tags that describe how a film was MADE rather than what it's like. They
+# attach to hundreds of titles apiece, so a plain tally floats them to the
+# top of any profile and then anchors a search on nothing at all — "based on
+# novel or book" was the second strongest signal in a real library here.
+NOISE_KEYWORDS = {
+    "based on novel or book", "based on true story", "based on comic",
+    "based on young adult novel", "based on short story", "based on play",
+    "based on video game", "woman director", "duringcreditsstinger",
+    "aftercreditsstinger", "sequel", "prequel", "remake", "reboot",
+    "live action remake", "independent film", "cult film",
+}
+
+# How many films need to carry a tag before extra ones stop adding
+# confidence. Past this it's established; the question is only how well it
+# scores, not how often it turns up.
+SUPPORT_CAP = 8
+
+# And below this it isn't a pattern, it's a coincidence. One film you liked
+# that happens to feature a mammoth doesn't make mammoths a theme of yours,
+# but a single strong rating is otherwise enough to put one top of the list.
+MIN_SUPPORT = 2
+
+
+def taste_midpoint(rated):
+    """The line between 'liked' and 'didn't', drawn where YOU draw it.
+
+    A fixed 5.5 assumes everyone uses the scale the same way. Someone who
+    rates generously — and most people do, since you mostly watch things you
+    expect to like — never produces a single negative signal, so the profile
+    can only ever learn what to chase and never what to avoid. Measuring
+    against your own average fixes that: a 6 from someone who averages 7.5 is
+    a complaint, and now reads as one.
+    """
+    scores = [m.get("userrating") or 0 for m in rated if (m.get("userrating") or 0) > 0]
+    if len(scores) < 8:
+        return 5.5
+    return max(4.5, min(8.0, sum(scores) / float(len(scores))))
+
+
+def build_taste_profile(budget):
+    """Work out what you actually like, from your own scores.
+
+    Every film you've rated contributes its features — keywords, director,
+    cast, genre — weighted by how far above or below YOUR middle you scored
+    it. A film you gave 9 pushes its features up hard; one you gave 3 pushes
+    them down. So this learns what to avoid as well as what to chase.
+
+    Features are then scored on how well they do on average rather than how
+    often they appear, tempered by how many films back them up. Otherwise
+    the profile just lists whatever is commonest in the library, which is a
+    description of your shelf and not of your taste.
+    """
+    rated = [m for m in LIB.movies if (m.get("userrating") or 0) > 0]
+    from_ratings = len(rated) >= 6
+
+    if not from_ratings:
+        # Nothing to learn from yet. Fall back to the best-regarded things you
+        # own — weaker than your own scores, and the UI says so.
+        rated = sorted(LIB.movies, key=lambda m: -(m.get("rating") or 0))[:30]
+
+    keywords, people, genres = {}, {}, {}
+    seeds = []
+    midpoint = taste_midpoint(rated) if from_ratings else 6.5
+
+    def bump(store, key, name, amount):
+        row = store.setdefault(key, {"name": name, "weight": 0.0, "n": 0})
+        row["weight"] += amount
+        row["n"] += 1
+
+    for movie in rated:
+        if not budget.take("profile"):
+            break
+        if from_ratings:
+            weight = (movie.get("userrating") or 0) - midpoint
+        else:
+            weight = ((movie.get("rating") or 0) - midpoint) * 0.7
+        if abs(weight) < 0.4:
+            continue
+
+        for genre in movie.get("genre") or []:
+            bump(genres, genre, genre, weight)
+
+        tid = tmdb_id_for_movie(movie)
+        if not tid:
+            continue
+        detail = movie_detail(tid)
+        if not detail:
+            continue
+
+        if weight > 0:
+            seeds.append({"tmdb": tid, "title": movie.get("title"),
+                          "weight": weight})
+
+        for kw in (detail.get("keywords") or {}).get("keywords") or []:
+            if (kw.get("name") or "").lower() in NOISE_KEYWORDS:
+                continue
+            bump(keywords, str(kw["id"]), kw.get("name"), weight)
+        credits = detail.get("credits") or {}
+        for actor in (credits.get("cast") or [])[:5]:
+            bump(people, str(actor["id"]), actor.get("name"), weight * 0.5)
+        for member in credits.get("crew") or []:
+            if member.get("job") == "Director":
+                bump(people, str(member["id"]), member.get("name"), weight * 1.3)
+
+    # Turn tallies into scores. A feature is judged on how well its films do
+    # on AVERAGE, then scaled by how many stand behind it — so a theme in
+    # twelve films you love beats one in forty you merely own, and a single
+    # enthusiastic rating can't crown a keyword on its own.
+    for store in (keywords, people, genres):
+        for row in store.values():
+            n = max(1, row["n"])
+            support = math.sqrt(min(n, SUPPORT_CAP))
+            row["mean"] = row["weight"] / float(n)
+            row["weight"] = row["mean"] * support
+
+    seeds.sort(key=lambda x: -x["weight"])
+    return {
+        "keywords": keywords,
+        "people": people,
+        "genres": genres,
+        "seeds": seeds,
+        "from_ratings": from_ratings,
+        "midpoint": round(midpoint, 2),
+        "sample": len(rated),
+    }
+
+
+def profile_summary(profile):
+    """The plain-English version, so the suggestions can be argued with."""
+    def top(store, n, positive=True):
+        # A film scored 5 is a shrug, not a dislike. Only count things you've
+        # pushed away from the middle with some conviction.
+        rows = [r for r in store.values()
+                if (r["weight"] > 1.0 if positive else r["weight"] < -1.5)]
+        rows.sort(key=lambda r: -abs(r["weight"]))
+        return [r["name"] for r in rows[:n] if r["name"]]
+
+    return {
+        "from_ratings": profile["from_ratings"],
+        "sample": profile["sample"],
+        "likes_genres": top(profile["genres"], 4),
+        "avoids_genres": top(profile["genres"], 3, positive=False),
+        "likes_keywords": top(profile["keywords"], 8),
+        "likes_people": top(profile["people"], 6),
+    }
+
+
+def find_bangers(budget, owned, hide_obvious, profile):
+    """Search outward from the strongest parts of your taste profile.
+
+    Each search is anchored on one thing — a theme you rate highly, a person
+    you rate highly, or a film you scored well. Anything that comes back from
+    several different anchors at once is the interesting case: it isn't just
+    similar to one film you liked, it sits where several of your tastes
+    overlap.
+    """
+    def strongest(store, n):
+        rows = [(k, r) for k, r in store.items()
+                if r["weight"] > 0.8 and r.get("n", 1) >= MIN_SUPPORT]
+        rows.sort(key=lambda kv: -kv[1]["weight"])
+        return rows[:n]
+
+    # Genres you score below your own average, with enough films behind the
+    # judgement to mean it.
+    disliked = set(r["name"] for r in profile["genres"].values()
+                   if r["weight"] < -0.4 and r.get("n", 1) >= MIN_SUPPORT)
+    anchors = []
+    for key, row in strongest(profile["keywords"], 9):
+        anchors.append(("theme", key, row["name"], row["weight"]))
+    for key, row in strongest(profile["people"], 7):
+        anchors.append(("person", key, row["name"], row["weight"]))
+
+    tally = {}
+
+    def consider(film, anchor_kind, anchor_name, anchor_weight):
+        if not film.get("release_date"):
+            return
+        title_key = norm_title(film.get("title", ""))
+        year_key = title_key + "|" + film["release_date"][:4]
+        if str(film["id"]) in owned or title_key in owned or year_key in owned:
+            return
+        votes = film.get("vote_count") or 0
+        if votes < 150:
+            return
+        if hide_obvious and votes > OBVIOUS_VOTES:
+            return
+        names = tmdb_genre_names(film.get("genre_ids"))
+        if names and disliked and set(names) <= disliked:
+            return          # nothing here but things you rate poorly
+        entry = tally.setdefault(str(film["id"]), {
+            "key": "banger:%s" % film["id"],
+            "id": str(film["id"]),
+            "title": film.get("title"),
+            "year": film["release_date"][:4],
+            "rating": round(film.get("vote_average") or 0, 1),
+            "votes": votes,
+            "genres": names,
+            "overview": (film.get("overview") or "")[:240],
+            "poster": POSTER + film["poster_path"] if film.get("poster_path") else None,
+            "anchors": [],
+        })
+        if not any(a["name"] == anchor_name for a in entry["anchors"]):
+            entry["anchors"].append({"kind": anchor_kind, "name": anchor_name,
+                                     "weight": round(anchor_weight, 2)})
+
+    # Searches anchored on themes and people you score highly.
+    for kind, key, name, weight in anchors:
+        if not budget.take("discover"):
+            break
+        params = {"sort_by": "vote_average.desc", "vote_count.gte": 300,
+                  "include_adult": "false"}
+        params["with_keywords" if kind == "theme" else "with_people"] = key
+        data = tmdb("/discover/movie", params) or {}
+        for film in (data.get("results") or [])[:14]:
+            consider(film, kind, name, weight)
+
+    # Plus straightforward "more like this" off your best-scored films.
+    for seed in profile["seeds"]:
+        if not budget.take("similar"):
+            break
+        data = tmdb("/movie/%s/recommendations" % seed["tmdb"]) or {}
+        for film in (data.get("results") or [])[:12]:
+            consider(film, "film", seed["title"], seed["weight"])
+
+    genre_weights = dict((r["name"], r["weight"])
+                         for r in profile["genres"].values())
+    out = []
+    for entry in tally.values():
+        distinct = len(entry["anchors"])
+        anchor_score = sum(a["weight"] for a in entry["anchors"])
+        genre_score = sum(genre_weights.get(g, 0) for g in entry["genres"])
+        entry["hits"] = distinct
+        entry["score"] = (anchor_score
+                          + genre_score * 0.6
+                          + (entry["rating"] - 6.0) * 0.9
+                          + (distinct - 1) * 2.0)
+        entry["why"] = describe_anchors(entry["anchors"])
+        out.append(entry)
+
+    out.sort(key=lambda f: -f["score"])
+    return [f for f in out if f["key"] not in DISMISSED][:45]
+
+
+def describe_anchors(anchors):
+    """Short, specific reasons. Repeating six seed titles reads as noise, so
+    those collapse into a count while themes and people stay named."""
+    ranked = sorted(anchors, key=lambda a: -a["weight"])
+    named = [a["name"] for a in ranked if a["kind"] in ("theme", "person")][:3]
+    seeds = [a for a in ranked if a["kind"] == "film"]
+    if len(seeds) == 1:
+        named.append("like %s" % seeds[0]["name"])
+    elif seeds:
+        named.append("like %d films you rated well" % len(seeds))
+    return named[:4]
+
+
+def _tv_item(show, key_prefix):
+    """A TMDB TV row in the shape the cards draw. Shows use `name` and
+    `first_air_date` where films use `title` and `release_date`; the page
+    shouldn't have to know."""
+    return {
+        "key": "%s:%s" % (key_prefix, show["id"]),
+        "id": str(show["id"]),
+        "kind": "tv",
+        "title": show.get("name"),
+        "year": (show.get("first_air_date") or "")[:4],
+        "rating": round(show.get("vote_average") or 0, 1),
+        "votes": show.get("vote_count") or 0,
+        "genres": tmdb_tv_genre_names(show.get("genre_ids")),
+        "overview": (show.get("overview") or "")[:240],
+        "poster": POSTER + show["poster_path"] if show.get("poster_path") else None,
+    }
+
+
+def _film_item(film, key_prefix):
+    return {
+        "key": "%s:%s" % (key_prefix, film["id"]),
+        "id": str(film["id"]),
+        "kind": "film",
+        "title": film.get("title"),
+        "year": (film.get("release_date") or "")[:4],
+        "rating": round(film.get("vote_average") or 0, 1),
+        "votes": film.get("vote_count") or 0,
+        "genres": tmdb_genre_names(film.get("genre_ids")),
+        "overview": (film.get("overview") or "")[:240],
+        "poster": POSTER + film["poster_path"] if film.get("poster_path") else None,
+    }
+
+
+def find_show_recs(budget, owned_shows, hide_obvious, profile):
+    """Shows you might like, worked out the way the film list is — but from
+    what you rate on TELEVISION, which is not the same taste.
+
+    The film profile knows nothing about shows: it never reads them, and a
+    person who rates crime films highly may watch nothing but sitcoms. So
+    the anchors here are your own shows — every one you scored above your
+    middle or marked a favourite is a seed for "more like this", and the
+    genres those shows carry, weighted by the score, drive a handful of
+    searches. The film profile's strongest THEMES are borrowed as a last
+    anchor because a keyword is a keyword on either side of TMDB, and "time
+    travel" says the same thing about a show as about a film.
+    """
+    rated = [s for s in LIB.shows if (s.get("userrating") or 0) > 0]
+    midpoint = taste_midpoint(rated)
+    seeds, genre_weight = [], {}
+    for s in LIB.shows:
+        score = s.get("userrating") or 0
+        weight = (score - midpoint) if score else 0.0
+        if s.get("favourited"):
+            weight = max(weight, 1.5)
+        if abs(weight) < 0.4:
+            continue
+        for g in s.get("genre") or []:
+            row = genre_weight.setdefault(g, [0.0, 0])
+            row[0] += weight
+            row[1] += 1
+        if weight > 0:
+            seeds.append((weight, s))
+    seeds.sort(key=lambda x: -x[0])
+
+    liked = sorted(((w / n) * math.sqrt(min(n, SUPPORT_CAP)), g)
+                   for g, (w, n) in genre_weight.items())
+    disliked = set(g for score, g in liked if score < -0.6)
+    liked = [g for score, g in reversed(liked) if score > 0.6][:3]
+
+    tally = {}
+
+    def consider(show, anchor_kind, anchor_name, anchor_weight):
+        if str(show["id"]) in owned_shows or norm_title(show.get("name", "")) in owned_shows:
+            return
+        votes = show.get("vote_count") or 0
+        if votes < 150 or not show.get("first_air_date"):
+            return
+        if hide_obvious and votes > OBVIOUS_VOTES:
+            return
+        names = tmdb_tv_genre_names(show.get("genre_ids"))
+        if names and disliked and set(names) <= disliked:
+            return
+        entry = tally.get(str(show["id"]))
+        if entry is None:
+            entry = tally[str(show["id"])] = _tv_item(show, "tvrec")
+            entry["anchors"] = []
+        if not any(a["name"] == anchor_name for a in entry["anchors"]):
+            entry["anchors"].append({"kind": anchor_kind, "name": anchor_name,
+                                     "weight": round(anchor_weight, 2)})
+
+    for weight, show in seeds:
+        tid = tmdb_id_for_show(show)
+        if not tid:
+            continue
+        if not budget.take("tv_similar"):
+            break
+        data = tmdb("/tv/%s/recommendations" % tid) or {}
+        for row in (data.get("results") or [])[:12]:
+            consider(row, "show", show.get("title"), weight)
+
+    for genre in liked:
+        ids = tmdb_genre_ids([genre], "tv")
+        if not ids or not budget.take("tv_discover"):
+            continue
+        data = tmdb("/discover/tv", {
+            "with_genres": ids[0], "sort_by": "vote_average.desc",
+            "vote_count.gte": 800, "include_adult": "false"}) or {}
+        for row in (data.get("results") or [])[:14]:
+            consider(row, "genre", genre, 1.0)
+
+    if profile:
+        themes = [(k, r) for k, r in profile["keywords"].items()
+                  if r["weight"] > 1.0 and r.get("n", 1) >= MIN_SUPPORT]
+        themes.sort(key=lambda kv: -kv[1]["weight"])
+        for key, row in themes[:4]:
+            if not budget.take("tv_discover"):
+                break
+            data = tmdb("/discover/tv", {
+                "with_keywords": key, "sort_by": "vote_average.desc",
+                "vote_count.gte": 400, "include_adult": "false"}) or {}
+            for r in (data.get("results") or [])[:10]:
+                consider(r, "theme", row["name"], row["weight"] * 0.7)
+
+    out = []
+    for entry in tally.values():
+        distinct = len(entry["anchors"])
+        anchor_score = sum(a["weight"] for a in entry["anchors"])
+        entry["hits"] = distinct
+        entry["score"] = (anchor_score + (entry["rating"] - 7.0) * 1.2
+                          + (distinct - 1) * 2.0)
+        entry["why"] = describe_show_anchors(entry["anchors"])
+        out.append(entry)
+    out.sort(key=lambda f: -f["score"])
+    return [s for s in out if s["key"] not in DISMISSED][:40]
+
+
+def describe_show_anchors(anchors):
+    ranked = sorted(anchors, key=lambda a: -a["weight"])
+    named = [a["name"] for a in ranked if a["kind"] in ("genre", "theme")][:2]
+    shows = [a for a in ranked if a["kind"] == "show"]
+    if len(shows) == 1:
+        named.append("like %s" % shows[0]["name"])
+    elif shows:
+        named.append("like %s and %d more you rate" % (shows[0]["name"], len(shows) - 1))
+    return named[:3]
+
+
+# What a channel would take from TMDB, for the ones a search can serve. The
+# personal channels (Favourites, Watchlist, Binge, the two people ones) are
+# left out on purpose: nothing a search returns is a thing you've marked.
+_CHANNEL_SKIP_TYPES = ("live", "director", "actor", "binge", "favourites", "watchlist")
+# A day of telly. Under this a channel comes round again inside a day, and
+# anyone who leaves it on will notice.
+THIN_CHANNEL_HOURS = 24
+THIN_CHANNEL_BLOCKS = 6
+NAMED_LOOKUPS_PER_SCAN = 8
+
+
+def _settled_only(media):
+    """Nothing from the last eighteen months. A film a fortnight old sits at
+    8.9 off its first thousand enthusiasts and drifts down for a year; sorted
+    by score, discover leads with exactly those, and a channel built from
+    them is a channel of things nobody has finished judging yet."""
+    cutoff = time.strftime("%Y-%m-%d", time.localtime(time.time() - 540 * 86400))
+    return {("primary_release_date.lte" if media == "movie" else "first_air_date.lte"): cutoff}
+
+
+def _channel_search_specs(channel, hide_obvious=False):
+    """The discover searches that stand in for a channel's own filter.
+
+    TMDB's discover can't express everything channel_blocks() can — there
+    is no "not in English" and no "not from Japan" — so a spec carries a
+    post-filter for the part the search can't say, and the rest is done
+    here on the results. Named lists are a different kind of search
+    entirely: one lookup per title you don't own.
+    """
+    specs = []
+    ctype = channel.get("type", "genre")
+    media = []
+    if not channel.get("tv_only"):
+        media.append("movie")
+    if not channel.get("film_only"):
+        media.append("tv")
+
+    if channel.get("titles"):
+        specs.append({"named": True, "titles": channel["titles"]})
+        if channel.get("named_only"):
+            return specs
+
+    settled = _settled_only("movie")
+    if hide_obvious:
+        # Asked for on the page, so ask TMDB for it too: without the cap the
+        # page of results is mostly things the filter then throws away, and
+        # Top Shelf — where everything over the line has a huge audience —
+        # came back with one film.
+        settled["vote_count.lte"] = OBVIOUS_VOTES
+    if ctype == "cult":
+        # 800, not the channel's own "any": sorted by score, the low end of
+        # the vote range is fan-club cinema — a romance voted 8.9 by the
+        # people who read the book — and none of it is what cult means.
+        return [{"media": "movie", "params": dict(settled,
+            sort_by="vote_average.desc", **{"vote_average.gte": CULT_MIN_RATING,
+            "vote_count.gte": 800, "vote_count.lte": CULT_MAX_VOTES})}]
+    if ctype == "rated":
+        return [{"media": "movie", "params": dict(settled,
+            sort_by="vote_average.desc", **{
+            "vote_average.gte": channel.get("min_rating", 8.0),
+            "vote_count.gte": max(2000, channel.get("min_votes", 0))})}]
+    if ctype == "keyword":
+        return [{"media": "movie", "keyword": channel.get("keyword"), "params": dict(settled,
+            sort_by="vote_average.desc", **{"vote_count.gte": 400})}]
+
+    for m in media:
+        # High floors on purpose. Sorted by score, discover's first page is
+        # whatever a few hundred devoted people voted 9 — obscure dramas
+        # nobody would put on a channel. A thousand votes is where the list
+        # turns into things that were widely seen and still rate well.
+        params = {"sort_by": "vote_average.desc", "include_adult": "false",
+                  "vote_count.gte": 1000}
+        params.update(_settled_only(m))
+        if hide_obvious:
+            params["vote_count.lte"] = OBVIOUS_VOTES
+        genres = channel.get("genres") or []
+        required = channel.get("require_genres") or []
+        if required:
+            ids = tmdb_genre_ids(list(required) + list(genres), m)
+            if len(ids) < len(required):
+                continue
+            params["with_genres"] = ",".join(ids)
+        elif genres:
+            ids = tmdb_genre_ids(genres, m)
+            if not ids:
+                continue
+            params["with_genres"] = "|".join(ids)
+        excluded = tmdb_genre_ids(channel.get("exclude_genres") or [], m)
+        if excluded:
+            params["without_genres"] = ",".join(excluded)
+        if channel.get("countries"):
+            codes = [c for c in channel["countries"] if len(c) == 2]
+            if codes:
+                params["with_origin_country"] = codes[0]
+        pages = 1
+        if channel.get("exclude_languages"):
+            # Nothing on discover says "any language but English", so ask
+            # for the best-regarded films outright, three pages of them,
+            # and keep the ones that aren't. Most of a page is English.
+            params["vote_count.gte"] = 1500
+            pages = 3
+        if "Documentary" in genres:
+            params["vote_count.gte"] = 300 if m == "movie" else 200
+        specs.append({"media": m, "params": params, "pages": pages,
+                      "exclude_languages": set(channel.get("exclude_languages") or []),
+                      "exclude_countries": set(c for c in (channel.get("exclude_countries") or [])
+                                               if len(c) == 2)})
+    return specs
+
+
+def find_channel_fill(budget, owned, owned_shows, hide_obvious):
+    """What would be good to add to the library for each channel to run.
+
+    Every channel is measured first — how many programmes it has and how
+    many hours they come to, from the same channel_blocks() the Channels tab
+    schedules from — so the list leads with the channels that are thinnest
+    and the numbers say why. A channel with two films loops those two films
+    all week, and nothing on the Channels tab tells you that.
+    """
+    out = []
+    for channel in CHANNELS:
+        ctype = channel.get("type", "genre")
+        if ctype in _CHANNEL_SKIP_TYPES or channel["id"] == "anything":
+            continue
+        try:
+            blocks = channel_blocks(channel)
+        except Exception:
+            blocks = []
+        hours = sum((b.get("duration") or 0) for b in blocks) / 3600.0
+        entry = {
+            "key": "chan:%s" % channel["id"],
+            "id": channel["id"], "name": channel["name"],
+            "number": channel.get("number"),
+            "blocks": len(blocks), "hours": round(hours, 1),
+            "thin": hours < THIN_CHANNEL_HOURS or len(blocks) < THIN_CHANNEL_BLOCKS,
+            "picks": [],
+        }
+        entry["_seen"] = set()
+        entry["_specs"] = _channel_search_specs(channel, hide_obvious)
+        out.append(entry)
+
+    def add(entry, item, votes):
+        if item["id"] in entry["_seen"] or item["key"] in DISMISSED or not item["title"]:
+            return
+        if item["kind"] == "film":
+            yk = norm_title(item["title"]) + "|" + item["year"]
+            if item["id"] in owned or norm_title(item["title"]) in owned or yk in owned:
+                return
+        elif item["id"] in owned_shows or norm_title(item["title"]) in owned_shows:
+            return
+        if hide_obvious and item["votes"] > OBVIOUS_VOTES:
+            return
+        entry["_seen"].add(item["id"])
+        # Rated first, but a rating off thirty votes shouldn't beat one off
+        # three thousand — the vote count breaks the near-ties.
+        item["sort"] = item["rating"] + math.log10(max(10, votes)) * 0.3
+        entry["picks"].append(item)
+
+    def spend(path, params):
+        """A call is free if it's cached; otherwise it costs one."""
+        return tmdb_is_cached(path, params) or budget.take("channels")
+
+    # Two passes, and the order matters. Every channel gets its discover
+    # search BEFORE any named list is walked: a named list is a lookup per
+    # title, ninety of them for Saturday Morning, and walked first it spent
+    # the whole budget on one channel and left the other twelve with
+    # nothing. The discover pass is a page per channel and medium, ~25
+    # calls; what's left goes to the lists, a few titles per channel per
+    # scan. Cached lookups cost nothing, so the lists fill in over scans.
+    for entry in out:
+        prefix = "chanpick:%s" % entry["id"]
+        for spec in entry["_specs"]:
+            if spec.get("named"):
+                continue
+            params = dict(spec["params"])
+            params.setdefault("include_adult", "false")
+            if spec.get("keyword"):
+                if not spend("/search/keyword", {"query": spec["keyword"]}):
+                    continue
+                found = tmdb("/search/keyword", {"query": spec["keyword"]}) or {}
+                hits = [k for k in found.get("results") or []
+                        if (k.get("name") or "").lower() == spec["keyword"].lower()]
+                if not hits:
+                    continue
+                params["with_keywords"] = str(hits[0]["id"])
+            path = "/discover/%s" % spec["media"]
+            rows = []
+            for page in range(1, spec.get("pages", 1) + 1):
+                params["page"] = page
+                if not spend(path, params):
+                    break
+                rows.extend((tmdb(path, params) or {}).get("results") or [])
+            for row in rows:
+                lang = row.get("original_language") or ""
+                if spec.get("exclude_languages") and (not lang or lang in spec["exclude_languages"]):
+                    continue
+                if spec.get("exclude_countries") and (
+                        set(row.get("origin_country") or []) & spec["exclude_countries"]
+                        or (spec["media"] == "movie" and lang == "ja" and "JP" in spec["exclude_countries"])):
+                    continue
+                item = (_film_item if spec["media"] == "movie" else _tv_item)(row, prefix)
+                item["why"] = []
+                add(entry, item, row.get("vote_count") or 0)
+
+    have_titles = {_daytime_key(s.get("title")) for s in LIB.shows}
+    for entry in out:
+        prefix = "chanpick:%s" % entry["id"]
+        for spec in entry["_specs"]:
+            if not spec.get("named"):
+                continue
+            fresh = 0
+            for title in spec["titles"]:
+                if _daytime_key(title) in have_titles:
+                    continue
+                params = {"query": title}
+                if not tmdb_is_cached("/search/tv", params):
+                    if fresh >= NAMED_LOOKUPS_PER_SCAN or not budget.take("channels"):
+                        continue
+                    fresh += 1
+                data = tmdb("/search/tv", params) or {}
+                for row in (data.get("results") or [])[:1]:
+                    if (row.get("vote_count") or 0) < 20:
+                        continue
+                    item = _tv_item(row, prefix)
+                    item["why"] = ["on the channel's own list"]
+                    add(entry, item, row.get("vote_count") or 0)
+
+    for entry in out:
+        del entry["_seen"], entry["_specs"]
+        entry["picks"].sort(key=lambda x: -x["sort"])
+        entry["picks"] = entry["picks"][:12]
+        for p in entry["picks"]:
+            p.pop("sort", None)
+    out.sort(key=lambda c: (not c["thin"], c["hours"]))
+    return [c for c in out if c["key"] not in DISMISSED]
+
+
+# ===========================================================================
+# EXPORT — a portable copy of the one thing TMDB can't hand back to you
+# ===========================================================================
+
+def build_export():
+    """Your ratings and watch history, in a form you can read yourself and
+    that survives this app going away. The database backup covers everything
+    including metadata that's just a rescan away from TMDB; this covers only
+    what's actually yours and irreplaceable if lost."""
+    conn = db()
+    movies = [dict(r) for r in conn.execute(
+        "SELECT title,year,genres,directors,userrating,rated_at,playcount,"
+        "last_played FROM movies WHERE userrating>0 OR playcount>0"
+        " ORDER BY title")]
+    shows = [dict(r) for r in conn.execute(
+        "SELECT title,year,genres,userrating,rated_at FROM shows"
+        " WHERE userrating>0 ORDER BY title")]
+    episodes = [dict(r) for r in conn.execute(
+        "SELECT s.title AS show, e.season, e.episode, e.title AS episode_title,"
+        " e.userrating, e.rated_at, e.playcount, e.last_played"
+        " FROM episodes e JOIN shows s ON s.id = e.show_id"
+        " WHERE e.userrating>0 OR e.playcount>0"
+        " ORDER BY s.title, e.season, e.episode")]
+    history = [dict(r) for r in conn.execute(
+        "SELECT at,kind,title,event,value FROM history ORDER BY at")]
+    conn.close()
+    for row in movies + shows:
+        row["genres"] = as_list(row.get("genres"))
+    for row in movies:
+        row["directors"] = as_list(row.get("directors"))
+    return {
+        "exported_at": now_stamp(),
+        "app_version": APP_VERSION,
+        "movies": movies,
+        "shows": shows,
+        "episodes": episodes,
+        "history": history,
+    }
+
+
+# --- the same film, twice --------------------------------------------------
+#
+# Two files of one film is a normal thing to end up with: a 1080p grabbed
+# first and a 4K found later, or the same file copied under two names. The
+# library shows both because both are on the disk, and the tiles are
+# identical apart from the filename underneath.
+#
+# "Keep the bigger one" is the right instinct and is NOT sufficient on its
+# own. The two copies of The Big Lebowski in this library are 4,946,508,193
+# bytes each — the same number twice. A rule that only compares size picks
+# one of those at random and calls it a decision.
+
+RES_TAGS = [("2160p", 2160), ("4k", 2160), ("uhd", 2160), ("1440p", 1440),
+            ("1080p", 1080), ("720p", 720), ("576p", 576), ("480p", 480)]
+
+
+def quality_hints(path):
+    """What the filename admits about the file. Filenames lie, but they are
+    free to read — and a 5GB file is not worth opening to find out."""
+    low = os.path.basename(path).lower()
+    height = 0
+    for tag, value in RES_TAGS:
+        if tag in low:
+            height = max(height, value)
+    return {
+        "height": height,
+        "hdr": ("hdr" in low) or ("dolby vision" in low) or (".dv." in low),
+        "codec": "x265" if ("x265" in low or "hevc" in low or "h265" in low)
+                 else ("x264" if ("x264" in low or "h264" in low) else ""),
+    }
+
+
+def _volume_writable(path):
+    """Can anything be removed from where this file lives? macOS mounts NTFS
+    read-only, which is exactly the sort of drive films sit on, so this is a
+    real answer and not a formality."""
+    try:
+        return os.access(os.path.dirname(path), os.W_OK)
+    except Exception:
+        return False
+
+
+def duplicate_groups():
+    """Films the library holds more than one file of, matched on TMDB id.
+
+    Each group names a suggested keeper and says why. When the top two can't
+    be told apart the suggestion is withheld rather than guessed: `too_close`
+    is the signal the page uses to ask instead of recommending.
+    """
+    conn = db()
+    dupes = [r[0] for r in conn.execute(
+        "SELECT tmdb_id FROM movies WHERE tmdb_id IS NOT NULL AND tmdb_id <> ''"
+        " GROUP BY tmdb_id HAVING COUNT(*) > 1")]
+    groups = []
+    for tmdb_id in dupes:
+        files = []
+        label = {}
+        for r in conn.execute(
+                "SELECT id,title,year,path,poster FROM movies WHERE tmdb_id=?"
+                " ORDER BY id", (tmdb_id,)):
+            try:
+                size = os.path.getsize(r["path"])
+                there = True
+            except OSError:
+                size, there = 0, False
+            hints = quality_hints(r["path"])
+            if not label:
+                # The film's own details, kept beside the file list rather
+                # than copied onto every entry in it.
+                label = {"title": r["title"], "year": r["year"],
+                         "poster": r["poster"]}
+            files.append({
+                "id": r["id"], "path": r["path"],
+                "name": os.path.basename(r["path"]),
+                "folder": os.path.dirname(r["path"]),
+                "size": size, "exists": there,
+                "height": hints["height"], "hdr": hints["hdr"],
+                "codec": hints["codec"],
+                "writable": there and _volume_writable(r["path"]),
+            })
+        if len(files) < 2:
+            continue
+        # Resolution first, then size — a 4K file that happens to be smaller
+        # than a bloated 1080p is still the one to keep. But height 0 means
+        # the NAME didn't say, not that the file is bad, so it only decides
+        # anything when both files declare one. "1080p beats 0p" is not a
+        # sentence this should ever produce.
+        ranked = sorted(files, key=lambda f: (f["height"], f["size"]), reverse=True)
+        best, second = ranked[0], ranked[1]
+        both_declared = best["height"] > 0 and second["height"] > 0
+        identical_size = best["size"] == second["size"] and best["size"] > 0
+
+        if identical_size:
+            # The strongest signal there is, and it points AWAY from a rule:
+            # the same byte count twice is one file copied, not two encodes.
+            too_close = True
+            reason = ("Both files are exactly %s — the same size to the byte, "
+                      "so this is almost certainly one file copied twice. "
+                      "Either will do; the better-named one tells you more "
+                      "later." % human_size(best["size"]))
+        elif both_declared and best["height"] > second["height"]:
+            too_close = False
+            reason = "%dp beats %dp, and it is %s larger." % (
+                best["height"], second["height"],
+                human_size(abs(best["size"] - second["size"])))
+        elif best["size"] > second["size"]:
+            too_close = False
+            reason = ("%s larger." % human_size(best["size"] - second["size"])
+                      + ("" if both_declared else
+                         " Only one filename mentions a resolution, so this "
+                         "goes on size alone."))
+        else:
+            too_close = True
+            reason = "Nothing here separates them — worth a look before choosing."
+        groups.append({
+            "tmdb_id": tmdb_id,
+            "title": label.get("title"), "year": label.get("year"),
+            "poster": local_art(label.get("poster")),
+            "files": ranked,
+            "suggest": None if too_close else ranked[0]["id"],
+            "too_close": too_close,
+            "reason": reason,
+            "any_writable": any(f["writable"] for f in files),
+        })
+    conn.close()
+    groups.sort(key=lambda g: norm_title(g["title"] or ""))
+    return groups
+
+
+def human_size(n):
+    n = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return "%.1f %s" % (n, unit) if unit not in ("B", "KB") else "%d %s" % (n, unit)
+        n /= 1024.0
+    return "%d B" % n
+
+
+def send_to_trash(path):
+    """The recycle bin, never an unlink.
+
+    A wrong call here costs a file that took an hour to fetch, and the whole
+    point of the bin is that a wrong call is survivable.
+    """
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        class SHFILEOPSTRUCTW(ctypes.Structure):
+            _fields_ = [("hwnd", wintypes.HWND),
+                        ("wFunc", wintypes.UINT),
+                        ("pFrom", wintypes.LPCWSTR),
+                        ("pTo", wintypes.LPCWSTR),
+                        ("fFlags", ctypes.c_uint16),
+                        ("fAnyOperationsAborted", wintypes.BOOL),
+                        ("hNameMappings", ctypes.c_void_p),
+                        ("lpszProgressTitle", wintypes.LPCWSTR)]
+        FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_SILENT = 3, 0x0040, 0x0010, 0x0004
+        op = SHFILEOPSTRUCTW()
+        op.wFunc = FO_DELETE
+        op.pFrom = path + "\0"          # double-NUL terminated list
+        op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT
+        rc = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
+        if rc != 0:
+            raise AppError("Windows wouldn't move that to the Recycle Bin "
+                           "(code %s)." % rc)
+        return "Recycle Bin"
+
+    # macOS and Linux. A file on an external volume goes to that volume's own
+    # .Trashes, because moving it to the home Trash would copy five gigabytes
+    # across a USB cable to delete it.
+    home_trash = os.path.expanduser("~/.Trash")
+    same_volume = False
+    try:
+        same_volume = os.stat(path).st_dev == os.stat(os.path.expanduser("~")).st_dev
+    except OSError:
+        pass
+    if same_volume and os.path.isdir(home_trash):
+        target_dir = home_trash
+    else:
+        mount = path
+        while not os.path.ismount(mount) and mount != os.path.dirname(mount):
+            mount = os.path.dirname(mount)
+        target_dir = os.path.join(mount, ".Trashes", str(os.getuid()))
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+        except OSError as exc:
+            raise AppError("Couldn't reach the bin on that drive: %s" % exc)
+    base = os.path.basename(path)
+    target = os.path.join(target_dir, base)
+    stem, ext = os.path.splitext(base)
+    count = 1
+    while os.path.exists(target):
+        target = os.path.join(target_dir, "%s (%d)%s" % (stem, count, ext))
+        count += 1
+    try:
+        os.rename(path, target)
+    except OSError as exc:
+        raise AppError("Couldn't move that to the bin: %s" % exc)
+    return "Trash"
+
+
+def resolve_duplicate(keep_id, drop_ids, action):
+    """Act on one group. `action` is "forget" or "trash".
+
+    forget  the row goes, and the path is remembered so the next scan does
+            not simply find it again. The file is untouched.
+    trash   the file goes to the bin first; only if that succeeds is the row
+            removed. Never the other way round — a library that has forgotten
+            a file it failed to delete is worse than one that never tried.
+    """
+    if action not in ("forget", "trash"):
+        raise AppError("Don't know how to '%s' a duplicate." % action)
+    drop_ids = [int(i) for i in (drop_ids or [])]
+    if not drop_ids:
+        raise AppError("Nothing chosen to remove.")
+    if int(keep_id) in drop_ids:
+        raise AppError("That would remove the copy you chose to keep.")
+
+    conn = db()
+    done, failed = [], []
+    for movie_id in drop_ids:
+        row = conn.execute("SELECT id,path FROM movies WHERE id=?",
+                           (movie_id,)).fetchone()
+        if not row:
+            continue
+        path = row["path"]
+        where = None
+        if action == "trash":
+            if not _volume_writable(path):
+                failed.append({"name": os.path.basename(path),
+                               "why": "that drive is mounted read-only, so "
+                                      "nothing can be deleted from it here"})
+                continue
+            try:
+                where = send_to_trash(path)
+            except AppError as exc:
+                failed.append({"name": os.path.basename(path), "why": str(exc)})
+                continue
+        conn.execute("INSERT OR REPLACE INTO ignored_files (path,why,at)"
+                     " VALUES (?,?,?)",
+                     (path, "duplicate of tmdb id kept elsewhere", now_stamp()))
+        conn.execute("DELETE FROM movies WHERE id=?", (movie_id,))
+        done.append({"name": os.path.basename(path), "where": where})
+    conn.commit()
+    conn.close()
+    ignored_paths(force=True)
+    LOCAL.loaded_at = 0
+    LIB.loaded_at = 0
+    return {"removed": done, "failed": failed,
+            "remaining": len(duplicate_groups())}
+
+
+def unignore_all():
+    """Undo every "remove from library". Files that still exist come back on
+    the next scan; anything actually binned does not."""
+    conn = db()
+    count = conn.execute("SELECT COUNT(*) FROM ignored_files").fetchone()[0]
+    conn.execute("DELETE FROM ignored_files")
+    conn.commit()
+    conn.close()
+    ignored_paths(force=True)
+    return count
+
+
+# --- who is watching ------------------------------------------------------
+
+PROFILE_ACCENTS = ["#c2593c", "#e8b04b", "#5c8d89", "#8d6fa8", "#4a7ab8", "#b85c8a"]
+
+
+def suggested_profile_name():
+    """A first profile should arrive already named after a PERSON.
+
+    The machine's hostname is the wrong default here however convenient it
+    is — a profile is whoever is watching, and seeding it with
+    "Someones-MacBook-Pro" quietly teaches the opposite. The account's real
+    name is the closest thing the OS knows to an answer.
+    """
+    try:
+        import pwd
+        gecos = (pwd.getpwuid(os.getuid()).pw_gecos or "").split(",")[0].strip()
+        if gecos:
+            return gecos[:40]
+        name = (pwd.getpwuid(os.getuid()).pw_name or "").strip()
+        if name:
+            return name[:40].capitalize()
+    except Exception:
+        pass
+    for key in ("USERNAME", "USER"):
+        val = (os.environ.get(key) or "").strip()
+        if val:
+            return val[:40].capitalize()
+    return "You"
+
+
+def profile_rows():
+    conn = db()
+    rows = [dict(r) for r in conn.execute(
+        "SELECT id,name,accent,created_at,last_used FROM profiles"
+        " ORDER BY COALESCE(last_used,'') DESC, id")]
+    conn.close()
+    return rows
+
+
+def profiles_state():
+    rows = profile_rows()
+    active = CONFIG.get("active_profile") or 0
+    if rows and not any(r["id"] == active for r in rows):
+        active = rows[0]["id"]          # the active one was deleted
+    return {
+        "profiles": rows,
+        "active": active,
+        "suggested_name": suggested_profile_name(),
+        "device": snapshot_device_name(),
+        "device_set": bool((CONFIG.get("device_name") or "").strip()),
+        "skip": bool(CONFIG.get("skip_picker")),
+        "accents": PROFILE_ACCENTS,
+        # What the picker may and may not claim. One flag rather than a
+        # comment nobody reads: when ratings become per-profile this turns
+        # True and the wording in the picker changes with it.
+        "separates_data": False,
+    }
+
+
+def profile_save(profile_id, name, accent):
+    name = (name or "").strip()[:40]
+    if not name:
+        raise AppError("A profile needs a name.")
+    accent = accent if accent in PROFILE_ACCENTS else PROFILE_ACCENTS[0]
+    conn = db()
+    if profile_id:
+        conn.execute("UPDATE profiles SET name=?, accent=? WHERE id=?",
+                     (name, accent, int(profile_id)))
+        new_id = int(profile_id)
+    else:
+        cur = conn.execute(
+            "INSERT INTO profiles (name,accent,created_at,last_used)"
+            " VALUES (?,?,?,?)", (name, accent, now_stamp(), now_stamp()))
+        new_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return new_id
+
+
+def profile_select(profile_id, skip=None):
+    conn = db()
+    row = conn.execute("SELECT id FROM profiles WHERE id=?",
+                       (int(profile_id),)).fetchone()
+    if not row:
+        conn.close()
+        raise AppError("That profile isn't there any more.")
+    conn.execute("UPDATE profiles SET last_used=? WHERE id=?",
+                 (now_stamp(), int(profile_id)))
+    conn.commit()
+    conn.close()
+    CONFIG["active_profile"] = int(profile_id)
+    if skip is not None:
+        CONFIG["skip_picker"] = bool(skip)
+    save_json(CONFIG_PATH, CONFIG)
+    return profiles_state()
+
+
+def profile_delete(profile_id):
+    conn = db()
+    conn.execute("DELETE FROM profiles WHERE id=?", (int(profile_id),))
+    conn.commit()
+    conn.close()
+    if CONFIG.get("active_profile") == int(profile_id):
+        CONFIG["active_profile"] = 0
+        save_json(CONFIG_PATH, CONFIG)
+    return profiles_state()
+
+
+def device_rename(name):
+    """The name this machine goes by — what the greyed tiles on the OTHER
+    machine will read, since it travels inside any snapshot exported here."""
+    CONFIG["device_name"] = (name or "").strip()[:40]
+    save_json(CONFIG_PATH, CONFIG)
+    return snapshot_device_name()
+
+
+# --- carrying a library between devices -----------------------------------
+#
+# The problem this solves: a library is keyed by file path, so a second
+# machine starts empty and there is no way to see what you own without
+# walking to the other room. What travels here is the CATALOGUE — titles,
+# years, TMDB ids, episode lists, and your own ratings — not the files.
+#
+# TMDB id is the key, not the path. It is the one identifier that means the
+# same thing on every machine, which is exactly what a file path is not.
+# Episodes hang off their show's TMDB id plus season and episode number.
+
+
+def snapshot_device_name():
+    """What this machine calls itself in a snapshot it exports."""
+    name = (CONFIG.get("device_name") or "").strip()
+    if name:
+        return name
+    try:
+        return socket.gethostname().split(".")[0] or "this device"
+    except Exception:
+        return "this device"
+
+
+def build_library_snapshot():
+    """The whole catalogue, in a form another device can read.
+
+    Everything with a TMDB id goes in, rated or not — the point is to see
+    the shelf, not just the part of it you've scored. Films with no TMDB
+    match are left out: without an id there is nothing to match them against
+    on the other side, and a title-only guess is how libraries get merged
+    wrongly.
+    """
+    conn = db()
+    movies = [dict(r) for r in conn.execute(
+        "SELECT tmdb_id,title,year,genres,directors,cast_names,plot,poster,"
+        " tmdb_rating,runtime,userrating,playcount FROM movies"
+        " WHERE tmdb_id IS NOT NULL AND tmdb_id <> '' ORDER BY title")]
+    shows = [dict(r) for r in conn.execute(
+        "SELECT tmdb_id,title,year,genres,plot,poster,tmdb_rating,userrating"
+        " FROM shows WHERE tmdb_id IS NOT NULL AND tmdb_id <> '' ORDER BY title")]
+    episodes = [dict(r) for r in conn.execute(
+        "SELECT s.tmdb_id AS show_tmdb_id, e.season, e.episode, e.title"
+        " FROM episodes e JOIN shows s ON s.id = e.show_id"
+        " WHERE s.tmdb_id IS NOT NULL AND s.tmdb_id <> ''"
+        " ORDER BY s.title, e.season, e.episode")]
+    conn.close()
+    counts = defaultdict(int)
+    for e in episodes:
+        counts[e["show_tmdb_id"]] += 1
+    for sh in shows:
+        sh["episode_count"] = counts.get(sh["tmdb_id"], 0)
+    return {
+        "kind": "nextup-library-snapshot",
+        "version": 1,
+        "device": snapshot_device_name(),
+        "exported_at": now_stamp(),
+        "app_version": APP_VERSION,
+        "movies": movies,
+        "shows": shows,
+        "episodes": episodes,
+    }
+
+
+def import_library_snapshot(payload, fetch_art=True):
+    """Replace any stored snapshot with this one.
+
+    Replace rather than merge: two snapshots from the same machine would
+    otherwise leave whatever was deleted in between sitting there for ever,
+    looking like something you still own somewhere.
+    """
+    if not isinstance(payload, dict) or payload.get("kind") != "nextup-library-snapshot":
+        raise AppError("That doesn't look like a Next Up library snapshot.")
+    movies = payload.get("movies") or []
+    shows = payload.get("shows") or []
+    episodes = payload.get("episodes") or []
+    if not movies and not shows:
+        raise AppError("That snapshot is empty — nothing to carry over.")
+
+    conn = db()
+    conn.execute("DELETE FROM snapshot_movies")
+    conn.execute("DELETE FROM snapshot_shows")
+    conn.execute("DELETE FROM snapshot_episodes")
+    for m in movies:
+        if not m.get("tmdb_id"):
+            continue
+        conn.execute(
+            "INSERT OR REPLACE INTO snapshot_movies (tmdb_id,title,year,genres,"
+            "directors,cast_names,plot,poster,tmdb_rating,runtime,userrating,"
+            "playcount) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (str(m.get("tmdb_id")), m.get("title"), m.get("year"),
+             m.get("genres"), m.get("directors"), m.get("cast_names"),
+             m.get("plot"), m.get("poster"), m.get("tmdb_rating"),
+             m.get("runtime"), m.get("userrating") or 0, m.get("playcount") or 0))
+    for sh in shows:
+        if not sh.get("tmdb_id"):
+            continue
+        conn.execute(
+            "INSERT OR REPLACE INTO snapshot_shows (tmdb_id,title,year,genres,"
+            "plot,poster,tmdb_rating,userrating,episode_count)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
+            (str(sh.get("tmdb_id")), sh.get("title"), sh.get("year"),
+             sh.get("genres"), sh.get("plot"), sh.get("poster"),
+             sh.get("tmdb_rating"), sh.get("userrating") or 0,
+             sh.get("episode_count") or 0))
+    for e in episodes:
+        if not e.get("show_tmdb_id"):
+            continue
+        conn.execute(
+            "INSERT OR REPLACE INTO snapshot_episodes (show_tmdb_id,season,"
+            "episode,title) VALUES (?,?,?,?)",
+            (str(e.get("show_tmdb_id")), e.get("season"), e.get("episode"),
+             e.get("title")))
+    # Count what was STORED, not what arrived. tmdb_id is the primary key, so
+    # two files of the same film — a 1080p and a 4K copy of it, say — collapse
+    # into the one catalogue entry. That is what you want on a shelf, but it
+    # makes "125 imported" a lie if you report the length of the input.
+    stored = dict(
+        (t, conn.execute("SELECT COUNT(*) FROM snapshot_%s" % t).fetchone()[0])
+        for t in ("movies", "shows", "episodes"))
+    conn.execute("DELETE FROM snapshot_meta")
+    conn.execute(
+        "INSERT INTO snapshot_meta (id,device,exported_at,imported_at,"
+        "app_version,movies,shows,episodes) VALUES (1,?,?,?,?,?,?,?)",
+        (payload.get("device") or "another device", payload.get("exported_at"),
+         now_stamp(), payload.get("app_version"),
+         stored["movies"], stored["shows"], stored["episodes"]))
+    conn.commit()
+    conn.close()
+
+    # Posters are stored as full TMDB urls, so they can be fetched here and
+    # then work offline like the rest. Failing is fine — local_art falls back
+    # to the remote url, and a blank tile after that.
+    arrived = 0
+    if fetch_art:
+        urls = [m.get("poster") for m in movies if m.get("poster")]
+        urls += [sh.get("poster") for sh in shows if sh.get("poster")]
+        try:
+            arrived = download_art(urls)
+        except Exception:
+            arrived = 0
+    LIB.loaded_at = 0
+    result = dict(stored)
+    result["art"] = arrived
+    # Worth saying out loud when the two differ, rather than leaving someone
+    # to wonder where two films went.
+    result["collapsed"] = (len(movies) - stored["movies"]) + \
+                          (len(shows) - stored["shows"])
+    return result
+
+
+def snapshot_forget():
+    conn = db()
+    for table in ("snapshot_movies", "snapshot_shows", "snapshot_episodes",
+                  "snapshot_meta"):
+        conn.execute("DELETE FROM %s" % table)
+    conn.commit()
+    conn.close()
+    LIB.loaded_at = 0
+
+
+def snapshot_state():
+    """What's carried over, and how much of it this machine actually has.
+
+    "role" is worked out rather than configured: a machine holding a
+    snapshot of somewhere else is the auxiliary one, and a machine with no
+    snapshot is just itself. Nothing needs to be set on either.
+    """
+    conn = db()
+    meta = conn.execute("SELECT * FROM snapshot_meta WHERE id = 1").fetchone()
+    if not meta:
+        conn.close()
+        return {"present": False, "role": "main",
+                "device": snapshot_device_name(), "here": {}, "elsewhere": {}}
+    local_movies = set(str(r[0]) for r in conn.execute(
+        "SELECT tmdb_id FROM movies WHERE tmdb_id IS NOT NULL AND tmdb_id <> ''"))
+    local_shows = set(str(r[0]) for r in conn.execute(
+        "SELECT tmdb_id FROM shows WHERE tmdb_id IS NOT NULL AND tmdb_id <> ''"))
+    snap_movies = set(str(r[0]) for r in conn.execute("SELECT tmdb_id FROM snapshot_movies"))
+    snap_shows = set(str(r[0]) for r in conn.execute("SELECT tmdb_id FROM snapshot_shows"))
+    conn.close()
+    return {
+        "present": True,
+        "role": "auxiliary",
+        "device": snapshot_device_name(),
+        "from": meta["device"],
+        "exported_at": meta["exported_at"],
+        "imported_at": meta["imported_at"],
+        "counts": {"movies": meta["movies"], "shows": meta["shows"],
+                   "episodes": meta["episodes"]},
+        "here": {"movies": len(snap_movies & local_movies),
+                 "shows": len(snap_shows & local_shows)},
+        "elsewhere": {"movies": len(snap_movies - local_movies),
+                      "shows": len(snap_shows - local_shows)},
+    }
+
+
+# --- sharing history between devices --------------------------------------
+#
+# The same you on two machines should have one history, one set of ratings,
+# one watchlist and one list of favourites, and a film stopped half way on
+# one should resume on the other. Done through a folder a cloud service
+# already keeps in step — OneDrive by default — with no server of our own.
+#
+# The shape of it, and why:
+#
+#   * Each machine writes ONLY its own file, device-<id>.jsonl, one event
+#     per line, appended. Two machines never write the same file, so there is
+#     nothing for a sync service to reconcile and no "conflicted copy" to
+#     lose data in. The library database itself is never put in the cloud
+#     folder: a sync service copying an SQLite file mid-write is how a
+#     database gets corrupted.
+#   * Events, not state. "Rated 8 at 21:04" can be merged; "rating is 8"
+#     can't, because there's no telling which of two machines said it last.
+#     Where two machines disagree the later event wins, by UTC — the local
+#     time strings in `at` are not comparable across a clock change.
+#   * Keyed by TMDB id, plus season and episode for an episode. Never by row
+#     id (different on every machine) and never by title — see the note at
+#     the top of the snapshot section for what a title match gets wrong.
+#   * Applying an event never calls log_event. That is the one rule that
+#     stops a rating from echoing back and forth between two machines for
+#     ever.
+#   * Every event has a uid, so reading a file twice, a sync service handing
+#     over a duplicate, or a re-share all come to nothing.
+
+SYNC_SUBFOLDER = "Next Up sync"
+SYNC_POLL_SECONDS = 60
+SYNC_KINDS = ("movie", "episode", "tvshow")
+
+# Events that set a piece of state, by what they set. The later of two
+# events in the same family wins; clearing counts as an event.
+_SYNC_FAMILIES = {
+    "rated": "rating", "rating cleared": "rating",
+    "watchlisted": "watchlist", "removed from watchlist": "watchlist",
+    "favourited": "favourite", "removed from favourites": "favourite",
+}
+_SYNC_FAMILY_FIELD = {"rating": "rated_at", "watchlist": "watchlisted_at",
+                      "favourite": "favourited_at"}
+_SYNC_TABLE = {"movie": "movies", "episode": "episodes", "tvshow": "shows"}
+
+SYNC = {"last_run": 0, "error": None, "apply_pending": True, "arrived": 0}
+_SYNC_LOCK = threading.RLock()
+_SYNC_WAKE = threading.Event()
+
+
+def _is_playback_event(event):
+    return (event in ("played", "stopped", "watched", "next episode",
+                      "previous episode")
+            or event.startswith("tuned in via ") or event.startswith("next up on "))
+
+
+def sync_identity(conn, kind, item_id):
+    """(tmdb_id, season, episode, show title) for a local item — what it is
+    in terms another machine can look up — or None when there's no TMDB id
+    to say it with. Something with no id isn't shared at all rather than
+    shared by title."""
+    if kind not in SYNC_KINDS or not item_id:
+        return None
+    try:
+        if kind == "movie":
+            r = conn.execute("SELECT tmdb_id FROM movies WHERE id=?", (item_id,)).fetchone()
+            return (str(r["tmdb_id"]), None, None, None) if r and r["tmdb_id"] else None
+        if kind == "tvshow":
+            r = conn.execute("SELECT tmdb_id,title FROM shows WHERE id=?", (item_id,)).fetchone()
+            return (str(r["tmdb_id"]), None, None, r["title"]) if r and r["tmdb_id"] else None
+        r = conn.execute(
+            "SELECT s.tmdb_id, s.title, e.season, e.episode FROM episodes e"
+            " JOIN shows s ON s.id = e.show_id WHERE e.id=?", (item_id,)).fetchone()
+        if r and r["tmdb_id"] and r["season"] is not None and r["episode"] is not None:
+            return (str(r["tmdb_id"]), int(r["season"]), int(r["episode"]), r["title"])
+    except sqlite3.Error:
+        pass
+    return None
+
+
+def sync_device_id():
+    """This machine's id, made once. Tied to the hostname it was made on: a
+    Next Up folder copied to another computer carries its config with it,
+    and two machines sharing an id would each skip the other's file as
+    their own."""
+    host = socket.gethostname()
+    if CONFIG.get("device_id") and CONFIG.get("device_id_host") == host:
+        return CONFIG["device_id"]
+    CONFIG["device_id"] = uuid.uuid4().hex[:16]
+    CONFIG["device_id_host"] = host
+    save_json(CONFIG_PATH, CONFIG)
+    return CONFIG["device_id"]
+
+
+def cloud_folders():
+    """Cloud folders that exist on this machine, most suitable first.
+
+    OneDrive leads because it is the one that behaves on both systems.
+    iCloud Drive on Windows is the weak one: it evicts files it thinks you
+    don't need, and a device file that isn't on disk can't be read."""
+    home = os.path.expanduser("~")
+    found, seen = [], set()
+
+    def add(service, path):
+        if path and os.path.isdir(path):
+            key = os.path.normcase(os.path.abspath(path))
+            if key not in seen:
+                seen.add(key)
+                found.append({"service": service, "path": path})
+
+    if os.name == "nt":
+        for var in ("OneDriveConsumer", "OneDrive", "OneDriveCommercial"):
+            add("OneDrive", os.environ.get(var))
+        add("OneDrive", os.path.join(home, "OneDrive"))
+        add("Dropbox", os.path.join(home, "Dropbox"))
+        add("iCloud Drive", os.path.join(home, "iCloudDrive"))
+    else:
+        storage = os.path.join(home, "Library", "CloudStorage")
+        for path in sorted(glob.glob(os.path.join(storage, "OneDrive*"))):
+            add("OneDrive", path)
+        add("OneDrive", os.path.join(home, "OneDrive"))
+        for path in sorted(glob.glob(os.path.join(storage, "Dropbox*"))):
+            add("Dropbox", path)
+        add("Dropbox", os.path.join(home, "Dropbox"))
+        add("iCloud Drive", os.path.join(home, "Library", "Mobile Documents",
+                                         "com~apple~CloudDocs"))
+    return found
+
+
+def sync_client_running(service):
+    """Is the sync app itself running? A OneDrive folder is still a folder
+    when OneDrive is closed — the files land in it and go nowhere — and that
+    is the one failure nothing else on the page would reveal. None when it
+    can't be told."""
+    names = {"OneDrive": ("OneDrive.exe", "OneDrive"),
+             "Dropbox": ("Dropbox.exe", "Dropbox")}.get(service)
+    if not names:
+        return None
+    import subprocess
+    try:
+        if os.name == "nt":
+            out = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq %s" % names[0], "/NH"],
+                capture_output=True, text=True, timeout=5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+            return names[0].lower() in out.lower()
+        return subprocess.run(["pgrep", "-x", names[1]], capture_output=True,
+                              timeout=5).returncode == 0
+    except Exception:
+        return None
+
+
+def sync_dir(create=False):
+    base = (CONFIG.get("sync_folder") or "").strip()
+    if not base or not os.path.isdir(base):
+        return None
+    path = os.path.join(base, SYNC_SUBFOLDER)
+    if create:
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError:
+            return None
+    return path if os.path.isdir(path) else None
+
+
+def _sync_own_name():
+    return "device-%s.jsonl" % sync_device_id()
+
+
+def _sync_event_from_row(row, device_id, device):
+    return {
+        "v": 1, "uid": row["uid"], "utc": row["utc"],
+        "device_id": device_id, "device": device,
+        "kind": row["kind"], "tmdb": row["tmdb_id"],
+        "season": row["season"], "episode": row["episode"],
+        "show": row["show_title"], "title": row["title"],
+        "event": row["event"], "value": row["value"],
+        "seconds": row["seconds"], "position": row["position"],
+        "total": row["total"],
+    }
+
+
+def _sync_seed_events(conn, device_id, device):
+    """What this machine already holds that no history row says.
+
+    Ratings made before the history table existed, a watchlist from the
+    first week, a film half watched: none of those has an event to share, so
+    the first share describes them as events dated by their own timestamps.
+    Seeds set state on the other machine but never appear in its history —
+    they didn't happen then, they're just true. Their uids are made from
+    what they say, so sharing again adds nothing unless something changed.
+    """
+    seeds = []
+
+    def seed(kind, ident, event, when, value=None, position=None, total=None):
+        utc = stamp_seconds(when) if when else 0.0
+        key = "|".join(str(x) for x in (device_id, kind, ident[0], ident[1], ident[2],
+                                         event, value, position, utc))
+        seeds.append({
+            "v": 1, "uid": "seed-" + hashlib.sha1(key.encode("utf-8")).hexdigest(),
+            "utc": utc or 0.0, "device_id": device_id, "device": device,
+            "kind": kind, "tmdb": ident[0], "season": ident[1],
+            "episode": ident[2], "show": ident[3], "title": None,
+            "event": event, "value": value, "seconds": None,
+            "position": position, "total": total, "seed": True})
+
+    for kind in SYNC_KINDS:
+        table = _SYNC_TABLE[kind]
+        cols = "id,userrating,rated_at"
+        if kind != "episode":
+            cols += ",watchlisted_at,favourited_at"
+        if kind != "tvshow":
+            cols += ",resume_pos,resume_total,last_played"
+        for r in conn.execute("SELECT %s FROM %s" % (cols, table)):
+            keys = r.keys()
+            wanted = ((r["userrating"] or 0) > 0
+                      or ("watchlisted_at" in keys and r["watchlisted_at"])
+                      or ("favourited_at" in keys and r["favourited_at"])
+                      or ("resume_pos" in keys and (r["resume_pos"] or 0) > 0))
+            if not wanted:
+                continue
+            ident = sync_identity(conn, kind, r["id"])
+            if not ident:
+                continue
+            if (r["userrating"] or 0) > 0:
+                seed(kind, ident, "rated", r["rated_at"], value=r["userrating"])
+            if "watchlisted_at" in keys and r["watchlisted_at"]:
+                seed(kind, ident, "watchlisted", r["watchlisted_at"])
+            if "favourited_at" in keys and r["favourited_at"]:
+                seed(kind, ident, "favourited", r["favourited_at"])
+            if "resume_pos" in keys and (r["resume_pos"] or 0) > 0:
+                seed(kind, ident, "stopped", r["last_played"],
+                     position=int(r["resume_pos"]), total=int(r["resume_total"] or 0))
+    return seeds
+
+
+def sync_publish(conn, folder):
+    """Write this machine's unshared history to its own file.
+
+    The first time for a folder — or when this machine's file has gone from
+    it — everything is written again from the start, seeds included, so a
+    deleted file or a new folder heals itself rather than leaving the other
+    machine with half a story."""
+    device_id, device = sync_device_id(), snapshot_device_name()
+    own = os.path.join(folder, _sync_own_name())
+    fresh = (CONFIG.get("sync_shared_to") != folder) or not os.path.isfile(own)
+    if fresh:
+        conn.execute("UPDATE history SET shared=NULL WHERE origin IS NULL")
+        conn.commit()
+
+    # Older rows predate the identity columns. Fill them in from the library
+    # as it is now — the best that can be done, and exact for anything still
+    # in it. Rows about things no longer here have no id and stay local.
+    for r in list(conn.execute(
+            "SELECT id,kind,item_id FROM history WHERE origin IS NULL"
+            " AND shared IS NULL AND uid IS NULL")):
+        ident = sync_identity(conn, r["kind"], r["item_id"])
+        conn.execute("UPDATE history SET uid=?, tmdb_id=?, season=?, episode=?,"
+                     " show_title=? WHERE id=?",
+                     (uuid.uuid4().hex,) + (ident or (None, None, None, None)) + (r["id"],))
+    conn.commit()
+
+    rows = list(conn.execute(
+        "SELECT * FROM history WHERE origin IS NULL AND shared IS NULL"
+        " ORDER BY at ASC, id ASC"))
+    lines, done, skipped = [], [], []
+    for r in rows:
+        if r["kind"] not in SYNC_KINDS or not r["tmdb_id"]:
+            skipped.append(r["id"])
+            continue
+        row = dict(r)
+        if row["utc"] is None:
+            row["utc"] = stamp_seconds(row["at"]) or 0.0
+        lines.append(_sync_event_from_row(row, device_id, device))
+        done.append(r["id"])
+    if fresh:
+        lines = _sync_seed_events(conn, device_id, device) + lines
+    if not lines and not fresh:
+        if skipped:
+            conn.executemany("UPDATE history SET shared=2 WHERE id=?", [(i,) for i in skipped])
+            conn.commit()
+        return 0
+
+    text = "".join(json.dumps(x, ensure_ascii=False) + "\n" for x in lines)
+    if fresh:
+        # Whole, then renamed into place: the other machine may be reading
+        # this file at any moment, and must never see half of it.
+        tmp = own + ".tmp"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        os.replace(tmp, own)
+        CONFIG["sync_shared_to"] = folder
+        save_json(CONFIG_PATH, CONFIG)
+    else:
+        with open(own, "a", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+    conn.executemany("UPDATE history SET shared=1 WHERE id=?", [(i,) for i in done])
+    conn.executemany("UPDATE history SET shared=2 WHERE id=?", [(i,) for i in skipped])
+    conn.commit()
+    return len(lines)
+
+
+def sync_import(conn, folder):
+    """Read what's new in every other device's file. Only whole lines — a
+    file mid-sync can end part way through one, and that line is read next
+    time rather than half now."""
+    own_stem = _sync_own_name()[:-len(".jsonl")]
+    own_id = sync_device_id()
+    known = dict((r["name"], r) for r in conn.execute("SELECT * FROM sync_files"))
+    arrived = 0
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return 0
+    for name in names:
+        # Our own file, and any copy a sync service made of it
+        # ("device-abc-DESKTOP.jsonl"), are skipped by the same test.
+        if not name.endswith(".jsonl") or name.startswith(own_stem):
+            continue
+        full = os.path.join(folder, name)
+        try:
+            st = os.stat(full)
+        except OSError:
+            continue
+        prev = known.get(name)
+        if prev and prev["size"] == st.st_size and prev["mtime"] == st.st_mtime:
+            continue
+        offset = prev["offset"] if prev else 0
+        if st.st_size < offset:
+            offset = 0          # rewritten from the start; uids absorb the repeat
+        try:
+            with open(full, "rb") as fh:
+                fh.seek(offset)
+                chunk = fh.read()
+        except OSError:
+            continue
+        end = chunk.rfind(b"\n")
+        body = chunk[:end + 1] if end >= 0 else b""
+        for line in body.splitlines():
+            try:
+                ev = json.loads(line.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if (not isinstance(ev, dict) or not ev.get("uid") or not ev.get("tmdb")
+                    or ev.get("kind") not in SYNC_KINDS or not ev.get("event")
+                    or ev.get("device_id") == own_id):
+                continue
+            try:
+                utc = float(ev.get("utc") or 0)
+            except (TypeError, ValueError):
+                continue
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO sync_inbox (uid,device_id,device,utc,payload,applied)"
+                " VALUES (?,?,?,?,?,0)",
+                (str(ev["uid"]), ev.get("device_id"), ev.get("device"), utc,
+                 json.dumps(ev, ensure_ascii=False)))
+            if cur.rowcount:
+                arrived += 1
+                conn.execute(
+                    "INSERT INTO sync_devices (device_id,name,events,last_utc,file_mtime)"
+                    " VALUES (?,?,1,?,?) ON CONFLICT(device_id) DO UPDATE SET"
+                    " name=excluded.name, events=events+1,"
+                    " last_utc=MAX(last_utc, excluded.last_utc),"
+                    " file_mtime=excluded.file_mtime",
+                    (ev.get("device_id"), ev.get("device") or "another device",
+                     utc if not ev.get("seed") else 0, st.st_mtime))
+        # "Last heard from" is when their file last changed, which is also
+        # true of a pass that brought nothing new.
+        conn.execute("UPDATE sync_devices SET file_mtime=? WHERE device_id=?",
+                     (st.st_mtime, _sync_device_of(name)))
+        conn.execute(
+            "INSERT OR REPLACE INTO sync_files (name,offset,size,mtime) VALUES (?,?,?,?)",
+            (name, offset + len(body), st.st_size, st.st_mtime))
+    conn.commit()
+    return arrived
+
+
+def _sync_device_of(name):
+    m = re.match(r"device-([0-9a-f]+)", name)
+    return m.group(1) if m else None
+
+
+def _sync_latest_local(conn, kind, item_id, events_like, uid, field=None):
+    """When this item last changed here in the given way, as UTC — from the
+    history, and from the item's own timestamp for state no history row
+    records (a rating older than the history table)."""
+    latest = 0.0
+    clause, args = events_like
+    for r in conn.execute(
+            "SELECT utc, at FROM history WHERE kind=? AND item_id=?"
+            " AND (uid IS NULL OR uid<>?) AND (%s)" % clause,
+            (kind, item_id, uid) + tuple(args)):
+        when = r["utc"] if r["utc"] is not None else stamp_seconds(r["at"])
+        latest = max(latest, when or 0.0)
+    if field:
+        r = conn.execute("SELECT %s v FROM %s WHERE id=?" % (field, _SYNC_TABLE[kind]),
+                         (item_id,)).fetchone()
+        if r and r["v"]:
+            latest = max(latest, stamp_seconds(r["v"]) or 0.0)
+    return latest
+
+
+def _sync_watch_later(path, position):
+    """Make mpv's own resume file agree with a position from another device.
+
+    Not optional. sync_playback_state treats a library position with no mpv
+    file behind it as a film you finished, so a position set on the row alone
+    would be turned into a play the next time mpv touched its folder. mpv
+    names the file by the MD5 of the path as it was given; checked against
+    the files it wrote here. Anything else mpv saved in it — volume, audio
+    delay — is kept."""
+    if not path:
+        return
+    full = os.path.join(WATCH_LATER, hashlib.md5(path.encode("utf-8")).hexdigest().upper())
+    try:
+        if not position:
+            if os.path.isfile(full):
+                os.remove(full)
+            return
+        os.makedirs(WATCH_LATER, exist_ok=True)
+        keep = []
+        if os.path.isfile(full):
+            with open(full, encoding="utf-8", errors="replace") as fh:
+                keep = [x for x in fh.read().splitlines()
+                        if x and not x.startswith("# ") and not x.startswith("start=")]
+        with open(full, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("# %s\nstart=%.6f\n" % (path, float(position)))
+            for x in keep:
+                fh.write(x + "\n")
+    except OSError:
+        pass
+
+
+_PLAYBACK_LIKE = ("event IN ('played','stopped','watched','next episode','previous episode')"
+                  " OR event LIKE 'tuned in via %' OR event LIKE 'next up on %'", ())
+
+
+def _sync_apply_one(conn, ev, kind, item_id, playing):
+    table = _SYNC_TABLE[kind]
+    event, uid = ev["event"], str(ev["uid"])
+    utc = float(ev.get("utc") or 0)
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(utc)) if utc else None
+    family = _SYNC_FAMILIES.get(event)
+    if family:
+        names = [e for e, f in _SYNC_FAMILIES.items() if f == family]
+        clause = ("event IN (%s)" % ",".join("?" * len(names)), names)
+        field = _SYNC_FAMILY_FIELD[family]
+        # Strictly later. A tie — two seeds with no timestamp, say — keeps
+        # what's here, so two machines can't swap values back and forth.
+        if utc <= _sync_latest_local(conn, kind, item_id, clause, uid, field):
+            return
+        if family == "rating":
+            value = ev.get("value") or 0
+            conn.execute("UPDATE %s SET userrating=?, rated_at=? WHERE id=?" % table,
+                         (value, stamp if value else None, item_id))
+        elif family == "watchlist" and kind != "episode":
+            conn.execute("UPDATE %s SET watchlisted_at=? WHERE id=?" % table,
+                         (stamp if event == "watchlisted" else None, item_id))
+        elif family == "favourite" and kind != "episode":
+            conn.execute("UPDATE %s SET favourited_at=? WHERE id=?" % table,
+                         (stamp if event == "favourited" else None, item_id))
+        return
+
+    if kind == "tvshow" or not _is_playback_event(event):
+        return
+    if event == "watched" and not ev.get("seed"):
+        conn.execute("UPDATE %s SET playcount=COALESCE(playcount,0)+1 WHERE id=?" % table,
+                     (item_id,))
+    if stamp and not ev.get("seed"):
+        conn.execute("UPDATE %s SET last_played=? WHERE id=? AND"
+                     " (last_played IS NULL OR last_played < ?)" % table,
+                     (stamp, item_id, stamp))
+    if event not in ("watched", "stopped"):
+        return
+    if playing == (kind, item_id):
+        return      # it's on screen here right now; this machine knows better
+    if utc <= _sync_latest_local(conn, kind, item_id, _PLAYBACK_LIKE, uid):
+        return
+    path = conn.execute("SELECT path FROM %s WHERE id=?" % table, (item_id,)).fetchone()
+    path = path["path"] if path else None
+    if event == "watched":
+        # The row first, then the file: with the position already zero,
+        # sync_playback_state has nothing to mistake the missing file for.
+        conn.execute("UPDATE %s SET resume_pos=0, resume_total=0 WHERE id=?" % table,
+                     (item_id,))
+        conn.commit()
+        _sync_watch_later(path, 0)
+    elif ev.get("position"):
+        conn.execute("UPDATE %s SET resume_pos=?, resume_total=? WHERE id=?" % table,
+                     (float(ev["position"]), float(ev.get("total") or 0), item_id))
+        conn.commit()
+        _sync_watch_later(path, ev["position"])
+
+
+def sync_apply(conn):
+    applied = _sync_apply(conn)
+    # Another machine's sittings count too. On this connection, not a new
+    # one: this runs mid-sync, and a second connection would sit waiting on
+    # this one's lock for the whole busy timeout.
+    try:
+        update_watch_scores(conn)
+    except Exception:
+        log_problem("watch scores after sync")
+    return applied
+
+
+def _sync_apply(conn):
+    """Apply whatever is waiting in the inbox, oldest first.
+
+    Each event also becomes a history row here — marked with the device it
+    came from — unless it's a seed. That row exists even when this library
+    hasn't got the thing, because the evening still happened; it picks up
+    its local id if a later scan brings the thing in."""
+    pending = list(conn.execute(
+        "SELECT uid,device,payload FROM sync_inbox WHERE applied=0 ORDER BY utc ASC"))
+    if not pending:
+        return 0
+    films, shows, eps = defaultdict(list), defaultdict(list), defaultdict(list)
+    for r in conn.execute("SELECT id,tmdb_id FROM movies WHERE tmdb_id IS NOT NULL AND tmdb_id<>''"):
+        films[str(r["tmdb_id"])].append(r["id"])
+    for r in conn.execute("SELECT id,tmdb_id FROM shows WHERE tmdb_id IS NOT NULL AND tmdb_id<>''"):
+        shows[str(r["tmdb_id"])].append(r["id"])
+    for r in conn.execute(
+            "SELECT e.id, s.tmdb_id, e.season, e.episode FROM episodes e"
+            " JOIN shows s ON s.id=e.show_id WHERE s.tmdb_id IS NOT NULL AND s.tmdb_id<>''"):
+        eps[(str(r["tmdb_id"]), r["season"], r["episode"])].append(r["id"])
+    with _PLAY_LOCK:
+        playing = (NOW_PLAYING.get("type"), NOW_PLAYING.get("id"))
+
+    applied = 0
+    for p in pending:
+        try:
+            ev = json.loads(p["payload"])
+        except ValueError:
+            conn.execute("UPDATE sync_inbox SET applied=2 WHERE uid=?", (p["uid"],))
+            continue
+        kind, tmdb = ev["kind"], str(ev["tmdb"])
+        if kind == "movie":
+            targets = films.get(tmdb, [])
+        elif kind == "tvshow":
+            targets = shows.get(tmdb, [])
+        else:
+            targets = eps.get((tmdb, ev.get("season"), ev.get("episode")), [])
+        utc = float(ev.get("utc") or 0)
+        if not ev.get("seed"):
+            conn.execute(
+                "INSERT OR IGNORE INTO history (at,kind,item_id,title,event,value,"
+                "seconds,position,total,uid,utc,origin,tmdb_id,season,episode,"
+                "show_title,shared) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)",
+                (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(utc)), kind,
+                 targets[0] if targets else None, ev.get("title"), ev["event"],
+                 ev.get("value"), ev.get("seconds"), ev.get("position"),
+                 ev.get("total"), str(ev["uid"]), utc,
+                 p["device"] or "another device", tmdb, ev.get("season"),
+                 ev.get("episode"), ev.get("show")))
+            if targets:
+                conn.execute("UPDATE history SET item_id=? WHERE uid=? AND item_id IS NULL",
+                             (targets[0], str(ev["uid"])))
+        if not targets:
+            continue        # waits for a scan to bring it in
+        for item_id in targets:
+            _sync_apply_one(conn, ev, kind, item_id, playing)
+        conn.execute("UPDATE sync_inbox SET applied=1 WHERE uid=?", (p["uid"],))
+        applied += 1
+    conn.commit()
+    if applied:
+        LOCAL.loaded_at = 0
+    return applied
+
+
+def sync_run():
+    """One pass: share what's new here, read what's new from elsewhere,
+    apply it. Safe to call from anywhere; passes don't overlap."""
+    with _SYNC_LOCK:
+        base = (CONFIG.get("sync_folder") or "").strip()
+        if not base:
+            return
+        folder = sync_dir(create=True)
+        if not folder:
+            SYNC["error"] = ("Can't reach %s. Nothing is lost — this machine keeps "
+                             "its history and shares it once the folder is back." % base)
+            return
+        conn = db()
+        try:
+            sync_publish(conn, folder)
+            arrived = sync_import(conn, folder)
+            SYNC["arrived"] += arrived
+            if arrived or SYNC["apply_pending"]:
+                SYNC["apply_pending"] = False
+                sync_apply(conn)
+            SYNC["error"] = None
+        except Exception as exc:
+            SYNC["error"] = "Sharing stopped on an error: %s" % exc
+            log_problem("sync")
+        finally:
+            conn.close()
+            SYNC["last_run"] = time.time()
+
+
+def sync_loop():
+    """Once a minute, and straight away whenever something is logged here."""
+    while True:
+        try:
+            sync_run()
+        except Exception:
+            log_problem("sync loop")
+        _SYNC_WAKE.wait(SYNC_POLL_SECONDS)
+        _SYNC_WAKE.clear()
+
+
+def sync_enable(folder):
+    folder = (folder or "").strip().strip('"')
+    if not folder or not os.path.isdir(folder):
+        raise AppError("That folder isn't there: %s" % (folder or "(nothing given)"))
+    with _SYNC_LOCK:
+        if os.path.normcase(folder) != os.path.normcase(CONFIG.get("sync_folder") or ""):
+            # A different folder is a different conversation: read the other
+            # devices' files there from the start.
+            conn = db()
+            conn.execute("DELETE FROM sync_files")
+            conn.commit()
+            conn.close()
+        CONFIG["sync_folder"] = folder
+        CONFIG["sync_offer_dismissed"] = True
+        save_json(CONFIG_PATH, CONFIG)
+        SYNC["apply_pending"] = True
+    sync_run()
+    return sync_state()
+
+
+def sync_disable():
+    """Stops sharing from here. The files in the cloud folder are left alone
+    — they're the other machine's history as much as this one's."""
+    with _SYNC_LOCK:
+        CONFIG["sync_folder"] = ""
+        CONFIG.pop("sync_shared_to", None)
+        save_json(CONFIG_PATH, CONFIG)
+        SYNC["error"] = None
+    return sync_state()
+
+
+def sync_state():
+    base = (CONFIG.get("sync_folder") or "").strip()
+    detected = cloud_folders()
+    service = None
+    if base:
+        service = next((d["service"] for d in detected
+                        if os.path.normcase(d["path"]) == os.path.normcase(base)), None)
+    conn = db()
+    try:
+        devices = [dict(r) for r in conn.execute(
+            "SELECT device_id,name,events,last_utc,file_mtime FROM sync_devices"
+            " ORDER BY file_mtime DESC")]
+        waiting = conn.execute(
+            "SELECT COUNT(*) FROM sync_inbox WHERE applied=0").fetchone()[0]
+        shared = conn.execute(
+            "SELECT COUNT(*) FROM history WHERE origin IS NULL AND shared=1").fetchone()[0]
+        received = conn.execute(
+            "SELECT COUNT(*) FROM history WHERE origin IS NOT NULL").fetchone()[0]
+    finally:
+        conn.close()
+    for d in devices:
+        d["heard"] = (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(d["file_mtime"]))
+                      if d["file_mtime"] else None)
+        d["ago"] = int(time.time() - d["file_mtime"]) if d["file_mtime"] else None
+    return {
+        "enabled": bool(base),
+        "folder": base,
+        "service": service,
+        "reachable": bool(base) and sync_dir() is not None,
+        "client_running": sync_client_running(service) if service else None,
+        "device": snapshot_device_name(),
+        "detected": detected,
+        "offer": (not base) and bool(detected) and not CONFIG.get("sync_offer_dismissed"),
+        "devices": devices,
+        "waiting": waiting,
+        "shared": shared,
+        "received": received,
+        "last_run": (time.strftime("%H:%M", time.localtime(SYNC["last_run"]))
+                     if SYNC["last_run"] else None),
+        "error": SYNC["error"],
+    }
+
+
+def elsewhere_rows(kind, query):
+    """Snapshot entries this machine hasn't got, shaped like browse rows.
+
+    Matched on TMDB id alone. A title match would be worse than nothing
+    here: it would quietly hide a film you do own behind one you don't, or
+    the reverse, and the greying is only meaningful if it's right.
+    """
+    conn = db()
+    local_movies = set(str(r[0]) for r in conn.execute(
+        "SELECT tmdb_id FROM movies WHERE tmdb_id IS NOT NULL AND tmdb_id <> ''"))
+    local_shows = set(str(r[0]) for r in conn.execute(
+        "SELECT tmdb_id FROM shows WHERE tmdb_id IS NOT NULL AND tmdb_id <> ''"))
+    rows = []
+    if kind != "tv":
+        for r in conn.execute("SELECT * FROM snapshot_movies"):
+            if str(r["tmdb_id"]) in local_movies:
+                continue
+            item = {"title": r["title"] or ""}
+            genres = as_list(r["genres"])
+            directors = as_list(r["directors"])
+            cast = as_list(r["cast_names"])
+            score = search_score(query, item, cast + directors, genres)
+            if not score:
+                continue
+            rows.append({
+                "score": score, "kind": "movie", "id": None,
+                "elsewhere": True, "tmdb_id": str(r["tmdb_id"]),
+                "title": r["title"], "year": r["year"],
+                "poster": local_art(r["poster"]),
+                "tmdb": round(r["tmdb_rating"] or 0, 1),
+                "userrating": r["userrating"] or 0,
+                "genres": genres[:3], "plot": (r["plot"] or "")[:300],
+                "runtime": minutes(r["runtime"]),
+                "directors": directors[:2], "cast": cast[:3],
+                "in_progress": False, "percent": 0, "identified": True,
+                "sort_added": "", "watchlisted": False, "favourited": False,
+            })
+    if kind in ("tv", "all"):
+        for r in conn.execute("SELECT * FROM snapshot_shows"):
+            if str(r["tmdb_id"]) in local_shows:
+                continue
+            item = {"title": r["title"] or ""}
+            genres = as_list(r["genres"])
+            score = search_score(query, item, [], genres)
+            if not score:
+                continue
+            rows.append({
+                "score": score, "kind": "tvshow", "id": None,
+                "elsewhere": True, "tmdb_id": str(r["tmdb_id"]),
+                "title": r["title"], "year": r["year"],
+                "poster": local_art(r["poster"]),
+                "tmdb": round(r["tmdb_rating"] or 0, 1),
+                "userrating": r["userrating"] or 0,
+                "genres": genres[:3], "plot": (r["plot"] or "")[:300],
+                "episodes": r["episode_count"] or 0,
+                "in_progress": False, "progress_note": "", "percent": 0,
+                "sort_added": "", "watchlisted": False, "favourited": False,
+            })
+    conn.close()
+    return rows
+
+
+# ===========================================================================
+# CHANNELS — a few loops through your own shelf, TV-style
+# ===========================================================================
+#
+# A channel is a fixed, shuffled sequence of "blocks" — one film, or two
+# consecutive episodes of a show — built from whatever in your library
+# matches its theme. It loops forever from a fixed point in time, so "what's
+# on" means the same thing to everyone watching and to you five minutes from
+# now: no server-side state, no scheduler thread, just today's date minus a
+# fixed anchor, walked against the block durations.
+#
+# There's no live position from mpv (see the note above NOW_PLAYING), so
+# tuning in seeks mpv to where the schedule says you'd be — accurate to the
+# second the file was actually matched to a runtime, honest about it when it
+# wasn't.
+
+# The hand-kept half of All Day Daytime — see the channel's own note for why
+# it can't be built from genres. Most of these aren't in the library; they're
+# here so the channel picks them up on the day they arrive rather than
+# needing this list revisited. Matched on a normalised title (case, spacing
+# and punctuation ignored) and matched WHOLE: a prefix match would catch
+# regional spin-offs, but it would also put a drama called "Survivors" on a
+# channel that meant Survivor.
+DAYTIME_TITLES = [
+    # Motoring and workshop
+    "Top Gear", "The Grand Tour", "Fifth Gear", "Wheeler Dealers", "Car SOS",
+    "Salvage Hunters", "American Chopper", "Counting Cars", "Pimp My Ride",
+    # Things being taken apart, blown up or built
+    "MythBusters", "How It's Made", "Scrapheap Challenge", "Robot Wars",
+    "Brainiac: Science Abuse", "Dirty Jobs", "Time Team",
+    # Buying, selling and valuing
+    "Pawn Stars", "Storage Wars", "Storage Hunters", "Bargain Hunt",
+    "Antiques Roadshow", "Flog It!", "Dickinson's Real Deal",
+    "Homes Under the Hammer", "Escape to the Country", "A Place in the Sun",
+    "Grand Designs",
+    # Kitchens
+    "The Great British Bake Off", "MasterChef", "Come Dine with Me",
+    "Kitchen Nightmares", "Ramsay's Kitchen Nightmares", "Hell's Kitchen",
+    "Saturday Kitchen",
+    # Formats and panels
+    "The Apprentice", "Dragons' Den", "Big Brother", "Survivor",
+    "Gogglebox", "Countdown", "Pointless", "The Chase", "Tipping Point",
+    "Supermarket Sweep", "Deal or No Deal", "The Weakest Link",
+    # Sofas and studio talk
+    "This Morning", "Loose Women", "The Jeremy Kyle Show", "Judge Judy",
+    # Pranks and stunts
+    "Jackass", "Impractical Jokers", "Nathan for You", "Trigger Happy TV",
+    "Deadliest Catch", "Ice Road Truckers", "Gold Rush",
+]
+
+# The hand-kept half of Cartoon Swim, for the same reason as above and one
+# more: the block this channel means isn't all animated. The Eric Andre Show,
+# Tim and Eric and Dr Steve Brule are live action and tagged nothing but
+# Comedy, so no genre rule reaches them — and a genre rule that did would drag
+# in every sitcom you own. Named outright, they arrive on the day they arrive.
+#
+# Same normalisation and the same whole-title match as DAYTIME_TITLES.
+CARTOON_SWIM_TITLES = [
+    # Adult Swim proper
+    "The Eric Andre Show", "Rick and Morty", "Robot Chicken",
+    "Aqua Teen Hunger Force", "The Venture Bros.", "Metalocalypse",
+    "Harvey Birdman, Attorney at Law", "Sealab 2021", "Squidbillies",
+    "Space Ghost Coast to Coast", "Superjail!", "Xavier: Renegade Angel",
+    "12 oz. Mouse", "Moral Orel", "Mr. Pickles", "Smiling Friends",
+    "Home Movies", "Frisky Dingo", "The Brak Show", "Delocated",
+    "Tim and Eric Awesome Show, Great Job!", "Your Pretty Face Is Going to Hell",
+    "Check It Out! with Dr. Steve Brule", "China, IL", "Tuca & Bertie",
+    # The wider shelf it belongs to
+    "South Park", "Family Guy", "American Dad!", "Futurama",
+    "Beavis and Butt-Head", "Daria", "King of the Hill", "The Boondocks",
+    "Drawn Together", "Invincible", "Solar Opposites", "Big Mouth",
+    "BoJack Horseman", "Archer", "F Is for Family", "Disenchantment",
+    "Final Space", "Ugly Americans", "The Critic", "Duckman",
+    "Common Side Effects", "Primal", "Castlevania", "Blue Eye Samurai",
+    "The Boys Presents: Diabolical", "Love, Death & Robots",
+]
+
+
+def _daytime_key(title):
+    """A title reduced to the letters and numbers in it, lower case, so
+    "Flog It!" and "Flog it" are the same programme and "Dragons' Den"
+    survives whichever apostrophe TMDB happens to use.
+
+    Accents are folded too. TMDB spells it "Pokémon" and a list typed by
+    hand will say "Pokemon"; without this the two are different programmes
+    and the entry silently never matches anything.
+    """
+    flat = unicodedata.normalize("NFKD", title or "")
+    return "".join(ch for ch in flat.lower()
+                   if ch.isalnum() and not unicodedata.combining(ch))
+
+
+CHANNELS = [
+    {"id": "anything", "name": "Everything", "genres": []},
+    # "Animation" alone isn't enough for Universal — South Park and
+    # Invincible are animated but not remotely family viewing. Family/Kids
+    # specifically is the bar; Animation on its own no longer qualifies.
+    {"id": "kids", "name": "Universal",
+     "genres": ["Family", "Kids"], "episode_block_size": 2},
+    {"id": "docs", "name": "True Life",
+     "genres": ["Documentary"]},
+    {"id": "action", "name": "Action",
+     "genres": ["Action", "Adventure", "Action & Adventure"]},
+    {"id": "comedy", "name": "Comedy",
+     "genres": ["Comedy"],
+     # TMDB tags plenty of dark or tense films "Comedy" as a minor third
+     # wheel (Parasite, Bugonia) — being tagged Comedy at all isn't enough
+     # to mean lighthearted, so anything tonally opposed gets excluded even
+     # if Comedy is also in its genre list.
+     "exclude_genres": ["Thriller", "Horror"]},
+    # Not built from your library at all — a straight pipe to a live stream.
+    # Needs an internet connection, and yt-dlp on PATH for mpv to resolve a
+    # YouTube link, which the others never require.
+    {"id": "news", "name": "Al Jazeera Live", "type": "live",
+     "url": "https://www.youtube.com/watch?v=gCNeDWCI0vo"},
+    # Named by hand, and ONLY by hand. Genre could not carry this one and was
+    # never going to: "Saturday morning" is a tone, not a category, and TMDB
+    # tags Pokemon and Attack on Titan identically -- Animation, Action &
+    # Adventure, Sci-Fi & Fantasy. Worse, "Comedy" was in the list, a tag that
+    # Seinfeld, Chappelle's Show, Peep Show and It's Always Sunny all carry,
+    # so the channel's four largest contributors were Seinfeld, South Park,
+    # It's Always Sunny and The Simpsons -- ahead of anything a child has ever
+    # watched. The same failure All Day Daytime hit, and it takes the same
+    # cure. Only one show in the whole library carries a Family or Kids tag,
+    # so there was no tightening of the genre rule that would have worked.
+    #
+    # TV only: this is a morning schedule. Animated films have Animated
+    # Features #19, adult cartoons have Cartoon Swim #21 and anime has
+    # Anime #11, so nothing is left homeless by this -- it has just stopped
+    # being filed on the one channel that should never have carried it.
+    #
+    # Most of the list isn't in the library yet. That is the point: it's here
+    # so the channel picks these up on the day they arrive.
+    {"id": "morning", "name": "Saturday Morning",
+     "named_only": True, "tv_only": True, "episode_block_size": 2,
+     "genres": [],
+     "titles": [
+         "Pokemon", "SpongeBob SquarePants", "X-Men '97",
+         "Scooby-Doo, Where Are You!", "The Scooby-Doo Show", "Looney Tunes",
+         "The Bugs Bunny Show", "Tom and Jerry", "Teenage Mutant Ninja Turtles",
+         "Batman: The Animated Series", "Superman: The Animated Series",
+         "Spider-Man: The Animated Series", "X-Men: The Animated Series",
+         "Animaniacs", "Pinky and the Brain", "Tiny Toon Adventures",
+         "DuckTales", "TaleSpin", "Chip 'n Dale Rescue Rangers",
+         "Darkwing Duck", "Gargoyles", "Recess", "Kim Possible",
+         "Phineas and Ferb", "The Powerpuff Girls", "Dexter's Laboratory",
+         "Johnny Bravo", "Cow and Chicken", "Courage the Cowardly Dog",
+         "Ed, Edd n Eddy", "The Grim Adventures of Billy & Mandy",
+         "Samurai Jack", "Codename: Kids Next Door",
+         "Foster's Home for Imaginary Friends", "Teen Titans",
+         "Justice League", "Justice League Unlimited", "Static Shock",
+         "The Real Ghostbusters", "ThunderCats",
+         "He-Man and the Masters of the Universe", "Transformers",
+         "Beast Wars: Transformers", "G.I. Joe: A Real American Hero",
+         "Muppet Babies", "The Flintstones", "The Jetsons", "Yogi Bear",
+         "Top Cat", "Scooby-Doo and Scrappy-Doo", "Danger Mouse",
+         "Count Duckula", "SuperTed", "Bananaman", "The Trap Door",
+         "Postman Pat", "Fireman Sam", "Rugrats", "Hey Arnold!", "Doug",
+         "The Ren & Stimpy Show", "Rocko's Modern Life", "CatDog",
+         "The Wild Thornberrys", "Rocket Power", "The Angry Beavers",
+         "Avatar: The Last Airbender", "The Legend of Korra",
+         "Adventure Time", "Regular Show", "Steven Universe",
+         "Gravity Falls", "We Bare Bears", "Star Wars: The Clone Wars",
+         "Sonic the Hedgehog", "Adventures of Sonic the Hedgehog",
+         "Mighty Morphin Power Rangers", "Duck Dodgers", "Freakazoid!",
+         "Earthworm Jim", "Beetlejuice", "Men in Black: The Series",
+         "Jackie Chan Adventures", "Totally Spies!", "Winx Club",
+         "Yu-Gi-Oh!", "Digimon: Digital Monsters", "Beyblade",
+         "Sailor Moon", "Dragon Ball", "Dragon Ball Z",
+     ]},
+    # Rated well but never voted on by a blockbuster-sized audience — a
+    # small, devoted fanbase rather than the box office, which vote count
+    # is the only signal in this library that actually distinguishes.
+    {"id": "cult", "name": "Cult Classic", "type": "cult"},
+    # These two change who they are rather than what genre they are. How
+    # often is the "rotate" key — see channel_blocks().
+    #
+    # "day": a name a day, changing at midnight whether or not their films
+    # have run out. Twenty-three directors qualify, so a fortnight of days
+    # gets round most of them.
+    {"id": "directorscut", "name": "Directors Cut",
+     "type": "director", "min_count": 4, "rotate": "day"},
+    # "run": the name changes when their films DO run out, and not before.
+    # A day was never the right unit for this — it's a length borrowed from
+    # the calendar, and it fits nobody's filmography. Four films is about
+    # eight hours, so a daily rotation played the same four twice over and
+    # then took them away; nine films is twenty-two, so it cut the ninth off
+    # entirely and never showed it. A run ends when it ends.
+    {"id": "typecast", "name": "Type Cast",
+     "type": "actor", "min_count": 4, "rotate": "run"},
+    {"id": "anime", "name": "Anime",
+     "genres": ["Animation"], "countries": ["Japan", "JP"], "episode_block_size": 2},
+    # TV only, and only shows you've actually rated 7+ — a deliberate binge
+    # rather than a sampler, so the blocks run longer than everywhere else.
+    # Six at a time, not three: a binge should outlast a couple of episodes
+    # and settle in for the evening.
+    {"id": "binge", "name": "Binge", "type": "binge",
+     "min_rating": 7.0, "episode_block_size": 6},
+    # Anything not made in English. Filtered on the language a film was shot
+    # in rather than where it was produced: half the foreign films worth
+    # watching have an American studio somewhere in the credits, and going by
+    # country would throw those out while letting in English-language films
+    # that happen to have been shot abroad.
+    {"id": "world", "name": "World Cinema",
+     "exclude_languages": ["en"], "film_only": True},
+    # War sits alongside History on purpose — the two overlap heavily, and a
+    # channel of one without the other is thinner than either deserves.
+    # Documentaries qualify here only when they're also tagged History, so
+    # this doesn't just become True Life again.
+    # Sci-fi is excluded but animation deliberately isn't: "War & Politics"
+    # on its own lets a mecha anime in on a technicality, while Grave of the
+    # Fireflies is one of the finest war films there is and animated.
+    {"id": "history", "name": "Back in Time",
+     "genres": ["History", "War", "War & Politics"],
+     "exclude_genres": ["Science Fiction", "Sci-Fi & Fantasy"]},
+    # Reality and daytime television — the sort of thing that's on while
+    # you're doing something else. Genre alone can't build this one. Of the
+    # shows in the library exactly one is tagged Reality and none are Talk
+    # or Soap, while the programmes this is actually for (Top Gear,
+    # Mythbusters) come back from TMDB as Documentary — the same tag as How
+    # the Universe Works and Louis Theroux, which belong on True Life. A
+    # genre list would therefore both miss the target and drag in what it
+    # shouldn't, so this channel is named by hand as well.
+    #
+    # The genre match stays alongside the list rather than instead of it:
+    # anything TMDB genuinely files as Reality, Talk or Soap belongs here
+    # without needing to be typed out first.
+    {"id": "daytime", "name": "All Day Daytime",
+     "genres": ["Reality", "Talk", "Soap"], "titles": DAYTIME_TITLES,
+     "tv_only": True},
+    # The one channel you fill by hand. Everything else here is assembled
+    # from metadata; this is whatever you've marked, films and shows alike.
+    {"id": "favs", "name": "Non-stop Favs", "type": "favourites",
+     "episode_block_size": 2},
+    # The other hand-filled one. Favourites is what you loved; this is what
+    # you keep meaning to get to, which is a different evening entirely.
+    {"id": "watchlist", "name": "The Watchlist", "type": "watchlist",
+     "episode_block_size": 2},
+    # Monochrome, taken from TMDB's own tagging rather than guessed from the
+    # year — plenty of black and white films are modern (Raging Bull, The
+    # Lighthouse) and plenty of old ones were in colour. The trade is that a
+    # film TMDB never tagged won't appear, however grey it is.
+    {"id": "monochrome", "name": "In Black & White",
+     "type": "keyword", "keyword": "black and white", "film_only": True},
+    # Animation as a form rather than as a children's shelf. Universal and
+    # Saturday Morning both put family first and both mix in television;
+    # this is the animated features on their own, Grave of the Fireflies
+    # sitting next to Shrek, which is the point.
+    {"id": "animated", "name": "Animated Features",
+     "genres": ["Animation"], "film_only": True},
+    # The high end of the shelf, by TMDB's number rather than yours — your own
+    # ratings already drive Binge and the Now tab, and most of a library is
+    # unrated. 8.0 is the line because it's where the count stops being a
+    # handful and starts being a channel: 102 films here clear it.
+    #
+    # The vote floor is the only guard. TMDB will happily report 8.7 off
+    # thirty votes, and one of those in the rotation is a channel telling you
+    # a fib about what "the best of it" means. Every film currently over the
+    # line has thousands, so the floor costs nothing today and stops the odd
+    # obscurity walking in tomorrow.
+    {"id": "toprated", "name": "Top Shelf", "type": "rated",
+     "min_rating": 8.0, "min_votes": 200, "film_only": True},
+    # The late slot. Animation that isn't for children, plus the live-action
+    # Adult Swim block, which is the same evening even though nothing about
+    # its metadata says so — hence the named list beside the genre rule.
+    #
+    # Animation AND Comedy, not either: Animation alone is Grave of the
+    # Fireflies and Arcane, Comedy alone is every sitcom. Japan is excluded
+    # because Anime already has a channel and One-Punch Man is better served
+    # there — the cost is that the anime Adult Swim genuinely aired goes with
+    # it, which is the right way round when the alternative is this channel
+    # slowly turning into Anime #11.
+    {"id": "cartoonswim", "name": "Cartoon Swim",
+     "require_genres": ["Animation"], "genres": ["Comedy"],
+     "exclude_genres": ["Family", "Kids"], "exclude_countries": ["Japan", "JP"],
+     "titles": CARTOON_SWIM_TITLES, "episode_block_size": 3},
+]
+
+# Numbered from where they sit in the list rather than written into each
+# name. The number is the position — saying so once means inserting a
+# channel renumbers the rest, instead of leaving two of them called #7.
+for _position, _channel in enumerate(CHANNELS, 1):
+    _channel["number"] = _position
+    _channel["name"] = "%s #%d" % (_channel["name"], _position)
+del _position, _channel
+
+# 2024-01-01 00:00:00 UTC. Arbitrary, but fixed — every channel's loop is
+# measured from here so restarting the app doesn't reshuffle what's on.
+CHANNEL_EPOCH = 1704067200
+
+# Channels run nose to tail: the moment one programme ends the next begins,
+# and there is never a moment where a channel has nothing on. v0.1.8 tried
+# the opposite — a half-hour slot grid with a gap at the end of each
+# programme, so that roughly one channel in five was always sitting on
+# something about to start, which made "there's nothing near the start to
+# tune into" go away. It went away by turning a fifth of the page into
+# channels that weren't running. The point of a channel is that it's already
+# going and you drop into it; a card saying "starts in 21 minutes, press to
+# begin" is a play button wearing a schedule's clothes, and it's a worse
+# thing to look at than a film you're twenty minutes late for.
+#
+# So the grid is gone and what's on is on. The problem it was solving is
+# real, and SHUFFLE ALL is what solves it now — see channel_phase.
+
+MIN_SCHEDULABLE_RUNTIME = 300   # below this a runtime is probably missing, not real
+# A fallback used only for episode scheduling math, never written to the
+# database or shown anywhere as fact — plenty of episodes have no runtime
+# on TMDB at all, and excluding every one of them would mean no TV ever
+# turns up on a channel. 25 minutes is a deliberately unremarkable guess.
+DEFAULT_EPISODE_RUNTIME = 1500
+
+CULT_MIN_RATING = 7.0
+CULT_MAX_VOTES = 4000   # OBVIOUS_VOTES is 6000 — a cult pick should read as more niche still
+
+
+# ---------------------------------------------------------------------------
+# The shuffle
+# ---------------------------------------------------------------------------
+# Everything about a channel is a pure function of your library and the clock.
+# That's what lets "what's on" be a fact rather than a state: no scheduler
+# thread, nothing to keep in sync, the same answer after a restart as before
+# one. The price is that a line-up you've grown tired of stays exactly as it
+# is forever, and a hundred files dropped onto the drive at once slot into an
+# order that was decided years ago.
+#
+# The salt is the one dial that moves it. It's a single saved string that
+# feeds every shuffle seed and every channel's position in its own loop, so
+# pressing SHUFFLE rewrites all eighteen at once and the result is still a
+# pure function — just of a different constant than it was a minute ago.
+
+
+def channel_salt():
+    return CONFIG.get("channel_salt") or ""
+
+
+def channel_rng(channel, purpose="order"):
+    """The random source behind one channel's line-up. Seeded by name and by
+    the salt, never by the clock — asked twice it gives the same answer."""
+    return random.Random("channel:%s:%s:%s" % (purpose, channel_salt(),
+                                               channel["id"]))
+
+
+def _salt_offset():
+    """A whole number derived from the salt, for the rotations that count in
+    days rather than shuffle a list. Directors Cut can't be shuffled — its
+    line-up is one career in the order it happened — so what a shuffle does
+    to it is hand it to somebody else."""
+    if not channel_salt():
+        return 0
+    return random.Random("person:" + channel_salt()).randrange(1000)
+
+
+# How much of the page a shuffle deals fresh: two channels in five are placed
+# at the very start of a programme at the instant you press it. Deliberately
+# not all of them — a page where everything began ten seconds ago is a page
+# with no choice on it, and half of what makes this worth browsing is that
+# some channels are deep in something you'd want to catch the end of.
+#
+# Measured across five salts, the number of channels showing something less
+# than ten minutes old comes out at 9 to 12 of the 20 that have a schedule,
+# three to six of them films. Higher than two in five because the ones placed
+# at random land near a start often enough on their own: a channel of
+# half-hour episodes is inside the first ten minutes a third of the time
+# without any help.
+CHANNEL_FRESH_SHARE = 0.4
+# And "the very start" means the first few minutes, spread, rather than dead
+# on nought — so they don't all go stale at the same second, and so the page
+# still reads like television rather than a row of play buttons.
+CHANNEL_FRESH_WINDOW = 360
+
+
+def channel_phase(channel, starts, total):
+    """Where in its own loop a channel sits at its epoch.
+
+    This is the whole of what SHUFFLE ALL does about "there's nothing near the
+    start to tune into", now that the slot grid that used to do it is gone.
+
+    Unsalted it's zero: the schedule is the plain one measured from 2024, the
+    same answer it has always given. Once there's a salt, the epoch is the
+    moment you pressed the button (see channel_epoch), so a phase is simply
+    where that channel was standing at that moment — and this gets to choose.
+    Two in five are placed a couple of minutes into a programme; the rest land
+    anywhere at all.
+
+    Which means pressing SHUFFLE ALL is what the gap used to be, without the
+    thing that was wrong with the gap: the channels it deals fresh are
+    *running*, a minute or two in, not sitting waiting to be started. The
+    effect fades over the following ten minutes as they get further in, which
+    is exactly as long as you need it for — you press it because you're
+    looking for something to put on, and then you put something on.
+    """
+    if not channel_salt() or not starts:
+        return 0
+    # Directors Cut measures from this morning's midnight precisely so the
+    # day's first film is the career's first film (see channel_epoch). A jump
+    # into the middle of it would undo that, and the salt already moves this
+    # channel by changing whose day it is.
+    if channel.get("type") in ("director", "actor")             and channel.get("rotate") != "run":
+        return 0
+    rng = random.Random("phase:%s:%s" % (channel_salt(), channel["id"]))
+    if rng.random() < CHANNEL_FRESH_SHARE:
+        opening = starts[rng.randrange(len(starts))]
+        return (opening + rng.randrange(CHANNEL_FRESH_WINDOW)) % total
+    return rng.randrange(total)
+
+
+def _release_order(m):
+    """Sort key for putting a filmography in the order it was made.
+
+    The exact date where TMDB has one, the year where it doesn't, and the
+    title to break a tie — so the sequence is stable rather than depending
+    on the order rows came out of the database. Anything with no date at
+    all sorts to the end: an unknown year is not the year zero, and burying
+    those films at the start of somebody's career would be a lie about them.
+    """
+    released = (m.get("released") or "").strip()
+    year = m.get("year") or 0
+    if released:
+        return (0, released, m.get("title") or "")
+    if year:
+        return (0, "%04d-99-99" % year, m.get("title") or "")
+    return (1, "", m.get("title") or "")
+
+
+def _movie_block(m):
+    return {
+        "kind": "movie", "id": m["movieid"], "title": m.get("title"),
+        "sub": str(m.get("year") or ""),
+        "art": art_url(m.get("art", {}).get("poster")),
+        "duration": m.get("runtime") or 0,
+    }
+
+
+# Two or more co-leads and it's an ensemble, not a star vehicle. Set here so
+# the reasoning is in one place: at three, the Avengers films would still
+# qualify, which is exactly the case this exists to exclude. The cost is that
+# genuine two-handers — Catch Me If You Can, Django Unchained — go too. That's
+# the right trade for a channel whose whole premise is one person carrying a
+# film.
+MAX_CO_LEADS = 2
+
+
+def people_with_films(field, min_count, solo_only=False):
+    """Everyone with at least min_count films in your library, alphabetical,
+    each with their own films — the pool both rotation styles draw from.
+
+    Alphabetical rather than by count or rating: it's an order that doesn't
+    move when you rate something, so the sequence a channel plays is the
+    same one tomorrow."""
+    if field == "lead_cast":
+        ensure_cast_lists()
+    pool = LIB.movies
+    if solo_only:
+        pool = [m for m in LIB.movies if (m.get("co_leads") or 0) < MAX_CO_LEADS]
+    counts = Counter()
+    for m in pool:
+        for name in (m.get(field) or []):
+            counts[name] += 1
+    return [(name, [m for m in pool if name in (m.get(field) or [])])
+            for name in sorted(n for n, c in counts.items() if c >= min_count)]
+
+
+def rotating_person_films(field, min_count, solo_only=False):
+    """Whoever's turn it is today, and their films.
+
+    Rotates by calendar day (date.today().toordinal(), not a hash or
+    anything process-specific) so the same person holds the channel all
+    day and a restart doesn't reshuffle who that is — and, given enough
+    days, everyone who qualifies gets a turn.
+
+    The salt shifts which day of the rotation today counts as. It's the only
+    thing a shuffle can honestly do here: the list is alphabetical so that it
+    doesn't move, and the films inside a turn are in the order they were
+    made, so there's nothing in this channel that wants shuffling — only
+    somebody else's turn."""
+    people = people_with_films(field, min_count, solo_only)
+    if not people:
+        return None, []
+    return people[(date.today().toordinal() + _salt_offset()) % len(people)]
+
+
+def channel_featured_person(channel, now=None):
+    """The name driving Directors Cut / Type Cast, or None for every other
+    kind of channel.
+
+    A channel rotating by the day can answer this from the calendar alone.
+    One rotating by the run can't: which name is up is a consequence of
+    what's playing, not of what day it is, so the answer is carried on the
+    block and this needs to be handed the block that's on. Asked without
+    one it says nothing rather than guessing — a wrong name under a poster
+    is worse than no name."""
+    ctype = channel.get("type")
+    if ctype not in ("director", "actor"):
+        return None
+    if channel.get("rotate") == "run":
+        return (now or {}).get("block", {}).get("person")
+    LIB.load()
+    field = "director" if ctype == "director" else "lead_cast"
+    person, _ = rotating_person_films(field, channel.get("min_count", 4),
+                                      solo_only=(ctype == "actor"))
+    return person
+
+
+def _episode_group_blocks(shows, block_size):
+    """Consecutive-episode blocks, block_size episodes at a time, for each
+    show in shows. Shared by the genre path (usually one episode, unless a
+    channel asks for pairs) and the Binge channel (three at a go)."""
+    by_show = defaultdict(list)
+    for e in LIB.episodes:
+        by_show[e.get("tvshowid")].append(e)
+    blocks = []
+    for s in shows:
+        eps = sorted(
+            [e for e in by_show.get(s.get("tvshowid"), [])
+             if (e.get("season") or 0) > 0],
+            key=episode_order)
+        for i in range(0, len(eps), block_size):
+            group = eps[i:i + block_size]
+            codes = ", ".join("S%02dE%02d" % (e.get("season") or 0, e.get("episode") or 0)
+                              for e in group)
+            blocks.append({
+                "kind": "episodes", "showid": s.get("tvshowid"),
+                "episode_ids": [e["episodeid"] for e in group],
+                "title": s.get("title"), "sub": codes,
+                "art": art_url(s.get("art", {}).get("poster")),
+                "duration": sum(e.get("runtime") or DEFAULT_EPISODE_RUNTIME for e in group),
+            })
+    return blocks
+
+
+def channel_blocks(channel):
+    """The channel's full rotation, dispatched by what kind of channel this
+    is. Sorted by content (never database row order) before the shuffle, so
+    the same library — and, for a channel rotating a person by the day, the
+    same day — always produces the same order."""
+    LIB.load()
+    ctype = channel.get("type", "genre")
+
+    if ctype in ("director", "actor"):
+        field = "director" if ctype == "director" else "lead_cast"
+        min_count = channel.get("min_count", 4)
+        solo = (ctype == "actor")
+
+        if channel.get("rotate") == "run":
+            # Every qualifying name, one after another, as a single loop.
+            # There is no "today's person" here — a name holds the channel
+            # for exactly as long as their films last, and the next one
+            # starts when the last of those ends. That falls out of the
+            # ordinary schedule walk rather than needing anything of its
+            # own: the person on now is whoever the current block belongs
+            # to. Thirteen actors come to about six days end to end.
+            people = people_with_films(field, min_count, solo)
+        else:
+            person, films = rotating_person_films(field, min_count, solo)
+            people = [(person, films)] if person else []
+
+        blocks = []
+        for person, films in people:
+            # Chronological, and deliberately NOT shuffled. These two
+            # channels are the only ones showing a body of work rather than
+            # a genre, and a body of work has an order: you can watch
+            # someone learn their craft, or hand a career to an actor and
+            # watch them change. In a random order that's just films by the
+            # same person.
+            #
+            # By release date rather than year, which is only precise to
+            # twelve months — two films a year apart in the credits can
+            # share one.
+            for m in sorted(films, key=_release_order):
+                if (m.get("runtime") or 0) < MIN_SCHEDULABLE_RUNTIME:
+                    continue
+                block = _movie_block(m)
+                # Whose run this film belongs to. Only these channels set
+                # it, and it's what the card's featured line reads when the
+                # rotation is by run rather than by day.
+                block["person"] = person
+                blocks.append(block)
+        return blocks
+
+    if ctype == "cult":
+        blocks = [_movie_block(m) for m in LIB.movies
+                 if (m.get("rating") or 0) >= CULT_MIN_RATING
+                 and 0 < (m.get("votes") or 0) < CULT_MAX_VOTES
+                 and (m.get("runtime") or 0) >= MIN_SCHEDULABLE_RUNTIME]
+        blocks.sort(key=lambda b: b["id"])
+        channel_rng(channel).shuffle(blocks)
+        return blocks
+
+    if ctype == "rated":
+        # The mirror of Cult Classic: the same TMDB score read the other way
+        # round, wanting the crowd rather than distrusting it.
+        min_rating = channel.get("min_rating", 8.0)
+        min_votes = channel.get("min_votes", 0)
+        blocks = [_movie_block(m) for m in LIB.movies
+                  if (m.get("rating") or 0) >= min_rating
+                  and (m.get("votes") or 0) >= min_votes
+                  and (m.get("runtime") or 0) >= MIN_SCHEDULABLE_RUNTIME]
+        blocks.sort(key=lambda b: b["id"])
+        channel_rng(channel).shuffle(blocks)
+        return blocks
+
+    if ctype == "keyword":
+        ensure_cast_lists()          # keyword_list rides along with the cast
+        wanted = (channel.get("keyword") or "").lower()
+        blocks = [_movie_block(m) for m in LIB.movies
+                  if any(k.lower() == wanted for k in (m.get("keyword_list") or []))
+                  and (m.get("runtime") or 0) >= MIN_SCHEDULABLE_RUNTIME]
+        blocks.sort(key=lambda b: b["id"])
+        channel_rng(channel).shuffle(blocks)
+        return blocks
+
+    if ctype in ("favourites", "watchlist"):
+        # No genre, no rating, no cleverness — the things you marked yourself.
+        flag = "favourited" if ctype == "favourites" else "watchlisted"
+        blocks = [_movie_block(m) for m in LIB.movies
+                  if m.get(flag)
+                  and (m.get("runtime") or 0) >= MIN_SCHEDULABLE_RUNTIME]
+        blocks.extend(_episode_group_blocks(
+            [s for s in LIB.shows if s.get(flag)],
+            channel.get("episode_block_size", 1)))
+        blocks.sort(key=lambda b: (b["kind"], b.get("id") or b["showid"], b["sub"]))
+        channel_rng(channel).shuffle(blocks)
+        return blocks
+
+    if ctype == "binge":
+        # TV only, on purpose — a binge is about episodes, and only shows
+        # you've actually rated well, not TMDB's opinion of them.
+        min_rating = channel.get("min_rating", 7.0)
+        block_size = channel.get("episode_block_size", 3)
+        qualifying = [s for s in LIB.shows if (s.get("userrating") or 0) >= min_rating]
+        blocks = _episode_group_blocks(qualifying, block_size)
+        blocks.sort(key=lambda b: (b.get("id") or b["showid"], b["sub"]))
+        channel_rng(channel).shuffle(blocks)
+        return blocks
+
+    # The default: a straight genre match (optionally narrowed by country or
+    # language) across both films and shows.
+    genres = set(channel.get("genres") or [])
+    required = set(channel.get("require_genres") or [])
+    excluded = set(channel.get("exclude_genres") or [])
+    countries = set(channel.get("countries") or [])
+    excluded_countries = set(channel.get("exclude_countries") or [])
+    languages = set(channel.get("languages") or [])
+    excluded_langs = set(channel.get("exclude_languages") or [])
+    block_size = channel.get("episode_block_size", 1)
+    # A channel may also name programmes outright. Used where the genre data
+    # can't carry the idea on its own — see All Day Daytime.
+    named = {_daytime_key(t) for t in (channel.get("titles") or [])}
+
+    def matches(g, c=None, title=None):
+        # Named by hand beats everything else, exclusions included: putting a
+        # programme on the list IS the decision about it.
+        if named and _daytime_key(title) in named:
+            return True
+        # Some ideas no genre can carry. "Saturday morning" is one: Pokémon
+        # and Attack on Titan are tagged identically, and only one of them
+        # belongs. Where a channel says named_only, the list IS the channel
+        # and nothing arrives by genre at all.
+        if channel.get("named_only"):
+            return False
+        owned = set(g or [])
+        if excluded and owned & excluded:
+            return False
+        if countries and not (set(c or []) & countries):
+            return False
+        if excluded_countries and (set(c or []) & excluded_countries):
+            return False
+        # `genres` is an OR — any one of them will do, which is what nearly
+        # every channel here wants. `require_genres` is the AND, for the one
+        # that doesn't: Cartoon Swim means animated AND funny, and either
+        # half on its own is a different channel entirely.
+        if required and not (owned >= required):
+            return False
+        return not genres or bool(owned & genres)
+
+    def language_ok(lang):
+        if languages and lang not in languages:
+            return False
+        if excluded_langs:
+            # A film we have no language for stays out rather than being
+            # guessed in: unknown is not the same thing as foreign.
+            if not lang or lang in excluded_langs:
+                return False
+        return True
+
+    blocks = []
+    if not channel.get("tv_only"):
+        for m in LIB.movies:
+            runtime = m.get("runtime") or 0
+            if runtime < MIN_SCHEDULABLE_RUNTIME:
+                continue
+            if not matches(m.get("genre"), m.get("country"), m.get("title")):
+                continue
+            if not language_ok(m.get("language")):
+                continue
+            blocks.append(_movie_block(m))
+
+    if not channel.get("film_only"):
+        # Shows carry no language of their own, so a language-filtered
+        # channel is films only by construction rather than by omission.
+        matching_shows = [s for s in LIB.shows
+                          if matches(s.get("genre"), s.get("country"), s.get("title"))
+                          and not (languages or excluded_langs)]
+        blocks.extend(_episode_group_blocks(matching_shows, block_size))
+
+    blocks.sort(key=lambda b: (b["kind"], b.get("id") or b["showid"], b["sub"]))
+    channel_rng(channel).shuffle(blocks)
+    return blocks
+
+
+def channel_epoch(channel):
+    """Where this channel's loop is measured from.
+
+    Nearly all of them run from a fixed point in 2024, so what's on is the
+    same answer however long the app has been shut and whoever is asking.
+
+    A channel rotating a person by the DAY can't: its line-up is rebuilt at
+    midnight when the next name comes round, and measuring a brand new list
+    against 2024 drops you at an arbitrary point in it — the fourth film of
+    nine, most days. Showing a career in order and starting a third of the
+    way through is barely showing it in order at all, so it runs from the
+    same midnight that chose the person. First thing in the morning is their
+    first film, and it works forward from there.
+
+    Rotating by the RUN needs none of that, which is half the reason it's
+    the better idea. The list holds every qualifying name at once and only
+    changes when the library does, so it can be measured from 2024 like
+    everything else and the exception disappears.
+
+    A shuffle moves it too, and has to. What SHUFFLE ALL promises is that
+    some channels are at the start of something *now*, and "now" is a moment
+    rather than a constant — so the instant you pressed it is what the loop
+    is measured from afterwards, and channel_phase says where each channel
+    stood at that instant.
+    """
+    if channel.get("type") in ("director", "actor") \
+            and channel.get("rotate") != "run":
+        return time.mktime(date.today().timetuple())
+    if channel_salt():
+        return CONFIG.get("channel_shuffled_at") or CHANNEL_EPOCH
+    return CHANNEL_EPOCH
+
+
+def _block_identity(block):
+    """What counts as "that's already on somewhere else".
+
+    The show, not the episode. Reported as three channels showing South Park
+    at once, which is precisely what an episode-level identity permits: Binge,
+    Comedy and Cartoon Swim were on three different episodes and no two of
+    them ever collided. Nobody scanning the page cares that the episodes
+    differ — it reads as the same programme three times over, and the whole
+    point of twenty-one channels is twenty-one things to choose between."""
+    return ("movie", block["id"]) if block["kind"] == "movie" \
+        else ("show", block["showid"])
+
+
+def _next_unlike(blocks, index):
+    """The next block after index that isn't the same film or show — so
+    "up next" never just names what's already on now, which a shuffle can
+    easily land back-to-back by chance."""
+    title = blocks[index]["title"]
+    for step in range(1, len(blocks) + 1):
+        cand = blocks[(index + step) % len(blocks)]
+        if cand["title"] != title:
+            return cand
+    return blocks[(index + 1) % len(blocks)]   # everything in the pool shares a title
+
+
+def channel_now(channel, avoid=None):
+    """The block that's 'on' at this instant, how far into it, and what's
+    up after — as if this channel had been looping since its epoch.
+
+    One state only: something is on. Blocks run nose to tail, so the answer
+    is always a programme and how far into it you'd be.
+
+    avoid: identities already claimed by other channels this instant. If
+    the natural block collides, this walks forward to the next one that
+    doesn't — starting that one from its beginning, since the schedule math
+    only really applies to the block it was computed for."""
+    blocks = channel_blocks(channel)
+    if not blocks:
+        return None
+    # Where each block begins in the loop. channel_phase needs these to be
+    # able to drop a channel at the opening of a programme rather than
+    # somewhere arbitrary.
+    starts, running = [], 0
+    for b in blocks:
+        starts.append(running)
+        running += b["duration"]
+    total = running
+    if total <= 0:
+        return None
+    elapsed = (time.time() - channel_epoch(channel)
+               + channel_phase(channel, starts, total)) % total
+    start_index, offset = 0, elapsed
+    for i, block in enumerate(blocks):
+        if offset < block["duration"]:
+            start_index = i
+            break
+        offset -= block["duration"]
+    else:
+        return None
+
+    for step in range(len(blocks)):
+        i = (start_index + step) % len(blocks)
+        block = blocks[i]
+        if avoid and _block_identity(block) in avoid:
+            continue
+        first = i == start_index
+        return {"block": block, "offset": offset if first else 0,
+                "next": _next_unlike(blocks, i)}
+    return None   # every block in this channel's tiny pool is already claimed
+
+
+def resolve_all_channels_now():
+    """What each non-live channel is 'on' right now, resolved together so no
+    two channels ever land on the same film or the same show at once (see
+    _block_identity — the same show on two channels reads as a repeat even
+    when the episodes differ). Channels claim in list order — used by both
+    the listing and the tune route, so what you tune into always matches
+    what you saw."""
+    showing = set()
+    results = {}
+    for ch in CHANNELS:
+        if ch.get("type") == "live":
+            continue
+        now = channel_now(ch, avoid=showing)
+        results[ch["id"]] = now
+        if now:
+            showing.add(_block_identity(now["block"]))
+    return results
+
+
+def channel_play_target(block, offset):
+    """Which actual file to hand mpv, and how far into that one file —
+    resolving a two-episode block down to the specific episode and second."""
+    if block["kind"] == "movie":
+        return "movie", block["id"], offset
+    remaining = offset
+    conn = db()
+    try:
+        for index, ep_id in enumerate(block["episode_ids"]):
+            row = conn.execute("SELECT runtime FROM episodes WHERE id=?",
+                               (ep_id,)).fetchone()
+            duration = (row["runtime"] or DEFAULT_EPISODE_RUNTIME) if row else DEFAULT_EPISODE_RUNTIME
+            last = index == len(block["episode_ids"]) - 1
+            if remaining < duration or last:
+                return "episode", ep_id, remaining
+            remaining -= duration
+    finally:
+        conn.close()
+    return None, None, 0
+
+
+def _block_details(block):
+    """Director/creator, cast and rating for whatever's in this block — the
+    extra context the Channels page shows on hover."""
+    ensure_cast_lists()
+    if block["kind"] == "movie":
+        m = next((x for x in LIB.movies if x.get("movieid") == block["id"]), None)
+        if not m:
+            return {}
+        return {
+            "directors": m.get("director") or [],
+            "cast": (m.get("cast_list") or [])[:5],
+            "rating": round(m.get("rating") or 0, 1),
+            "userrating": m.get("userrating") or 0,
+        }
+    s = next((x for x in LIB.shows if x.get("tvshowid") == block.get("showid")), None)
+    if not s:
+        return {}
+    return {
+        "directors": s.get("creators") or [],
+        "cast": (s.get("cast_list") or [])[:5],
+        "rating": round(s.get("rating") or 0, 1),
+        "userrating": s.get("userrating") or 0,
+    }
+
+
+def _next_in_block(block, item_id):
+    """The episode after this one inside the same block, if there is one.
+
+    A Binge block is three episodes of the same show, and the block is the
+    whole point of it — reaching the end of the first means the second, not
+    a jump to something else."""
+    if not block or block.get("kind") != "episodes":
+        return None
+    ids = block.get("episode_ids") or []
+    if item_id in ids:
+        position = ids.index(item_id)
+        if position + 1 < len(ids):
+            return ids[position + 1]
+    return None
+
+
+def _channel_pick(channel, after=None):
+    """What this channel should put on now: kind, id, and seconds in.
+
+    after: the (kind, id) that just finished here, when this is an automatic
+    advance. Two things go wrong without it.
+
+    A file whose real length is shorter than the runtime stored for it ends
+    while the schedule still believes its slot is running — and simply asking
+    the schedule again would start the very same programme over, forever.
+    That isn't hypothetical: an episode with no runtime on TMDB is scheduled
+    at a flat guess, and any episode shorter than that guess would loop.
+
+    And an episode block runs several episodes deep, so the end of one means
+    the next one along rather than a different show entirely.
+    """
+    resolved = resolve_all_channels_now()
+    now = resolved.get(channel["id"])
+    if not now:
+        return None
+
+    if after:
+        kind, item_id = after
+        if kind == "episode":
+            follow = _next_in_block(now["block"], item_id)
+            if follow:
+                return "episode", follow, 0
+        target = channel_play_target(now["block"], now["offset"])
+        if (target[0], target[1]) == (kind, item_id):
+            # Still inside the programme that just ended. Step past its
+            # whole block, keeping clear of what other channels are on.
+            claimed = set(_block_identity(r["block"]) for cid, r in resolved.items()
+                          if r and cid != channel["id"])
+            claimed.add(_block_identity(now["block"]))
+            now = channel_now(channel, avoid=claimed)
+            if not now:
+                return None
+            target = channel_play_target(now["block"], now["offset"])
+        # Whatever comes next starts at its beginning. The schedule's own
+        # offset is the right answer when you TUNE IN — you're joining
+        # something already under way — but not here. A file that runs longer
+        # than the runtime stored for it pushes the schedule clock deeper into
+        # the following block while it plays, so honouring that offset drops
+        # you into the middle of the next programme the moment the last one
+        # ends. Nothing has been missed, so nothing should be skipped.
+        return target[0], target[1], 0
+    return channel_play_target(now["block"], now["offset"])
+
+
+_TUNE_LOCK = threading.Lock()
+
+
+class ChannelBusy(AppError):
+    """A tune-in arrived while another was still going."""
+
+
+def tune_channel(channel, follow_on=False, after=None):
+    """Put on whatever this channel is showing at this moment.
+
+    Shared by the tune button and by the automatic advance when a programme
+    ends, so what follows on is exactly what you'd have got by tuning in by
+    hand — same schedule, same collision handling, same seek.
+
+    One at a time. Changing channel is half a dozen separate exchanges with
+    mpv — save the position, set idle, load the file — and two of those
+    interleaved put the player in a state neither asked for, with the app's
+    idea of what's on describing whichever finished writing it down last.
+    Pressing CH twice quickly is exactly how you'd find that out, so the
+    second press is turned away rather than run over the top of the first.
+    """
+    if not _TUNE_LOCK.acquire(timeout=0.25):
+        raise ChannelBusy("Still changing channel — give it a moment.")
+    # Changing channel is the one thing reported as taking the app down, and
+    # it is the heaviest thing it does: several exchanges with mpv, possibly
+    # closing a player and starting another. If it hasn't finished in six
+    # seconds something is stuck, and this is what says where.
+    watchdog = watch_stacks("tuning %s" % channel.get("id"))
+    try:
+        return _tune_channel(channel, follow_on, after)
+    finally:
+        stop_watching(watchdog)
+        _TUNE_LOCK.release()
+
+
+def _tune_channel(channel, follow_on=False, after=None):
+    if channel.get("type") == "live":
+        proc = mpv_play_url(channel["url"])
+        log_event("channel", 0, channel["name"], "tuned in (live)")
+        note_live_playing(proc, channel["name"], channel["name"])
+        return True
+
+    pick = _channel_pick(channel, after)
+    if not pick or not pick[0]:
+        raise AppError(
+            "Nothing matches %s yet — nothing in your library has both the "
+            "right genre and a known runtime." % channel["name"])
+    kind, item_id, seek = pick
+    path = require_media_file(LOCAL.path_for(kind, item_id))
+    # keep_open: a channel holds its window between programmes. That's the
+    # whole difference between a channel and a single click.
+    proc = mpv_play(path, start=seek, keep_open=True)
+    title = LOCAL.field(kind, item_id, "title")
+    LOCAL.set_field(kind, item_id, "last_played", now_stamp())
+    log_event(kind, item_id, title,
+              ("next up on " if follow_on else "tuned in via ") + channel["name"])
+    note_now_playing(proc, kind, item_id, title, channel=channel["name"],
+                     channel_id=channel["id"])
+    return True
+
+
+def advance_channel(channel_id, after=None):
+    """The programme ended and the window is still open — put the next one on."""
+    channel = next((c for c in CHANNELS if c["id"] == channel_id), None)
+    if not channel:
+        return
+    try:
+        tune_channel(channel, follow_on=True, after=after)
+    except ChannelBusy:
+        # You changed channel at the same moment this one ran out. Yours
+        # wins — walking away is right, and closing the window here would
+        # shut the programme you just chose.
+        return
+    except Exception:
+        # Nothing to follow with. Better an honest close than an empty
+        # window sitting there black forever.
+        mpv_command("quit")
+
+
+def channel_summary(now):
+    block, nxt = now["block"], now["next"]
+    summary = {
+        "title": block["title"], "sub": block["sub"], "art": block["art"],
+        "kind": block["kind"],
+        "elapsed": int(now["offset"]), "duration": block["duration"],
+        "next_title": nxt["title"], "next_sub": nxt["sub"],
+    }
+    summary.update(_block_details(block))
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Subtitles, from OpenSubtitles
+# ---------------------------------------------------------------------------
+# Searching is free; DOWNLOADING is rationed — five a day without an account,
+# twenty with a free one. That single fact shapes everything here. There is
+# no sweep through the library, no fetching ahead, no retrying on a whim:
+# one file, when you ask for it, and the app says plainly how many you have
+# left afterwards.
+
+OS_API = "https://api.opensubtitles.com/api/v1"
+# They reject a generic User-Agent outright, and ask that it name the
+# application and its version. This is that, not a browser impersonation.
+OS_AGENT = "NextUp v%s" % APP_VERSION
+OS_TOKEN = {"value": None, "at": 0}
+OS_TOKEN_LIFE = 20 * 3600       # good for about a day; renewed before that
+OS_HASH_CHUNK = 65536
+
+
+def opensubtitles_hash(path):
+    """OpenSubtitles' own file hash: the file's size plus the 64-bit sum of
+    its first and last 64KB, read as little-endian 8-byte integers.
+
+    Worth the trouble because it identifies the RELEASE rather than the
+    film. Subtitles found by title are made for some other cut, and run
+    steadily further out of step as the film goes on; ones found by hash
+    were made for the exact file you're holding, so they simply fit.
+    """
+    size = os.path.getsize(path)
+    if size < OS_HASH_CHUNK * 2:
+        return None                 # too small to hash the way they specify
+    total = size
+    fmt = "<%dQ" % (OS_HASH_CHUNK // 8)
+    with open(path, "rb") as handle:
+        head = struct.unpack(fmt, handle.read(OS_HASH_CHUNK))
+        handle.seek(-OS_HASH_CHUNK, os.SEEK_END)
+        tail = struct.unpack(fmt, handle.read(OS_HASH_CHUNK))
+    for number in head + tail:
+        total = (total + number) & 0xFFFFFFFFFFFFFFFF
+    return "%016x" % total
+
+
+def os_request(path, params=None, body=None, token=None):
+    """One call to OpenSubtitles, with their headers and their error codes
+    turned into something worth reading."""
+    key = (CONFIG.get("os_api_key") or "").strip()
+    if not key:
+        raise AppError(
+            "No OpenSubtitles API key yet. Register a free one at "
+            "opensubtitles.com and put it on the Settings tab.")
+    url = OS_API + path
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    payload = json.dumps(body).encode("utf-8") if body is not None else None
+    request = urllib.request.Request(
+        url, data=payload, method="POST" if payload is not None else "GET")
+    request.add_header("Api-Key", key)
+    request.add_header("User-Agent", OS_AGENT)
+    request.add_header("Accept", "application/json")
+    if payload is not None:
+        request.add_header("Content-Type", "application/json")
+    if token:
+        request.add_header("Authorization", "Bearer " + token)
+    try:
+        with urllib.request.urlopen(request, timeout=25) as response:
+            return json.loads(response.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        raise AppError(_os_http_message(exc))
+    except urllib.error.URLError as exc:
+        raise AppError("Couldn't reach OpenSubtitles: %s" % exc.reason)
+
+
+def _os_http_message(exc):
+    detail = ""
+    try:
+        body = json.loads(exc.read().decode("utf-8", "replace"))
+        detail = body.get("message") or body.get("error") or ""
+    except Exception:
+        pass
+    if exc.code == 401:
+        return detail or "OpenSubtitles rejected the key or the login."
+    if exc.code == 403:
+        return detail or "OpenSubtitles refused that request."
+    if exc.code == 406:
+        # Their code for "you've spent today's downloads".
+        return detail or ("That's today's download allowance used up. It "
+                          "resets 24 hours after the first one.")
+    if exc.code == 429:
+        return detail or "Too many requests at once — give it a minute."
+    return "OpenSubtitles returned %s%s" % (exc.code, ". " + detail if detail else "")
+
+
+def os_token():
+    """A login token, kept until it's near enough to expiry to renew."""
+    now = time.time()
+    if OS_TOKEN["value"] and now - OS_TOKEN["at"] < OS_TOKEN_LIFE:
+        return OS_TOKEN["value"]
+    user = (CONFIG.get("os_username") or "").strip()
+    password = CONFIG.get("os_password") or ""
+    if not user or not password:
+        raise AppError(
+            "Fetching a subtitle needs your OpenSubtitles username and "
+            "password on the Settings tab. Searching doesn't, but the "
+            "download itself is what counts against an account.")
+    reply = os_request("/login", body={"username": user, "password": password})
+    token = (reply or {}).get("token")
+    if not token:
+        raise AppError("OpenSubtitles wouldn't accept that username and password.")
+    OS_TOKEN.update(value=token, at=now)
+    return token
+
+
+def _os_ids(kind, item_id):
+    """The TMDB ids OpenSubtitles can search on. A film has its own; an
+    episode is found by its show's id plus where it sits."""
+    conn = db()
+    try:
+        if kind == "movie":
+            row = conn.execute("SELECT tmdb_id FROM movies WHERE id=?",
+                               (item_id,)).fetchone()
+            if row and row["tmdb_id"]:
+                return {"tmdb_id": row["tmdb_id"]}
+            return {}
+        row = conn.execute(
+            "SELECT e.season, e.episode, s.tmdb_id FROM episodes e"
+            " JOIN shows s ON s.id = e.show_id WHERE e.id=?",
+            (item_id,)).fetchone()
+        if not row or not row["tmdb_id"]:
+            return {}
+        return {"parent_tmdb_id": row["tmdb_id"],
+                "season_number": row["season"],
+                "episode_number": row["episode"]}
+    finally:
+        conn.close()
+
+
+def os_search(kind, item_id, path, language):
+    """Candidates for this file, hash first.
+
+    Two searches rather than one: a hash search is exact but comes back
+    empty for anything nobody has subtitled at this release, and a wider
+    search on the TMDB id nearly always finds something. Asking for both
+    and preferring the exact one costs nothing — searching is unmetered.
+    """
+    digest = None
+    try:
+        digest = opensubtitles_hash(path)
+    except OSError:
+        pass                        # unreadable is not fatal; fall back below
+
+    found = []
+    if digest:
+        reply = os_request("/subtitles", {"moviehash": digest,
+                                          "languages": language})
+        found = _os_candidates(reply, digest)
+
+    if not found:
+        params = dict(_os_ids(kind, item_id))
+        params["languages"] = language
+        if len(params) > 1:
+            found = _os_candidates(os_request("/subtitles", params), digest)
+
+    # Exact match to this file first, then whatever most people chose.
+    found.sort(key=lambda c: (not c["exact"], -c["downloads"]))
+    return found
+
+
+def _os_candidates(reply, digest):
+    out = []
+    for item in (reply or {}).get("data") or []:
+        attrs = item.get("attributes") or {}
+        files = attrs.get("files") or []
+        if not files or not files[0].get("file_id"):
+            continue
+        out.append({
+            "file_id": files[0]["file_id"],
+            "name": attrs.get("release") or files[0].get("file_name") or "",
+            "language": (attrs.get("language") or "").lower(),
+            "downloads": attrs.get("download_count") or 0,
+            "hearing_impaired": bool(attrs.get("hearing_impaired")),
+            "exact": bool(attrs.get("moviehash_match")) and bool(digest),
+        })
+    return out
+
+
+def os_fetch_file(file_id):
+    """Spend one download. Returns the subtitle text and what's left."""
+    reply = os_request("/download", body={"file_id": file_id}, token=os_token())
+    link = (reply or {}).get("link")
+    if not link:
+        raise AppError((reply or {}).get("message")
+                       or "OpenSubtitles gave no download link back.")
+    request = urllib.request.Request(link)
+    request.add_header("User-Agent", OS_AGENT)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            raw = response.read()
+    except Exception as exc:
+        raise AppError("The download link failed: %s" % exc)
+    if raw[:2] == b"\x1f\x8b":      # served gzipped often enough to matter
+        import gzip
+        raw = gzip.decompress(raw)
+    return _os_decode(raw), reply
+
+
+def _os_decode(raw):
+    """Subtitles arrive in whatever encoding they were made in — Windows
+    codepages are still common — and mpv wants UTF-8. Latin-1 is last
+    because it can decode ANY byte, so it never fails and never gets a
+    chance to be wrong about whether it should have been tried."""
+    for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("latin-1", "replace")
+
+
+def subtitle_sidecar(video_path, language):
+    """Where the file goes: beside the video, named after it with the
+    language before the extension. mpv's --sub-auto is 'exact' by default,
+    which picks up precisely this shape without being asked to."""
+    base = os.path.splitext(video_path)[0]
+    return "%s.%s.srt" % (base, (language or "en").lower())
+
+
+def fetch_subtitle_for_playing(language=None):
+    """Find, download and load a subtitle for whatever is on right now.
+
+    Three ways out, in order of what they cost you: a file already sitting
+    beside the video costs nothing and is simply loaded; otherwise one
+    download; and if the search comes back empty, nothing is spent at all.
+    """
+    playing = now_playing_snapshot()
+    if not playing or not playing.get("type"):
+        raise AppError("Nothing is playing.")
+    kind = playing.get("type")
+    if kind == "live":
+        raise AppError("A live stream has no subtitles to fetch.")
+    path = LOCAL.path_for(kind, playing.get("id"))
+    if not path or not media_file_check(path):
+        raise AppError("Can't find the file that's playing on disk.")
+
+    language = (language or CONFIG.get("sub_language") or "en").lower()
+    target = subtitle_sidecar(path, language)
+
+    # Already there from a previous fetch: load it rather than buy it twice.
+    if os.path.exists(target):
+        mpv_command("sub-add", target, "select")
+        return {"ok": True, "already": True, "file": os.path.basename(target),
+                "message": "Already had one — loaded it."}
+
+    found = os_search(kind, playing.get("id"), path, language)
+    if not found:
+        raise AppError("Nothing in %s for this one." % language.upper())
+
+    best = found[0]
+    text, receipt = os_fetch_file(best["file_id"])
+    try:
+        with open(target, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+    except OSError as exc:
+        raise AppError("Downloaded it but couldn't save it next to the "
+                       "film: %s" % exc)
+
+    # Straight into the running player, so it appears without restarting.
+    mpv_command("sub-add", target, "select")
+    remaining = receipt.get("remaining")
+    return {
+        "ok": True,
+        "file": os.path.basename(target),
+        "exact": best["exact"],
+        "remaining": remaining,
+        "message": ("Got %s%s.%s" % (
+            language.upper(),
+            " (exact match)" if best["exact"] else "",
+            " %s left today." % remaining if remaining is not None else "")),
+    }
+
+
+# ---------------------------------------------------------------------------
+# The remote
+# ---------------------------------------------------------------------------
+# Once something is on, mpv is the window you're looking at and this app is
+# behind it. Everything here is what you'd otherwise have to find the app
+# again to do — and it's all reachable already, because the control channel
+# that made channels work in the first place takes commands as readily as it
+# answers questions.
+
+REMOTE_PRESETS = 6
+REMOTE_TITLE = "Next Up Remote"      # also how its window is found again
+
+
+def remote_presets():
+    """The channels on the preset buttons. The first six until told otherwise:
+    a remote whose buttons do nothing until you've been to a settings screen
+    is a remote nobody presses twice."""
+    chosen = CONFIG.get("remote_presets")
+    known = set(c["id"] for c in CHANNELS)
+    if not isinstance(chosen, list):
+        return [c["id"] for c in CHANNELS[:REMOTE_PRESETS]]
+    return [c for c in chosen if c in known][:REMOTE_PRESETS]
+
+
+def remote_state():
+    """Everything the remote draws, in one round trip.
+
+    Volume, mute and pause are asked of mpv rather than remembered here: the
+    player has its own keyboard and you may well have used it, so what this
+    app last set is not the same thing as what's true.
+    """
+    playing = now_playing_snapshot()
+    alive = bool(mpv_alive())
+    state = {
+        "alive": alive,
+        "playing": playing,
+        "channels": [{"id": c["id"], "name": c["name"],
+                      "live": c.get("type") == "live"} for c in CHANNELS],
+        "presets": remote_presets(),
+        "max_presets": REMOTE_PRESETS,
+        "channel_id": (playing or {}).get("channel_id"),
+        "volume": None, "muted": False, "paused": False,
+        "sub_on": False, "sub_lang": None, "sub_count": 0,
+        "audio_on": False, "audio_lang": None, "audio_count": 0,
+        "audio_delay": 0,
+        # Only an episode has a run to step along; a film has nowhere to go.
+        "is_episode": (playing or {}).get("type") == "episode",
+        # SKIP works on a channel, or on anything with a queue behind it.
+        "queue_count": queue_count(),
+    }
+    if alive:
+        state["volume"] = int(round(mpv_get("volume", 0) or 0))
+        state["muted"] = bool(mpv_get("mute", False))
+        state["paused"] = bool(mpv_get("pause", False))
+        # One question about the tracks rather than four about the ids and
+        # their languages — and this one also says how many there ARE, which
+        # is what tells a button with nothing to do to stop offering.
+        tracks = mpv_track_list()
+        for kind, key in (("sub", "sub"), ("audio", "audio")):
+            of_kind = _tracks_of(tracks, kind)
+            chosen = _selected_track(of_kind)
+            state[key + "_count"] = len(of_kind)
+            state[key + "_on"] = chosen is not None
+            state[key + "_lang"] = _track_label(chosen)
+        # Reported in milliseconds: mpv keeps it in seconds, but the useful
+        # steps are all well under one, and "-150" reads better than "-0.15".
+        state["audio_delay"] = int(round((mpv_get("audio-delay", 0) or 0) * 1000))
+    return state
+
+
+def mpv_track_list():
+    tracks = mpv_get("track-list", None)
+    return tracks if isinstance(tracks, list) else []
+
+
+def _tracks_of(tracks, kind):
+    return [t for t in tracks if isinstance(t, dict) and t.get("type") == kind]
+
+
+def _selected_track(tracks):
+    return next((t for t in tracks if t.get("selected")), None)
+
+
+def _track_label(track):
+    """What to call a track — its language, or its own name when it hasn't
+    got one. Both are missing often enough to need the fallback."""
+    if not track:
+        return None
+    value = track.get("lang") or track.get("title")
+    if not value:
+        return None
+    value = str(value).strip()
+    # Language codes are the common case and read better shouted: "eng" is
+    # a field in a container, "ENG" is a label on a button.
+    return value.upper() if len(value) <= 3 else value
+
+
+def remote_cycle_track(kind):
+    """Step to the next audio or subtitle track. True if anything moved.
+
+    Driven off the track list rather than mpv's own `cycle sub` / `cycle
+    audio`, because that decides for itself what the ring contains and
+    always puts "off" in it. Subtitles want that — off is a real choice.
+    Audio doesn't: on a file with a single track mpv's own cycle takes one
+    press to mean silence, which is not what an audio button is for.
+    """
+    prop = "sid" if kind == "sub" else "aid"
+    of_kind = _tracks_of(mpv_track_list(), kind)
+    if not of_kind:
+        return False
+    ring = [t.get("id") for t in of_kind]
+    if kind == "sub":
+        ring.append(False)              # off, at the end of the round
+    elif len(ring) < 2:
+        return False                    # one track: nothing to change to
+    chosen = _selected_track(of_kind)
+    current = chosen.get("id") if chosen else False
+    index = ring.index(current) if current in ring else -1
+    nxt = ring[(index + 1) % len(ring)]
+    mpv_command("set_property", prop, "no" if nxt is False else nxt)
+    if kind == "sub" and nxt is not False:
+        # Selecting a track and still seeing nothing is the other way subs
+        # "don't work": visibility is a separate switch, and mpv's own v key
+        # may well have turned it off.
+        mpv_command("set_property", "sub-visibility", True)
+    return True
+
+
+def remote_step_channel(step):
+    """Up or down the dial from wherever you are, wrapping at both ends."""
+    playing = now_playing_snapshot() or {}
+    current = playing.get("channel_id")
+    index = next((i for i, c in enumerate(CHANNELS) if c["id"] == current), None)
+    if index is None:
+        # Not on a channel at all — a film picked by hand, a live stream, or
+        # nothing on. Land on the first channel going up and the last going
+        # down, rather than on whatever happens to sit beside index zero.
+        index = -1 if step > 0 else 0
+    channel = CHANNELS[(index + step) % len(CHANNELS)]
+    tune_channel(channel)
+    return channel
+
+
+# ===========================================================================
+# HTTP server
+# ===========================================================================
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        pass
+
+    # -- helpers ----------------------------------------------------------
+    def send_json(self, obj, status=200, filename=None, indent=None):
+        body = json.dumps(obj, indent=indent).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        if filename:
+            self.send_header("Content-Disposition",
+                             "attachment; filename=\"%s\"" % filename)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_html(self, text):
+        body = text.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        # The page carries all the app's javascript. If a browser caches it,
+        # you keep running old code after updating the file.
+        self.send_header("Cache-Control", "no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_file(self, path, content_type):
+        try:
+            with open(path, "rb") as fh:
+                body = fh.read()
+        except OSError:
+            return self.send_error(404)
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        # Static, and named with a hash-free path — a long cache is fine and
+        # saves re-sending a couple of megabytes on every reload.
+        self.send_header("Cache-Control", "public, max-age=604800")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def read_body(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        if not length:
+            return {}
+        try:
+            return json.loads(self.rfile.read(length).decode("utf-8"))
+        except Exception:
+            return {}
+
+    # -- routes -----------------------------------------------------------
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        route = parsed.path
+        query = urllib.parse.parse_qs(parsed.query)
+
+        def one(name, default=""):
+            return (query.get(name) or [default])[0]
+
+        try:
+            if route == "/":
+                return self.send_html(PAGE)
+
+            if route == "/favicon.ico" and os.path.exists(ICON_PATH):
+                # A real .ico, with the small sizes a tab actually renders.
+                # Serving the full-size artwork here means shipping a
+                # megabyte and a half to draw sixteen pixels.
+                return self.send_file(ICON_PATH, "image/x-icon")
+
+            if route in ("/logo.png", "/favicon.ico"):
+                return self.send_file(LOGO_PATH, "image/png")
+
+            if route.startswith("/art/"):
+                # The NAME THAT COMES BACK from art_filename is what gets
+                # joined, never the raw path from the request — that one may
+                # still have directories in it, and "../x.jpg" would walk
+                # straight out of the artwork folder.
+                name = art_filename("/" + route[5:])
+                if not name:
+                    return self.send_error(404)
+                return self.send_file(os.path.join(ART_DIR, name), "image/jpeg")
+
+            if route.startswith("/fonts/"):
+                # Same shape as /art/: the matched name is what gets joined,
+                # never the raw path, so "../" can't walk out of the folder.
+                name = route[7:]
+                if not _FONT_NAME_RE.match(name):
+                    return self.send_error(404)
+                kind = "text/css" if name.endswith(".css") else "font/woff2"
+                return self.send_file(os.path.join(FONTS_DIR, name), kind)
+
+            if route == "/remote":
+                return self.send_html(REMOTE_PAGE)
+
+            if route == "/api/remote/state":
+                return self.send_json(remote_state())
+
+            if route == "/api/status":
+                return self.send_json(self.status_payload())
+
+            if route == "/api/tonight":
+                exclude = [x for x in one("exclude", "").split(",") if x]
+                args = dict(
+                    kind=one("kind", "any"),
+                    mood=one("mood", "any"),
+                    max_mins=int(one("max", "0") or 0),
+                    genre=one("genre", ""),
+                )
+                # Two constraints, given up in the order that costs least.
+                # The cooldown goes first, by halves rather than all at once
+                # — see picks_with_cooldown. What you've skipped in this
+                # sitting is given up only after that, and only then is the
+                # screen allowed to come back empty.
+                skipped = set(exclude)
+                picks = picks_with_cooldown(skipped, args)
+                reset = False
+                if not picks and exclude:
+                    # You've turned down everything that fits. Start the
+                    # rejected pile over rather than showing an empty screen.
+                    picks = build_tonight(**args)
+                    reset = bool(picks)
+                if picks and one("peek", "") != "1":
+                    # Only the first is ever shown, so only the first counts
+                    # as having been offered. A peek is the page fetching
+                    # the NEXT pick ahead of time so its artwork is ready
+                    # before you press; it may never be shown, so it isn't
+                    # remembered here — the page reports it through
+                    # /api/offered if and when it goes on screen.
+                    remember_offer("%s:%s" % (picks[0]["type"], picks[0]["id"]))
+                return self.send_json({
+                    "picks": picks,
+                    "reset": reset,
+                    "continue": build_continue(),
+                })
+
+            if route == "/api/library/snapshot":
+                return self.send_json(build_library_snapshot(),
+                                      filename="nextup-library-snapshot.json",
+                                      indent=2)
+
+            if route == "/api/duplicates":
+                groups = duplicate_groups()
+                return self.send_json({
+                    "groups": groups,
+                    "total": len(groups),
+                    "can_delete": any(g["any_writable"] for g in groups),
+                })
+
+            if route == "/api/profiles":
+                return self.send_json(profiles_state())
+
+            if route == "/api/library/snapshot/status":
+                return self.send_json(snapshot_state())
+
+            if route == "/api/sync/status":
+                return self.send_json(sync_state())
+
+            if route == "/api/export":
+                return self.send_json(build_export(), filename="nextup-export.json",
+                                      indent=2)
+
+            if route == "/api/playing":
+                # The queue rides along: the bar says what's next, and the
+                # page notices the queue shrinking when something hands over
+                # without having to poll a second endpoint.
+                q = queue_state()
+                return self.send_json({
+                    "playing": now_playing_snapshot(),
+                    "ask": afk_state(),
+                    "queue": {"count": q["count"],
+                              "next": q["items"][0] if q["items"] else None}})
+
+            if route == "/api/queue":
+                return self.send_json(queue_state())
+
+            if route == "/api/resume":
+                # All of it, not the newest four: the Library shows the
+                # latest FILM on Films and the latest SHOW on TV shows, and
+                # four films in a row would leave the TV tab with nothing.
+                return self.send_json({"items": build_resume_row(limit=None)})
+
+            if route == "/api/history":
+                days = int(one("days", "90") or 90)
+                return self.send_json(build_history(days=max(1, min(days, 3650))))
+
+            if route == "/api/channels":
+                resolved = resolve_all_channels_now()
+                out = []
+                for ch in CHANNELS:
+                    if ch.get("type") == "live":
+                        out.append({"id": ch["id"], "name": ch["name"], "live": True})
+                        continue
+                    now = resolved.get(ch["id"])
+                    entry = {
+                        "id": ch["id"], "name": ch["name"],
+                        "now": channel_summary(now) if now else None,
+                    }
+                    featured = channel_featured_person(ch, now)
+                    if featured:
+                        entry["featured"] = featured
+                        # Which clock it rotates on, so the card can say
+                        # "today" or "this run" and mean it.
+                        entry["featured_when"] = ch.get("rotate", "day")
+                    out.append(entry)
+                return self.send_json({"channels": out})
+
+            if route == "/api/mpv/test":
+                try:
+                    exe = find_mpv()
+                except AppError as exc:
+                    return self.send_json({"ok": False, "message": str(exc)})
+                import subprocess
+                try:
+                    out = subprocess.run([exe, "--version"], capture_output=True,
+                                         timeout=15, text=True)
+                    first = (out.stdout or out.stderr or "").splitlines()
+                    version = first[0] if first else "(no version output)"
+                except Exception as exc:
+                    return self.send_json({"ok": False, "message":
+                                           "Found mpv at %s but running it failed: %s"
+                                           % (exe, exc)})
+                return self.send_json({"ok": True, "path": exe,
+                                       "message": "%s — %s" % (version, exe)})
+
+            if route == "/api/data":
+                conn = db()
+
+                def count(sql):
+                    return conn.execute(sql).fetchone()[0]
+
+                recent = [dict(r) for r in conn.execute(
+                    "SELECT at,title,event,value FROM history"
+                    " ORDER BY id DESC LIMIT 12")]
+                payload = {
+                    "db_path": DB_PATH,
+                    "db_size": os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0,
+                    "tables": [
+                        {"name": "Films", "rows": count("SELECT COUNT(*) FROM movies"),
+                         "detail": "title, year, genres, director, plot, poster, runtime, series"},
+                        {"name": "TV shows", "rows": count("SELECT COUNT(*) FROM shows"),
+                         "detail": "title, year, genres, plot, poster"},
+                        {"name": "Episodes", "rows": count("SELECT COUNT(*) FROM episodes"),
+                         "detail": "season and episode numbers"},
+                        {"name": "Your ratings", "rows":
+                            count("SELECT COUNT(*) FROM movies WHERE userrating>0") +
+                            count("SELECT COUNT(*) FROM shows WHERE userrating>0") +
+                            count("SELECT COUNT(*) FROM episodes WHERE userrating>0"),
+                         "detail": "score out of 10 and the date you gave it"},
+                        {"name": "Played here", "rows":
+                            count("SELECT COUNT(*) FROM movies WHERE playcount>0") +
+                            count("SELECT COUNT(*) FROM episodes WHERE playcount>0"),
+                         "detail": "things this app watched you play to the end"},
+                        {"name": "Part way through", "rows":
+                            count("SELECT COUNT(*) FROM movies WHERE resume_pos>0") +
+                            count("SELECT COUNT(*) FROM episodes WHERE resume_pos>0"),
+                         "detail": "how far into each one you got"},
+                        {"name": "History", "rows": count("SELECT COUNT(*) FROM history"),
+                         "detail": "every play and every rating, with a date"},
+                        {"name": "Hidden suggestions", "rows":
+                            count("SELECT COUNT(*) FROM dismissed"),
+                         "detail": "things you've told it to stop suggesting"},
+                        {"name": "Unreadable files", "rows":
+                            count("SELECT COUNT(*) FROM unmatched"),
+                         "detail": "files it couldn't read as a film or an episode"},
+                    ],
+                    "recent": recent,
+                    "files": [],
+                }
+                conn.close()
+                for label, path in (("Settings", CONFIG_PATH),
+                                    ("TMDB cache", CACHE_PATH),
+                                    ("Artwork", ART_DIR),
+                                    ("Resume points", WATCH_LATER)):
+                    size = 0
+                    if os.path.isdir(path):
+                        size = sum(os.path.getsize(os.path.join(path, f))
+                                   for f in os.listdir(path))
+                    elif os.path.exists(path):
+                        size = os.path.getsize(path)
+                    payload["files"].append(
+                        {"label": label, "path": path, "size": size,
+                         "exists": os.path.exists(path)})
+                return self.send_json(payload)
+
+            if route == "/api/sorter/status":
+                return self.send_json(sorter_state())
+
+            if route == "/api/library/status":
+                payload = dict(LIBSCAN)
+                conn = db()
+                payload["counts"] = {
+                    "movies": conn.execute("SELECT COUNT(*) c FROM movies").fetchone()["c"],
+                    "shows": conn.execute("SELECT COUNT(*) c FROM shows").fetchone()["c"],
+                    "episodes": conn.execute("SELECT COUNT(*) c FROM episodes").fetchone()["c"],
+                    "unmatched": conn.execute("SELECT COUNT(*) c FROM unmatched").fetchone()["c"],
+                    "unidentified": conn.execute("SELECT COUNT(*) c FROM movies WHERE matched<1").fetchone()["c"],
+                    "noposter": conn.execute("SELECT COUNT(*) c FROM movies WHERE poster IS NULL").fetchone()["c"],
+                }
+                conn.close()
+                return self.send_json(payload)
+
+            if route == "/api/browse":
+                return self.send_json(browse_library(
+                    kind=one("kind", "film"), query=one("q", ""),
+                    sort=one("sort", "title"), shelf=one("shelf", "all"),
+                    limit=min(400, int(one("limit", "120") or 120)),
+                    offset=int(one("offset", "0") or 0)))
+
+            if route == "/api/show":
+                return self.send_json(show_detail(one("id", "0")))
+
+            if route == "/api/movie":
+                return self.send_json(movie_detail_payload(one("id", "0")))
+
+            if route == "/api/brief":
+                # Who made a film you DON'T own. Fetched one at a time as you
+                # hover rather than for all forty-five at once: each is a TMDB
+                # call the first time and free every time after.
+                tid = one("id", "")
+                if one("kind", "") == "tv":
+                    # A show: who created it rather than who directed it,
+                    # and how long its run is rather than how long it is.
+                    detail = (tmdb("/tv/%s" % tid, {"append_to_response": "credits"})
+                              if tid else {}) or {}
+                    credits = detail.get("credits") or {}
+                    seasons = detail.get("number_of_seasons") or 0
+                    episodes = detail.get("number_of_episodes") or 0
+                    run = ("%d season%s · %d episodes" % (seasons, "" if seasons == 1 else "s", episodes)
+                           if seasons else "")
+                    return self.send_json({
+                        "directors": [c.get("name") for c in detail.get("created_by") or []][:2],
+                        "cast": [c.get("name") for c in (credits.get("cast") or [])[:4]
+                                 if c.get("name")],
+                        "runtime": 0, "run": run,
+                        "status": detail.get("status") or "",
+                        "tagline": (detail.get("tagline") or "")[:120],
+                    })
+                detail = (movie_detail(tid) if tid else {}) or {}
+                credits = detail.get("credits") or {}
+                return self.send_json({
+                    "directors": [c.get("name") for c in credits.get("crew") or []
+                                  if c.get("job") == "Director"][:2],
+                    "cast": [c.get("name") for c in (credits.get("cast") or [])[:4]
+                             if c.get("name")],
+                    "runtime": detail.get("runtime") or 0,
+                    "tagline": (detail.get("tagline") or "")[:120],
+                })
+
+            if route == "/api/person":
+                return self.send_json(person_profile(one("id", ""), one("name", "")))
+
+            if route == "/api/why":
+                return self.send_json({
+                    "cards": build_reasons(one("type", "movie"), one("id", "0"))})
+
+            if route == "/api/watch-scores":
+                # Not linked from the page — the score is hidden for now.
+                # This is here so it can be looked at while it's being used.
+                return self.send_json({"items": watch_score_table()})
+
+            if route == "/api/scan/status":
+                payload = dict(SCAN)
+                # Re-checked on the way out, never written back: the saved
+                # scan stays exactly what TMDB said. See fresh_gaps.
+                if isinstance(SCAN.get("result"), dict):
+                    payload["result"] = dict(SCAN["result"],
+                                             gaps=fresh_gaps(SCAN["result"].get("gaps")))
+                payload["age_days"] = (
+                    (time.time() - SCAN["finished_at"]) / 86400.0
+                    if SCAN.get("finished_at") else None)
+                return self.send_json(payload)
+
+            if route == "/api/dock/drives":
+                return self.send_json({
+                    "drives": list_dock_drives(),
+                    "supported": os.name == "nt" or sys.platform == "darwin"})
+
+            if route == "/api/drive/catalogue":
+                dest = dock_root(one("dest"))
+                if not dest or not os.path.isdir(dest):
+                    raise AppError("That drive isn't there any more — plug it "
+                                   "back in and press Reread.")
+                if media_file_check(dest) is None:
+                    raise AppError("That drive isn't answering. Give it a moment "
+                                   "to spin up and press Reread.")
+                if one("fresh") == "1":
+                    dock_index_forget(dest)
+                return self.send_json(drive_catalogue(dest))
+
+            if route == "/api/dock/status":
+                return self.send_json(DOCK)
+
+            self.send_error(404)
+        except AppError as exc:
+            self.send_json({"error": str(exc)}, 200)
+        except Exception as exc:
+            traceback.print_exc()
+            log_problem("request %s" % self.path)
+            self.send_json({"error": "%s: %s" % (type(exc).__name__, exc)}, 200)
+
+    def do_POST(self):
+        route = urllib.parse.urlparse(self.path).path
+        # Every POST is somebody doing something — nothing in the app polls
+        # with one, only with GETs. That makes this the one honest place to
+        # notice you're there, and it covers the remote's buttons too.
+        seen_you()
+        data = self.read_body()
+        try:
+            if route == "/api/scan":
+                if SCAN["running"]:
+                    return self.send_json({"ok": True, "already": True})
+                SCAN["result"] = None
+                thread = threading.Thread(
+                    target=scan_worker,
+                    args=(bool(data.get("hide_obvious")),), daemon=True)
+                thread.start()
+                return self.send_json({"ok": True})
+
+            if route == "/api/play":
+                path = require_media_file(
+                    LOCAL.path_for(data.get("type"), int(data["id"])))
+                kind = data.get("type")
+                item_id = int(data["id"])
+                # Asked for by name rather than assumed: pressing PLAY on a
+                # film's page means play it, and the one place that means
+                # "pick it up where I stopped" is a button that says so.
+                start = resume_position(kind, item_id) if data.get("resume") else 0
+                # An episode holds the window open so the next one can follow
+                # it. A film doesn't: when it's finished, it's finished.
+                # Held open for an episode (the run follows it) and for
+                # anything at all while the queue has something in it — see
+                # the note above the queue, on why only idle can be trusted.
+                proc = mpv_play(path, start=start,
+                                keep_open=(kind == "episode" or queue_count() > 0))
+                title = LOCAL.field(kind, item_id, "title")
+                LOCAL.set_field(kind, item_id, "last_played", now_stamp())
+                log_event(kind, item_id, title, "played")
+                note_now_playing(proc, kind, item_id, title)
+                return self.send_json({"ok": True})
+
+            if route == "/api/afk":
+                # still: carry on with what was held. Otherwise close the
+                # player, which is what lets the machine sleep.
+                return self.send_json(
+                    {"ok": True,
+                     "answered": afk_answer(bool(data.get("still")))})
+
+            if route == "/api/channels/shuffle":
+                # A new salt, and every channel's order and position moves
+                # with it. Written to disk before answering: the page is
+                # about to ask what's on, and it has to be asking about the
+                # same schedule the next restart will find.
+                CONFIG["channel_salt"] = "%08x" % random.getrandbits(32)
+                # The moment matters as much as the salt. Every channel's
+                # loop is measured from here afterwards, which is what lets
+                # channel_phase say "this one is two minutes into something"
+                # and have it be true when you look up at the page.
+                CONFIG["channel_shuffled_at"] = time.time()
+                save_json(CONFIG_PATH, CONFIG)
+                return self.send_json({"ok": True})
+
+            if route == "/api/channels/tune":
+                channel = next((c for c in CHANNELS if c["id"] == data.get("channel")), None)
+                if not channel:
+                    raise AppError("No such channel.")
+                tune_channel(channel)
+                return self.send_json({"ok": True})
+
+            # -- the remote ------------------------------------------------
+            if route == "/api/remote/volume":
+                if not mpv_alive():
+                    raise AppError("Nothing is playing.")
+                if data.get("value") is not None:
+                    level = int(data["value"])
+                else:
+                    level = (int(round(mpv_get("volume", 0) or 0))
+                             + int(data.get("delta") or 0))
+                # mpv will amplify past 100 and it's genuinely useful on a
+                # quiet file, so the ceiling is its own rather than 100.
+                mpv_command("set_property", "volume", max(0, min(130, level)))
+                return self.send_json(remote_state())
+
+            if route == "/api/remote/toggle":
+                if not mpv_alive():
+                    raise AppError("Nothing is playing.")
+                what = data.get("what")
+                if what in ("sub", "audio"):
+                    # No error when there's nothing to move to: the button is
+                    # already disabled and labelled for that case, so a red
+                    # message would only explain something the window said.
+                    remote_cycle_track(what)
+                elif what in ("pause", "mute"):
+                    mpv_command("cycle", what)
+                else:
+                    raise AppError("Nothing to toggle.")
+                return self.send_json(remote_state())
+
+            if route == "/api/remote/channel":
+                wanted = data.get("channel")
+                if wanted:
+                    channel = next((c for c in CHANNELS if c["id"] == wanted), None)
+                    if not channel:
+                        raise AppError("No such channel.")
+                    tune_channel(channel)
+                else:
+                    remote_step_channel(1 if int(data.get("step") or 1) > 0 else -1)
+                return self.send_json(remote_state())
+
+            if route == "/api/remote/delay":
+                if not mpv_alive():
+                    raise AppError("Nothing is playing.")
+                # Sent in milliseconds and stored in seconds. mpv's own
+                # Ctrl+- / Ctrl++ move in 100ms steps, and matching that
+                # means the two ways of doing it agree.
+                if data.get("value") is not None:
+                    seconds = int(data["value"]) / 1000.0
+                else:
+                    seconds = ((mpv_get("audio-delay", 0) or 0)
+                               + int(data.get("delta") or 0) / 1000.0)
+                seconds = max(-10.0, min(10.0, seconds))
+                mpv_command("set_property", "audio-delay", round(seconds, 3))
+                return self.send_json(remote_state())
+
+            if route == "/api/remote/episode":
+                step_episode(1 if int(data.get("step") or 1) > 0 else -1)
+                return self.send_json(remote_state())
+
+            if route == "/api/remote/skip":
+                playing = now_playing_snapshot() or {}
+                channel_id = playing.get("channel_id")
+                if not channel_id and queue_count():
+                    # Not a channel, but there's a queue: skipping means the
+                    # next thing in it, now.
+                    play_from_queue()
+                    return self.send_json(remote_state())
+                if not channel_id:
+                    raise AppError("This isn't a channel and nothing is "
+                                   "queued, so there's nothing to skip to.")
+                # The same path a programme ending takes, told what to step
+                # past — so skipping by hand lands where waiting would have.
+                advance_channel(channel_id,
+                                after=(playing.get("type"), playing.get("id")))
+                return self.send_json(remote_state())
+
+            # -- the queue ---------------------------------------------------
+            if route == "/api/offered":
+                key = str(data.get("key") or "")
+                if re.match(r"^(movie|episode):\d+$", key):
+                    remember_offer(key)
+                return self.send_json({"ok": True})
+
+            if route == "/api/queue/add":
+                return self.send_json(dict(
+                    queue_add(data.get("type"), data.get("id"),
+                              first=bool(data.get("next"))), ok=True))
+
+            if route == "/api/queue/remove":
+                return self.send_json({"ok": True, "state": queue_remove(data.get("qid"))})
+
+            if route == "/api/queue/move":
+                return self.send_json({"ok": True, "state":
+                                       queue_move(data.get("qid"), data.get("to"))})
+
+            if route == "/api/queue/tuck":
+                CONFIG["queue_tucked"] = bool(data.get("tucked"))
+                save_json(CONFIG_PATH, CONFIG)
+                return self.send_json({"ok": True})
+
+            if route == "/api/queue/clear":
+                return self.send_json({"ok": True, "state": queue_clear()})
+
+            if route == "/api/queue/play":
+                played = play_from_queue(data.get("qid"))
+                if not played:
+                    raise AppError("Nothing in the queue to play.")
+                return self.send_json({"ok": True, "state": queue_state()})
+
+            if route == "/api/playnow":
+                # Play, from the right-click menu. A show means the episode
+                # you're up to, which the tile itself can't know.
+                kind, item_id = resolve_playable(data.get("type"), data.get("id"))
+                path = require_media_file(LOCAL.path_for(kind, item_id))
+                with _PLAY_LOCK:
+                    busy = NOW_PLAYING.get("type") in ("movie", "episode")
+                if busy:
+                    _finish_current("skipped")
+                play_item(kind, item_id, path)
+                return self.send_json({"ok": True})
+
+            if route == "/api/remote/subtitles":
+                result = fetch_subtitle_for_playing(data.get("language"))
+                return self.send_json(dict(remote_state(), subtitles=result))
+
+            if route == "/api/remote/stop":
+                stop_current_playback()
+                return self.send_json(remote_state())
+
+            if route == "/api/remote/presets":
+                known = set(c["id"] for c in CHANNELS)
+                CONFIG["remote_presets"] = [
+                    str(x) for x in (data.get("ids") or [])
+                    if str(x) in known][:REMOTE_PRESETS]
+                save_json(CONFIG_PATH, CONFIG)
+                return self.send_json(remote_state())
+
+            if route == "/api/library/rematch":
+                conn = db()
+                conn.execute("UPDATE movies SET matched=0 WHERE matched<0")
+                conn.execute("UPDATE shows SET matched=0 WHERE matched<0")
+                conn.commit()
+                conn.close()
+                LOCAL.loaded_at = 0
+                return self.send_json({"ok": True})
+
+            if route == "/api/override":
+                movie_id = int(data["id"])
+                title = (data.get("title") or "").strip()
+                if not title:
+                    raise AppError("Give it a title to search for.")
+                year = data.get("year")
+                year = int(year) if str(year or "").strip() else None
+                path = LOCAL.path_for("movie", movie_id)
+                if not path:
+                    raise AppError("That file isn't in the library any more.")
+                conn = db()
+                conn.execute(
+                    "INSERT OR REPLACE INTO overrides (path,title,year,tmdb_id,at)"
+                    " VALUES (?,?,?,?,?)", (path, title, year, None, now_stamp()))
+                conn.commit()
+                matched = apply_movie_match(conn, movie_id, title, year)
+                conn.close()
+                LOCAL.loaded_at = 0
+                return self.send_json({"ok": True, "matched": matched})
+
+            if route == "/api/duplicates/resolve":
+                return self.send_json(resolve_duplicate(
+                    data.get("keep"), data.get("drop"),
+                    data.get("action") or "forget"))
+
+            if route == "/api/duplicates/restore":
+                return self.send_json({"ok": True, "restored": unignore_all()})
+
+            if route == "/api/profiles/save":
+                new_id = profile_save(data.get("id"), data.get("name"),
+                                      data.get("accent"))
+                return self.send_json({"ok": True, "id": new_id,
+                                       "state": profiles_state()})
+
+            if route == "/api/profiles/select":
+                return self.send_json(
+                    {"ok": True,
+                     "state": profile_select(data.get("id"), data.get("skip"))})
+
+            if route == "/api/profiles/delete":
+                return self.send_json(
+                    {"ok": True, "state": profile_delete(data.get("id"))})
+
+            if route == "/api/profiles/device":
+                return self.send_json(
+                    {"ok": True, "device": device_rename(data.get("name")),
+                     "state": profiles_state()})
+
+            if route == "/api/library/snapshot/import":
+                # Either posted whole, or read from a file dropped in the
+                # app folder — the second is how you'd do it with a USB
+                # stick and no browser file picker involved.
+                payload = data.get("snapshot")
+                if not payload:
+                    drop = os.path.join(HERE, "nextup_snapshot.json")
+                    if not os.path.isfile(drop):
+                        raise AppError(
+                            "No snapshot given, and no nextup_snapshot.json in "
+                            "the app folder. Export one from your main device "
+                            "first.")
+                    try:
+                        with open(drop, encoding="utf-8") as fh:
+                            payload = json.load(fh)
+                    except Exception as exc:
+                        raise AppError("Couldn't read nextup_snapshot.json: %s" % exc)
+                return self.send_json(
+                    {"ok": True, "imported": import_library_snapshot(payload)})
+
+            if route == "/api/sync/enable":
+                return self.send_json(dict(sync_enable(data.get("folder")), ok=True))
+
+            if route == "/api/sync/disable":
+                return self.send_json(dict(sync_disable(), ok=True))
+
+            if route == "/api/sync/now":
+                SYNC["apply_pending"] = True
+                sync_run()
+                return self.send_json(dict(sync_state(), ok=True))
+
+            if route == "/api/sync/dismiss":
+                CONFIG["sync_offer_dismissed"] = True
+                save_json(CONFIG_PATH, CONFIG)
+                return self.send_json({"ok": True})
+
+            if route == "/api/library/snapshot/forget":
+                snapshot_forget()
+                return self.send_json({"ok": True})
+
+            if route == "/api/sorter/aside":
+                if data.get("action") == "bin":
+                    return self.send_json(dict(sorter_bin_aside(), ok=True,
+                                               aside=sorter_aside()))
+                if data.get("action") == "open":
+                    sorter_open_aside()
+                    return self.send_json({"ok": True})
+                raise AppError("Nothing to do.")
+
+            if route == "/api/sorter/preview":
+                return self.send_json(dict(sorter_preview(), ok=True))
+
+            if route == "/api/sorter/run":
+                with _SORT_LOCK:
+                    if SORT["running"]:
+                        return self.send_json({"ok": True, "already": True})
+                    if not downloads_root():
+                        raise AppError("Set the downloads folder first.")
+                    SORT["running"] = True
+                threading.Thread(target=sorter_worker, daemon=True).start()
+                return self.send_json({"ok": True})
+
+            if route == "/api/library/scan":
+                if SCAN["running"] or LIBSCAN["running"]:
+                    return self.send_json({"ok": True, "already": True})
+                threading.Thread(target=library_scan_worker, daemon=True).start()
+                return self.send_json({"ok": True})
+
+            if route == "/api/rate":
+                value, _ = set_rating(data.get("type"), data.get("id"),
+                                      data.get("rating", 0))
+                return self.send_json({"ok": True, "rating": value})
+
+            if route == "/api/ratings":
+                return self.send_json(build_rating_queue())
+
+            if route == "/api/watchlist":
+                on = toggle_watchlist(data.get("type"), data.get("id"))
+                return self.send_json({"ok": True, "on": on})
+
+            if route == "/api/favourite":
+                on = toggle_favourite(data.get("type"), data.get("id"))
+                return self.send_json({"ok": True, "on": on})
+
+            if route == "/api/dismiss":
+                key = data.get("key", "")
+                DISMISSED.add(key)
+                conn = db()
+                conn.execute("INSERT OR REPLACE INTO dismissed (key,at) VALUES (?,?)",
+                             (key, now_stamp()))
+                conn.commit()
+                conn.close()
+                return self.send_json({"ok": True})
+
+            if route == "/api/config":
+                for field in ("tmdb_key", "mpv_path", "os_api_key",
+                              "os_username", "os_password", "sub_language"):
+                    if field in data:
+                        CONFIG[field] = data[field]
+                        if field in ("os_username", "os_password"):
+                            OS_TOKEN.update(value=None, at=0)   # sign in again
+                if "downloads_folder" in data:
+                    CONFIG["downloads_folder"] = (data["downloads_folder"] or "").strip()
+                if isinstance(data.get("afk"), dict):
+                    # Only the keys the timer knows, and afk_settings sanitises
+                    # the values every time it reads them.
+                    CONFIG["afk"] = {k: v for k, v in data["afk"].items()
+                                     if k in AFK_DEFAULTS}
+                if "media_folders" in data:
+                    CONFIG["media_folders"] = [
+                        f.strip() for f in (data["media_folders"] or []) if f.strip()]
+                save_json(CONFIG_PATH, CONFIG)
+                LOCAL.loaded_at = 0
+                return self.send_json({"ok": True})
+
+            if route == "/api/refresh":
+                LIB.load(force=True)
+                return self.send_json(self.status_payload())
+
+            if route == "/api/dock/plan":
+                plan, warnings = dock_plan_items(data.get("items") or [])
+                sized, size_warnings = dock_size_plan(plan)
+                dest = dock_root(data.get("dest"))
+                free = None
+                if dest:
+                    try:
+                        free = shutil.disk_usage(dest).free
+                    except OSError:
+                        pass
+                # The same test the copy itself applies: a file already at
+                # its destination at the same size is skipped, so it comes
+                # out of the price too, and gets said out loud.
+                present = []
+                if dest and os.path.isdir(dest):
+                    index = dock_drive_index(dest)
+                    _, matched = _drive_catalogue(dest)
+                    present = [i for i in sized if dock_item_on_drive(i, matched, index, i["size"])]
+                present_keys = set(id(i) for i in present)
+                to_copy = [i for i in sized if id(i) not in present_keys]
+                total_bytes = sum(i["size"] for i in to_copy)
+                return self.send_json({
+                    "count": len(to_copy), "bytes": total_bytes,
+                    "already": len(present),
+                    "already_bytes": sum(i["size"] for i in present),
+                    "warnings": warnings + size_warnings,
+                    "free": free, "fits": (free is None or total_bytes <= free),
+                })
+
+            if route == "/api/dock/present":
+                return self.send_json({
+                    "present": dock_presence(data.get("items") or [],
+                                             dock_root(data.get("dest")))})
+
+            if route == "/api/dock/start":
+                if DOCK["running"]:
+                    return self.send_json({"ok": True, "already": True})
+                dest = dock_root(data.get("dest"))
+                if not dest or not os.path.isdir(dest):
+                    raise AppError("Pick a drive first.")
+                plan, _ = dock_plan_items(data.get("items") or [])
+                if not plan:
+                    raise AppError("Nothing to copy.")
+                DOCK_CANCEL.clear()
+                threading.Thread(target=dock_copy_worker, args=(plan, dest),
+                                 daemon=True).start()
+                return self.send_json({"ok": True})
+
+            if route == "/api/dock/cancel":
+                DOCK_CANCEL.set()
+                return self.send_json({"ok": True})
+
+            self.send_error(404)
+        except AppError as exc:
+            self.send_json({"error": str(exc)}, 200)
+        except Exception as exc:
+            traceback.print_exc()
+            log_problem("request %s" % self.path)
+            self.send_json({"error": "%s: %s" % (type(exc).__name__, exc)}, 200)
+
+    def status_payload(self):
+        if not (CONFIG.get("media_folders") or []):
+            return {"connected": False,
+                    "error": "No media folders set yet.",
+                    "has_key": bool(CONFIG.get("tmdb_key")),
+                    "version": APP_VERSION,
+                    "config": self.safe_config()}
+        try:
+            LIB.load()
+        except Exception as exc:
+            return {"connected": False, "error": str(exc),
+                    "has_key": bool(CONFIG.get("tmdb_key")),
+                    "version": APP_VERSION,
+                    "config": self.safe_config()}
+        if not (LIB.movies or LIB.shows):
+            return {"connected": False,
+                    "error": "Your folders are set but nothing has been scanned yet.",
+                    "has_key": bool(CONFIG.get("tmdb_key")),
+                    "version": APP_VERSION,
+                    "config": self.safe_config()}
+        genres = Counter()
+        for m in LIB.movies:
+            for g in (m.get("genre") or []):
+                genres[g] += 1
+        for s in LIB.shows:
+            for g in (s.get("genre") or []):
+                genres[g] += 1
+        unrated = sum(1 for m in LIB.movies if not m.get("userrating"))
+        favourites = (sum(1 for m in LIB.movies if m.get("favourited"))
+                      + sum(1 for s in LIB.shows if s.get("favourited")))
+        return {
+            "connected": True,
+            "movies": len(LIB.movies),
+            "shows": len(LIB.shows),
+            "episodes": len(LIB.episodes),
+            "unrated_films": unrated,
+            "favourites": favourites,
+            "genres": [g for g, _ in genres.most_common(24)],
+            "has_key": bool(CONFIG.get("tmdb_key")),
+            "version": APP_VERSION,
+            "config": self.safe_config(),
+        }
+
+    def safe_config(self):
+        """What the page is allowed to see. Secrets go out as a row of stars
+        or not at all — the page only ever needs to know whether one is set,
+        never what it is, and this payload reaches anything that can open
+        the port."""
+        return {
+            "media_folders": CONFIG.get("media_folders") or [],
+            "mpv_path": CONFIG.get("mpv_path") or "",
+            "tmdb_key": "" if not CONFIG.get("tmdb_key") else "********",
+            "os_api_key": "" if not CONFIG.get("os_api_key") else "********",
+            "os_username": CONFIG.get("os_username") or "",
+            "os_password": "" if not CONFIG.get("os_password") else "********",
+            "sub_language": CONFIG.get("sub_language") or "en",
+            "afk": afk_settings(),
+        }
+
+
+# ===========================================================================
+# UI
+# ===========================================================================
+
+PAGE = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Next Up</title>
+<link rel="icon" type="image/png" href="/logo.png">
+<link rel="stylesheet" href="/fonts/fonts.css">
+<style>
+:root{
+  /* Black, not the charcoal it used to be — the same move the remote made
+     first, for the same reason: posters and marigold sit better on a room
+     with the lights properly off. The surfaces are the remote's own, so the
+     two windows finally agree; the plum warmth lives in the cards now
+     rather than the walls. */
+  --ink:#060509;
+  --ink-2:#131017;
+  --ink-3:#1d1826;
+  --paper:#ece6dc;
+  --muted:#8d859b;
+  --marigold:#e0a33e;
+  --teal:#4fa8a0;
+  --rust:#c2593c;
+  --line:#272031;
+  /* Elevation, for everything that used to be drawn with a line round it.
+     A surface is lighter than the room, lit faintly from its top edge, and
+     sits on a shadow — which is how a real object reads, and what a 1px
+     border was only ever a wire-frame stand-in for. */
+  --surface:#131017;
+  --surface-2:#1b1622;
+  --edge:rgba(255,255,255,.055);
+  --sheen:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,0) 42%);
+  --shadow-card:inset 0 1px 0 rgba(255,255,255,.045),0 8px 24px rgba(0,0,0,.38);
+  --shadow-lift:inset 0 1px 0 rgba(255,255,255,.06),0 16px 38px rgba(0,0,0,.5);
+  --shadow-panel:inset 0 1px 0 rgba(255,255,255,.05),0 28px 80px rgba(0,0,0,.62);
+  --r-card:12px;
+  --r-panel:16px;
+  --r-btn:9px;
+  --marigold-2:#f2bd5a;
+  --display:"Bricolage Grotesque","Segoe UI",sans-serif;
+  --body:"Spline Sans","Segoe UI",sans-serif;
+  --mono:"Space Mono",ui-monospace,Consolas,monospace;
+}
+*{box-sizing:border-box}
+
+/* The scrollbar, made part of the room rather than a grey plank bolted to
+   the side of it. The track is transparent so the page shows straight
+   through, and the thumb is a slim pill held off the edge by a transparent
+   border — background-clip:content-box is what keeps the border see-through
+   instead of painting it. It only darkens under the pointer, so at rest
+   there's a hint of where you are and nothing more.
+
+   Two syntaxes on purpose: scrollbar-color is the standard one, ::-webkit-
+   is what the window this actually runs in understands today. */
+::-webkit-scrollbar{width:13px;height:13px;background:transparent}
+::-webkit-scrollbar-track{background:transparent;border:0}
+::-webkit-scrollbar-corner{background:transparent}
+::-webkit-scrollbar-thumb{
+  background:rgba(236,230,220,.20);border-radius:99px;
+  border:4px solid transparent;background-clip:content-box;
+}
+::-webkit-scrollbar-thumb:hover{background:rgba(236,230,220,.38);background-clip:content-box}
+/* Literal colour, not var(--marigold): custom properties don't reach inside
+   a scrollbar pseudo-element, and the rule silently computes to nothing. */
+::-webkit-scrollbar-thumb:active{background:#e0a33e;background-clip:content-box}
+/* The standard properties are deliberately NOT set alongside the above:
+   where both exist the standard ones win outright, which throws away the
+   rounded, inset thumb. They're kept here only for anything that has no
+   ::-webkit- support at all, which is nothing this normally runs in. */
+@supports not selector(::-webkit-scrollbar){
+  *{scrollbar-width:thin;scrollbar-color:rgba(236,230,220,.20) transparent}
+}
+html,body{margin:0;padding:0}
+body{
+  /* A faint glow at the top of the room rather than a flat wall — on true
+     black a page with no light source reads as a spreadsheet. The bright
+     end is barely above the background; it's felt more than seen. */
+  background:
+    radial-gradient(1100px 520px at 50% -160px,#1e1729 0%,rgba(6,5,9,0) 70%),
+    radial-gradient(900px 640px at 104% 108%,#0d1717 0%,rgba(6,5,9,0) 64%),
+    var(--ink);
+  background-repeat:no-repeat;
+  color:var(--paper);font-family:var(--body);
+  font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased;
+}
+::selection{background:var(--marigold);color:#1a1206}
+a{color:inherit}
+/* Our own title bar, shown ONLY inside the native window. Without it a
+   frameless window has no way to be moved or closed; with it the app stops
+   wearing somebody else's chrome. In a browser tab this stays hidden and the
+   browser's own controls do the job. */
+#titlebar{
+  position:fixed;top:0;left:0;right:0;height:38px;z-index:80;display:flex;
+  /* Transparent, not painted: nothing ever scrolls under this strip — the
+     shell below it is a fixed column — so it can sit on the body's glow
+     rather than laying a flat plank over the brightest part of it. */
+  align-items:stretch;background:transparent;border-bottom:1px solid var(--edge);
+}
+#titlebar .dragzone{flex:1;display:flex;align-items:center;gap:9px;padding-left:20px}
+#titlebar .minimark{width:21px;height:21px;border-radius:50%;display:block;flex:none}
+#titlebar .dragzone span{
+  font-family:var(--display);font-weight:700;font-size:14px;letter-spacing:.02em;
+  color:var(--paper);pointer-events:none;
+}
+#titlebar .wincontrols{display:flex}
+#titlebar button{
+  width:46px;border:0;background:none;color:var(--muted);cursor:pointer;
+  font-family:var(--mono);font-size:13px;line-height:1;transition:background .12s ease,color .12s ease;
+}
+#titlebar button:hover{background:var(--ink-2);color:var(--paper)}
+#titlebar button[data-win="close"]:hover{background:var(--rust);color:#1a0f0b}
+body{padding-top:38px}
+
+/* The whole page used to scroll, so the bar ran from the very top of the
+   window past the logo and the tabs — which is exactly what makes a desktop
+   app feel like a web page. The shell is a fixed-height column now, and only
+   the content inside a tab scrolls. In the library that's the tile grid
+   itself, so the bar starts where the tiles do and the search and filters
+   above stay put. */
+html,body{height:100%;overflow:hidden}
+body{display:flex;flex-direction:column}
+.wrap{
+  max-width:1120px;margin:0 auto;padding:0 24px;width:100%;
+  flex:1;min-height:0;display:flex;flex-direction:column;
+}
+.wrap > header.mast,.wrap > #banner,.wrap > #playingbar{flex:none}
+.wrap > [id^="view-"]{flex:1;min-height:0;overflow-y:auto;padding-bottom:40px}
+/* Switching tabs eases the new panel in rather than snapping it on. The
+   distance is 6px and the time under a quarter second — felt, not watched.
+   The reduced-motion blanket at the bottom turns it off with the rest. */
+@keyframes viewin{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.wrap > [id^="view-"]:not(.hidden){animation:viewin .22s ease}
+/* The library splits again: filters pinned, grid scrolling. */
+#view-library{display:flex;flex-direction:column;overflow:hidden;padding-bottom:0}
+#view-library > .subnav,#view-library > .libtop,#view-library > .pager,
+#view-library > .resumestrip,#view-library > .seltray{flex:none}
+/* Browsing and Recommendations are two states of the one view. Driven by a
+   class on the parent rather than by toggling `hidden` on each piece: the
+   pager already owns its own `hidden` to say whether there's a second page,
+   and two owners of one class is how you get a pager that won't come back. */
+#view-library.showing-recs > .libtop,
+#view-library.showing-recs > #tiles-out,
+#view-library.showing-recs > .pager,
+#view-library.showing-recs > .resumestrip,
+#view-library.showing-history > .libtop,
+#view-library.showing-history > #tiles-out,
+#view-library.showing-history > .pager,
+#view-library.showing-history > .resumestrip,
+#view-library.showing-drives > .libtop,
+#view-library.showing-drives > #tiles-out,
+#view-library.showing-drives > .pager,
+#view-library.showing-drives > .resumestrip,
+/* The copy tray belongs to the shelf. Left alone it hung under whichever
+   panel you switched to while selecting. */
+#view-library.showing-recs > .seltray,
+#view-library.showing-history > .seltray,
+#view-library.showing-drives > .seltray{display:none}
+#view-library:not(.showing-recs) > #view-upnext{display:none}
+#view-library:not(.showing-history) > #view-history{display:none}
+#view-library:not(.showing-drives) > #view-drives{display:none}
+#view-library > #view-history,
+#view-library > #view-drives{flex:1;min-height:0;overflow-y:auto;padding:14px 0 40px}
+/* ---- watch history ---- */
+.histtotals{
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--muted);margin-left:auto;text-align:right;line-height:1.5;
+}
+.histtotals b{color:var(--marigold);font-weight:400}
+/* The end of the list, where it says how far back you're looking and
+   offers to go further. */
+.histmore{
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+  margin:26px 0 8px;padding-top:16px;border-top:1px solid var(--edge);
+}
+.histmorenote{font-size:13px;color:var(--muted)}
+.histday{
+  font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--muted);margin:22px 0 8px;padding-bottom:6px;border-bottom:1px solid var(--line);
+}
+.histday:first-child{margin-top:0}
+.histrow{
+  /* Poster, what it was, how much of it, and what you can do about it. The
+     actions column is last and sized to its content, so rows without
+     buttons — anything no longer in the library — simply leave it empty
+     rather than shifting the three columns that carry the record. */
+  display:grid;grid-template-columns:38px 1fr auto auto;gap:12px;align-items:center;
+  padding:7px 0;border-bottom:1px solid var(--line);
+}
+.histrow:last-child{border-bottom:0}
+.histrow img,.histrow .noposter{width:38px;aspect-ratio:2/3;object-fit:cover;border-radius:3px;
+  background:var(--ink-3)}
+.histrow .t{min-width:0}
+.histrow .t h4{font-family:var(--display);font-weight:700;font-size:14px;margin:0 0 2px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.histrow .t .libline{font-size:11px}
+/* The number you came for, right-aligned so a column of them reads as a
+   column. Monospaced for the same reason. */
+.histrow .dur{font-family:var(--mono);font-size:12px;color:var(--paper);text-align:right;
+  white-space:nowrap}
+.histrow .dur small{display:block;font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--muted)}
+.histrow .dur.part small{color:var(--rust)}
+/* Inside the Library now, so it no longer picks up the `.wrap > [id^=view-]`
+   rule that made a tab panel scroll. It needs the same treatment by name. */
+/* A little air at the top. Browsing opens on a search row, which carries its
+   own breathing space; Recommendations opens straight onto the hub cards,
+   and without this they start hard against the sub-nav. */
+#view-library > #view-upnext{flex:1;min-height:0;overflow-y:auto;padding:14px 0 40px}
+/* How old the shelf is. Quiet, because it's a fact about the data rather
+   than something to act on — the button beside it is the action. */
+.scanage{
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--muted);margin:0 0 16px;
+}
+#tiles-out{flex:1;min-height:0;overflow-y:auto;padding-bottom:28px}
+
+/* ---- masthead ---- */
+/* One row, not two. The name and logo used to sit on their own line above
+   the tabs, which cost about 100px of every screen before any content
+   started — they live in the strip at the very top now, where there was
+   nothing but empty bar anyway. */
+header.mast{
+  z-index:40;background:transparent;
+  border-bottom:0;margin-bottom:14px;
+  /* Air above the tabs: with nothing on the line above them any more, the
+     pill sat hard against the title bar's divider. */
+  padding:12px 0 2px;display:flex;align-items:center;justify-content:space-between;
+  gap:24px;flex-wrap:wrap;
+}
+/* Hidden without giving its width back, so the tabs don't jump sideways
+   when you leave the Library. They sit at margin-left:auto regardless. */
+header.mast .subnav.offview{visibility:hidden}
+header.mast .subnav{margin:0;flex-wrap:nowrap;min-width:0}
+header.mast .subtab{white-space:nowrap}
+/* Two navs on one line is ~960px of words. Rather than let the line break —
+   which hands back the row this was moved up to save — they tighten as the
+   room narrows, down to the window's own 760px minimum.
+
+   Measured against the header's OWN width, not the window's. Once the queue
+   docks beside the page, a 1200px window has a 900px page, and a rule keyed
+   to the window would keep the full-size tabs and break the line. The
+   breakpoints are the old window ones less the page's 48px of padding.
+   The container is the header rather than .wrap on purpose: a size
+   container is a containing block for fixed-position children, and the
+   title bar and every sheet live inside .wrap. */
+header.mast{container-type:inline-size;gap:8px}
+@container (max-width:1052px){
+  header.mast .subtab{margin-right:11px;letter-spacing:.06em;font-size:11px}
+  header.mast .tabs .tab{padding:8px 12px}
+  header.mast .tabs .tab.icon{padding:8px 10px}
+}
+@container (max-width:852px){
+  header.mast .subtab{margin-right:8px;letter-spacing:.02em;font-size:10.5px}
+  header.mast .subtab .count{margin-left:4px}
+  header.mast .tabs .tab{padding:7px 9px;font-size:13.5px}
+  header.mast .tabs .tab.icon{padding:7px 8px}
+  header.mast .subtab:last-child{margin-right:0}
+}
+@container (max-width:752px){
+  header.mast .subtab{margin-right:6px}
+  header.mast .subtab:last-child{margin-right:0}
+  header.mast .tabs .tab{padding:7px 7px}
+}
+/* Library facts beside the name in the title bar, in the quiet face. */
+#titlebar .dragzone{min-width:0}
+#titlebar .dragzone #libline{
+  font-family:var(--mono);font-weight:400;font-size:11px;letter-spacing:.04em;
+  color:var(--muted);margin-left:8px;min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.libline{font-family:var(--mono);font-size:11.5px;color:var(--muted);letter-spacing:.04em}
+/* A segmented control on a tonal track. The underline read as a document
+   with headings; a lit segment reads as a switch, which is what it is. */
+.tabs{
+  display:flex;gap:2px;margin-left:auto;padding:3px;border-radius:999px;
+  background:rgba(255,255,255,.045);box-shadow:inset 0 1px 0 rgba(255,255,255,.04);
+}
+.tab{
+  background:none;border:0;color:var(--muted);border-radius:999px;
+  font-family:var(--display);font-weight:700;font-size:14.5px;letter-spacing:.01em;
+  padding:8px 16px;cursor:pointer;transition:color .12s ease,background .15s ease,box-shadow .15s ease;
+}
+.tab:hover{color:var(--paper);background:rgba(255,255,255,.04)}
+.tab[aria-selected="true"]{
+  color:var(--paper);background:var(--surface-2);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.07),0 4px 12px rgba(0,0,0,.45);
+}
+.tab.icon{display:flex;align-items:center;padding:8px 12px}
+.tab.icon svg{width:17px;height:17px;display:block}
+.tab:focus-visible,button:focus-visible,select:focus-visible,input:focus-visible{
+  outline:2px solid var(--marigold);outline-offset:2px;
+}
+.iconbtn{
+  background:none;border:1px solid var(--line);color:var(--muted);border-radius:6px;
+  font-family:var(--mono);font-size:11px;padding:6px 10px;cursor:pointer;letter-spacing:.05em;
+  transition:color .12s ease,border-color .12s ease,background .12s ease;
+}
+.iconbtn:hover{color:var(--paper);border-color:var(--muted);background:var(--ink-2)}
+
+/* ---- filter bar ---- */
+.filters{
+  display:flex;gap:10px;flex-wrap:wrap;align-items:center;
+  padding:14px 0 22px;border-bottom:1px solid var(--line);margin-bottom:26px;
+}
+label.f{display:flex;flex-direction:column;gap:5px}
+label.f span{
+  font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--muted);
+}
+select{
+  background:var(--ink-2);color:var(--paper);border:1px solid var(--line);
+  border-radius:3px;padding:8px 10px;font-family:var(--body);font-size:14px;min-width:132px;
+}
+.spin{
+  margin-left:auto;align-self:flex-end;background:var(--marigold);color:#1a1206;border:0;
+  font-family:var(--display);font-weight:800;font-size:15px;padding:10px 22px;
+  border-radius:6px;cursor:pointer;letter-spacing:.01em;
+  box-shadow:0 4px 14px rgba(224,163,62,.22);
+  transition:filter .12s ease,transform .08s ease,box-shadow .12s ease;
+}
+.spin:hover{filter:brightness(1.08);box-shadow:0 6px 18px rgba(224,163,62,.3)}
+.spin:active{transform:translateY(1px)}
+/* The two travel together at the end of the filter row, so BACK reads as
+   part of the picking rather than as one more filter. */
+.spinrow{margin-left:auto;align-self:flex-end;display:flex;align-items:stretch;gap:8px}
+.spinrow .spin{margin-left:0;align-self:auto}
+/* Deliberately the quieter of the pair: going back is the recovery, not the
+   thing you came here to do. */
+.spinback{
+  background:none;border:1px solid var(--line);color:var(--muted);border-radius:4px;
+  font-family:var(--mono);font-size:11px;letter-spacing:.08em;padding:0 14px;
+  cursor:pointer;transition:color .12s ease,border-color .12s ease,background .12s ease;
+}
+.spinback:hover:not(:disabled){color:var(--paper);border-color:var(--muted);background:var(--ink-2)}
+.spinback:active:not(:disabled){transform:translateY(1px)}
+/* Present but plainly unavailable until there's something behind you — a
+   button that vanishes and reappears moves the one beside it. */
+.spinback:disabled{opacity:.3;cursor:default}
+.spin[disabled]{opacity:.5;cursor:default}
+
+/* ---- the pick ---- */
+.pick{
+  display:grid;grid-template-columns:186px 1fr;gap:26px;
+  background:var(--ink-2);border:1px solid var(--line);border-radius:6px;
+  padding:22px;margin-bottom:16px;position:relative;overflow:hidden;
+  box-shadow:0 14px 40px rgba(0,0,0,.4);
+}
+.pick.tv .eyebrow{color:var(--teal)}
+.pick img.poster{width:186px;aspect-ratio:2/3;object-fit:cover;border-radius:3px;background:var(--ink-3);display:block}
+.noposter{
+  width:186px;aspect-ratio:2/3;border-radius:3px;background:var(--ink-3);
+  display:flex;align-items:center;justify-content:center;font-family:var(--mono);
+  font-size:11px;color:var(--muted);text-align:center;padding:12px;
+}
+.eyebrow{
+  font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--marigold);margin-bottom:10px;
+}
+.pick.tv .eyebrow{color:var(--teal)}
+.eyebrow.live{color:var(--rust)}
+.pick h2{
+  font-family:var(--display);font-weight:800;font-size:36px;line-height:1.05;
+  letter-spacing:-.02em;margin:0 0 4px;
+}
+.subline{font-family:var(--mono);font-size:12.5px;color:var(--muted);margin-bottom:14px}
+.why{font-size:15px;color:var(--paper);margin:0 0 12px}
+.plot{color:var(--muted);font-size:14px;margin:0 0 20px;max-width:60ch}
+.meta{display:flex;gap:14px;flex-wrap:wrap;font-family:var(--mono);font-size:11.5px;color:var(--muted);margin-bottom:18px}
+.meta b{color:var(--paper);font-weight:400}
+.rowbtns{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+/* The watchlist toggle was built for a card face, where it sits on its own
+   at the top of a stack — align-self:flex-start and a tighter box than the
+   buttons beside it here. In a row next to Play and NOT THIS it has to be
+   one of the row, so it gives up both. */
+.rowbtns .watchtoggle{align-self:auto;border-radius:6px;padding:6px 10px;font-size:11px}
+.play{
+  background:var(--paper);color:#17151c;border:0;font-family:var(--display);
+  font-weight:800;font-size:14px;padding:9px 18px;border-radius:6px;cursor:pointer;
+  transition:filter .12s ease,transform .08s ease;
+}
+.play:hover{filter:brightness(.94)}
+.play:active{transform:translateY(1px)}
+
+/* ---- rating: red through yellow to green ---- */
+.rate{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 18px}
+.rate.prompt{
+  border-left:3px solid var(--marigold);background:var(--ink-3);
+  padding:12px 14px;border-radius:3px;
+}
+.rate .lbl{font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.rate.prompt .lbl{color:var(--marigold)}
+.notches{display:flex;gap:3px}
+.notch{
+  display:flex;gap:1px;width:19px;height:22px;border-radius:2px;overflow:hidden;
+  background:var(--line);transition:transform .12s ease;
+}
+.notch:hover{transform:translateY(-2px)}
+.half{flex:1;background:var(--ink-3);border:0;padding:0;cursor:pointer;transition:background .12s ease}
+.rate.prompt .half{background:#39344a}
+.half.on{background:hsl(var(--h) 64% 48%)}
+.notches.pending{opacity:.5}
+.rate .val{font-family:var(--mono);font-size:12px;min-width:82px;color:var(--muted)}
+.rate .val.set{color:hsl(var(--h) 64% 62%)}
+.rate .clear{background:none;border:0;color:var(--muted);font-family:var(--mono);font-size:10px;letter-spacing:.06em;cursor:pointer}
+.rate .clear:hover{color:var(--rust)}
+.notches.big .notch{width:34px;height:40px}
+
+/* ---- reason cards under the pick ---- */
+.reasons{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
+.reason{
+  background:var(--ink-2);border:1px solid var(--line);border-radius:6px;
+  padding:18px 20px;display:flex;flex-direction:column;gap:9px;position:relative;
+  border-top:3px solid var(--marigold);
+}
+.reason[data-kind="director"]{border-top-color:var(--rust)}
+.reason[data-kind="cast"]{border-top-color:var(--teal)}
+.reason[data-kind="themes"]{border-top-color:#8f6fd0}
+.reason[data-kind="reception"]{border-top-color:var(--marigold)}
+.reason[data-kind="series"]{border-top-color:#5b8dd6}
+.reason[data-kind="standout"]{border-top-color:#c98fb0}
+.reason h3{
+  font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--muted);margin:0;font-weight:400;
+}
+.reason p{margin:0;font-size:14.5px;line-height:1.45;color:var(--paper)}
+.reason .rchips{display:flex;flex-wrap:wrap;gap:5px;margin-top:auto;padding-top:4px}
+
+/* ---- alternates ---- */
+.alts{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
+.alt{
+  display:grid;grid-template-columns:62px 1fr;gap:14px;background:var(--ink-2);
+  border:1px solid var(--line);border-radius:6px;padding:14px;align-items:center;
+}
+.alt img{width:62px;aspect-ratio:2/3;object-fit:cover;border-radius:2px;background:var(--ink-3)}
+.alt h3{font-family:var(--display);font-weight:600;font-size:17px;margin:0 0 2px;line-height:1.15}
+.alt p{margin:0;font-size:12.5px;color:var(--muted)}
+.alt button{margin-top:8px}
+
+/* ---- sections ---- */
+section{margin-top:40px}
+section:first-child{margin-top:0}
+.sechead{display:flex;align-items:baseline;gap:14px;border-bottom:1px solid var(--line);padding-bottom:9px;margin-bottom:20px;flex-wrap:wrap}
+.sechead h2{font-family:var(--display);font-weight:800;font-size:22px;margin:0;letter-spacing:-.01em}
+.sechead .count{font-family:var(--mono);font-size:11px;color:var(--muted);letter-spacing:.08em}
+.sechead p{margin:0 0 0 auto;font-size:12.5px;color:var(--muted);max-width:44ch;text-align:right}
+
+/* ---- the hub: always on screen, doubles as the navigation ---- */
+.hubgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin-bottom:8px}
+.hubcard{
+  background:var(--ink-2);border:1px solid var(--line);border-top:3px solid var(--line);
+  border-radius:6px;padding:16px 18px;text-align:left;cursor:pointer;color:inherit;
+  font-family:var(--body);font-size:14px;display:flex;flex-direction:column;gap:4px;
+  transition:border-color .15s ease,background .15s ease,transform .15s ease,box-shadow .15s ease;
+}
+.hubcard:hover{border-color:var(--muted);transform:translateY(-2px);box-shadow:0 8px 22px rgba(0,0,0,.45)}
+.hubcard .big{font-family:var(--display);font-weight:800;font-size:34px;line-height:1;letter-spacing:-.03em}
+.hubcard .name{font-family:var(--display);font-weight:700;font-size:16px}
+.hubcard .desc{color:var(--muted);font-size:12.5px}
+.hubcard[aria-selected="true"]{background-color:var(--surface-2);border-top-color:var(--marigold)}
+.hubcard[aria-selected="true"] .big{color:var(--marigold)}
+.hubcard.tv[aria-selected="true"]{border-top-color:var(--teal)}
+.hubcard.tv[aria-selected="true"] .big{color:var(--teal)}
+.hubcard.rust[aria-selected="true"]{border-top-color:var(--rust)}
+.hubcard.rust[aria-selected="true"] .big{color:var(--rust)}
+.hubcard[disabled]{opacity:.4;cursor:default}
+
+/* ---- episode grid ---- */
+.gap{background:var(--ink-2);border:1px solid var(--line);border-radius:6px;padding:16px 18px;margin-bottom:12px}
+.gap-top{display:flex;align-items:center;gap:14px;margin-bottom:14px}
+.gap-top img{width:44px;aspect-ratio:2/3;object-fit:cover;border-radius:2px;background:var(--ink-3)}
+.gap-top h3{font-family:var(--display);font-weight:600;font-size:18px;margin:0;line-height:1.2}
+.gap-top .tag{
+  font-family:var(--mono);font-size:11px;color:var(--rust);border:1px solid var(--rust);
+  padding:2px 7px;border-radius:2px;letter-spacing:.04em;
+}
+.season{display:flex;align-items:center;gap:10px;margin-bottom:7px;flex-wrap:wrap}
+.snum{font-family:var(--mono);font-size:11px;color:var(--muted);width:34px;flex:none}
+.cells{display:flex;gap:3px;flex-wrap:wrap}
+.cell{width:13px;height:13px;border-radius:1.5px;background:var(--ink-3);flex:none}
+.cell.have{background:var(--teal);opacity:.85}
+.cell.miss{background:transparent;border:1.5px solid var(--rust)}
+.needlist{font-family:var(--mono);font-size:11px;color:var(--rust);margin-left:4px}
+.legend{display:flex;gap:16px;flex-wrap:wrap;font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-bottom:16px}
+.legend span{display:flex;align-items:center;gap:6px}
+
+/* ---- suggestion cards ---- */
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(178px,1fr));gap:16px}
+.card{background:var(--ink-2);border:1px solid var(--line);border-radius:6px;overflow:hidden;display:flex;flex-direction:column;
+  transition:border-color .15s ease,transform .15s ease,box-shadow .15s ease}
+.card:hover{border-color:var(--muted);transform:translateY(-2px);box-shadow:0 10px 26px rgba(0,0,0,.5)}
+.card img{width:100%;aspect-ratio:2/3;object-fit:cover;background:var(--ink-3);display:block}
+.card .body{padding:11px 12px 13px;display:flex;flex-direction:column;gap:5px;flex:1}
+.card h4{font-family:var(--display);font-weight:700;font-size:15px;margin:0;line-height:1.2}
+.card .yr{font-family:var(--mono);font-size:11px;color:var(--muted)}
+.card .tmdb{font-family:var(--mono);font-size:10.5px;color:var(--muted);letter-spacing:.04em}
+.card .tmdb b{color:var(--paper);font-weight:400}
+.cardart{position:relative;flex:none}
+.cardpeek{
+  position:absolute;inset:0;background:rgba(6,5,9,.94);
+  padding:11px 12px;display:flex;flex-direction:column;justify-content:flex-end;
+  gap:4px;opacity:0;transition:opacity .13s ease;pointer-events:none;
+  overflow:hidden;
+}
+.card:hover .cardpeek{opacity:1}
+.cardpeek .line{font-family:var(--mono);font-size:9.5px;line-height:1.35;color:var(--muted)}
+.cardpeek .line:first-child{color:var(--paper)}
+
+.whychips{display:flex;flex-wrap:wrap;gap:4px;margin-top:auto;padding-top:8px}
+.chip{
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.04em;text-transform:lowercase;
+  border:1px solid var(--line);border-radius:2px;padding:2px 5px;color:var(--muted);
+}
+.chip.strong{border-color:var(--marigold);color:var(--marigold)}
+/* A reason chip may name a programme — "like Arrested Development" — and a
+   title lowercased reads as a typo rather than as a style. */
+.whychips .chip{text-transform:none}
+.coll{background:var(--ink-2);border:1px solid var(--line);border-radius:6px;padding:16px 18px;margin-bottom:14px}
+.coll h3{font-family:var(--display);font-weight:600;font-size:18px;margin:0 0 3px}
+.coll .have{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin-bottom:13px}
+.dirblock{background:var(--ink-2);border:1px solid var(--line);border-radius:6px;padding:18px 20px;margin-bottom:16px}
+.dirblock h3{font-family:var(--display);font-weight:800;font-size:22px;margin:0 0 3px;letter-spacing:-.01em}
+.dirblock .sub{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin-bottom:6px}
+.dirblock .owned{font-size:13px;color:var(--muted);margin-bottom:15px;max-width:70ch}
+.dirblock .owned b{color:var(--paper);font-weight:400}
+
+/* ---- taste profile ---- */
+.profile{background:var(--ink-2);border:1px solid var(--line);border-radius:6px;padding:20px;margin-bottom:24px}
+.profile h3{font-family:var(--display);font-weight:700;font-size:18px;margin:0 0 4px}
+.profile .row{display:flex;gap:10px;flex-wrap:wrap;align-items:baseline;margin-top:12px}
+.profile .k{font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);width:110px;flex:none}
+.profile .v{display:flex;gap:5px;flex-wrap:wrap;flex:1}
+
+/* ---- rate tab ---- */
+.ratecard{
+  display:grid;grid-template-columns:150px 1fr;gap:24px;background:var(--ink-2);
+  border:1px solid var(--line);border-radius:6px;padding:22px;margin-bottom:16px;
+}
+.ratecard img{width:150px;aspect-ratio:2/3;object-fit:cover;border-radius:3px;background:var(--ink-3)}
+.ratecard h2{font-family:var(--display);font-weight:800;font-size:28px;margin:0 0 4px;line-height:1.08;letter-spacing:-.02em}
+.queuebar{
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:18px;
+  font-family:var(--mono);font-size:11px;color:var(--muted);letter-spacing:.05em;
+}
+.queuebar .track{flex:1;min-width:120px;height:3px;background:var(--ink-3);border-radius:2px;overflow:hidden}
+.queuebar .track i{display:block;height:100%;background:var(--marigold)}
+/* Every card the same height, whatever it happens to have to say. 1fr rows
+   in a grid of indefinite height all settle at the tallest row's content, so
+   this alone would only trade eighteen sizes for one large one — it works
+   because the text below is held to a fixed number of lines first. */
+.channelgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-top:18px;
+  grid-auto-rows:1fr}
+.channelcardwrap{display:flex;flex-direction:column}
+.channelcard{
+  position:relative;overflow:hidden;width:100%;display:block;text-align:left;
+  font:inherit;color:inherit;cursor:pointer;flex:1;
+  background:var(--ink-2);border:1px solid var(--line);border-radius:6px;padding:13px 15px;
+  transition:border-color .15s ease,transform .15s ease,box-shadow .15s ease;
+}
+.channelcard:hover,.channelcard:focus-visible{transform:translateY(-2px);box-shadow:0 8px 22px rgba(0,0,0,.45)}
+.channelcard:hover,.channelcard:focus-visible{border-color:var(--muted)}
+.channelcard:disabled{cursor:default}
+.channelhead{display:flex;align-items:center;gap:8px;margin-bottom:1px}
+.channelhead h3{font-family:var(--display);font-weight:700;font-size:15.5px;margin:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* The thing you came to the page for: which of these can I start from the
+   beginning. It's the same fact the line under the poster already states,
+   said again where the eye lands first — the point of a page of twenty-one
+   cards is being able to scan it, and "12m in" versus "starts in 6m" is too
+   fine a distinction to catch four rows down.
+
+   Empty on most cards and taking no width when it is, so a card with nothing
+   to flag is exactly the card it was. flex:none stops it being squeezed by a
+   long channel name; the name ellipsises instead, which is the right way
+   round when the name is already numbered. */
+.chflag{
+  font-family:var(--mono);font-size:9px;letter-spacing:.1em;white-space:nowrap;
+  margin-left:auto;flex:none;
+}
+.chflag:empty{display:none}
+.chflag{color:var(--teal)}
+/* Fixed height, not an empty box that collapses: filled and blank have to
+   measure the same or the two channels that rotate stand taller. */
+.featured{font-family:var(--mono);font-size:10px;color:var(--marigold);letter-spacing:.04em;
+  height:13px;line-height:13px;margin-bottom:5px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.channelbody{display:grid;grid-template-columns:58px 1fr;gap:10px}
+.channelbody img,.channelbody .noposter{width:58px;aspect-ratio:2/3;object-fit:cover;border-radius:3px;background:var(--ink-3)}
+/* min-width:0 or a grid child refuses to shrink below its content and the
+   ellipsis below never gets the chance to fire. */
+.channelbody > div{min-width:0}
+/* One line each, always. A title or an up-next long enough to wrap used to
+   make its card taller than its neighbours; the full text of both is a
+   hover away on the peek. */
+.channelbody h4{font-family:var(--display);font-weight:700;font-size:14px;margin:1px 0 3px;line-height:1.2;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.channelbody .libline{font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.channelbody .livenote{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;
+  -webkit-box-orient:vertical}
+.channelbody .progress{margin-top:9px}
+.channelcard .empty{font-size:12.5px;padding:4px 0 0}
+.watchlabel{
+  font-family:var(--mono);font-size:10px;letter-spacing:.1em;color:var(--marigold);margin-top:8px;
+}
+.livesignal{color:var(--rust);display:flex;align-items:center;justify-content:center;padding:14px!important}
+.livesignal svg{width:100%;height:100%}
+/* Every channel carries a hue of its own in --ch, so hovering one is a
+   different colour from hovering its neighbour and the eighteen stop being
+   one grey wall. It only ever colours what the hover reveals — the panel
+   behind the credits, the name on it, and the card's own edge. Saturation
+   stays low and lightness dark: a tint over the room's colour, not a repaint. */
+.channelcard{--ch:265}
+.channelcard:hover,.channelcard:focus-visible{border-color:hsl(var(--ch) 42% 42%)}
+.chpeek{
+  position:absolute;inset:0;padding:14px 16px;
+  background:linear-gradient(158deg,hsl(var(--ch) 34% 13%),hsl(var(--ch) 24% 7%));
+  display:flex;flex-direction:column;justify-content:center;gap:6px;
+  opacity:0;pointer-events:none;transition:opacity .14s ease;
+}
+.channelcard:hover .chpeek,.channelcard:focus-visible .chpeek{opacity:1}
+/* Only there when it has something to say, and over the peek when it does. */
+.chproblem{position:absolute;inset:0;background:rgba(6,5,9,.97);padding:12px 14px;
+  display:none;flex-direction:column;justify-content:center;z-index:2;overflow:auto}
+.chproblem:not(:empty){display:flex}
+.chproblem .notice{margin:0;padding:11px 13px}
+.chproblem .notice p{margin:0;font-size:12.5px;line-height:1.45}
+.chpeek h4{font-family:var(--display);font-weight:700;font-size:15px;margin:0 0 2px;line-height:1.2;
+  color:hsl(var(--ch) 58% 84%)}
+.chpeek .line{font-family:var(--mono);font-size:10.5px;color:hsl(var(--ch) 16% 68%);line-height:1.5}
+/* The poster comes back with the peek, smaller and out of the way in the
+   corner. Covering the whole face meant losing sight of what you were
+   hovering at the moment you started reading who's in it. */
+.chpeekart{position:absolute;top:12px;right:14px;width:42px;aspect-ratio:2/3;
+  object-fit:cover;border-radius:3px;
+  /* Sat flat on the tinted panel it reads as part of it. The ring and the
+     shadow put it back on top, which is where the eye expects a poster. */
+  box-shadow:0 3px 10px rgba(0,0,0,.5);outline:1px solid hsl(var(--ch) 24% 30%);
+  outline-offset:-1px}
+/* Room reserved for it, so a long name doesn't run underneath the picture.
+   Only when there's a picture — a channel whose poster is missing keeps the
+   full width for its text. */
+.chpeek.hasart{padding-right:66px}
+.toplists{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:20px}
+.toplist{background:var(--ink-2);border:1px solid var(--line);border-radius:6px;padding:18px 20px}
+.toplist h3{font-family:var(--display);font-weight:700;font-size:18px;margin:0 0 12px}
+.toprow{display:flex;align-items:center;gap:12px;padding:7px 0;border-bottom:1px solid var(--line)}
+.toprow:last-child{border-bottom:0}
+.toprow .pos{font-family:var(--mono);font-size:11px;color:var(--muted);width:22px;flex:none}
+.toprow .t{flex:1;font-size:14px;line-height:1.25}
+.toprow .t small{display:block;font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+.score{
+  font-family:var(--mono);font-size:12px;font-weight:700;padding:4px 9px;border-radius:2px;
+  background:hsl(var(--h) 64% 48%);color:#12100f;flex:none;border:0;cursor:pointer;
+}
+.score:hover{filter:brightness(1.12)}
+.toprow .rate{margin:0;flex:1}
+/* Anything that opens something when you click it. The poster and title on
+   the rate card, and every row of the top tens — all of which looked like
+   plain text until now, which is exactly why nobody clicked them. */
+.openable{cursor:pointer}
+.ratecard h2.openable:hover,.ratecard .openable:hover{color:var(--marigold)}
+.ratecard img.openable{transition:transform .15s ease,box-shadow .15s ease}
+.ratecard img.openable:hover{transform:translateY(-2px);box-shadow:0 10px 26px rgba(0,0,0,.5)}
+.toprow.openable{
+  margin:0 -8px;padding-left:8px;padding-right:8px;border-radius:4px;
+  transition:background .12s ease;
+}
+.toprow.openable:hover{background:var(--ink-3)}
+.toprow.openable:hover .t{color:var(--marigold)}
+/* Present but quiet, and brighter under the pointer — rather than hidden
+   until hover. Hiding it read better with ten rows on screen, but an
+   opacity-0 button is still in the tab order, so a keyboard would land on a
+   control nobody can see; revealing it on :focus only works while the
+   document itself has focus, which is not a thing to depend on. The show
+   sheet lists a PLAY on every episode row the same way, so this is the
+   pattern the app already uses for exactly this job. */
+.toprowplay{flex:none;opacity:.5;transition:opacity .12s ease}
+.toprow:hover .toprowplay,.toprowplay:focus{opacity:1}
+.toprowplay[disabled]{opacity:.25;cursor:default}
+.toprow .rate .lbl{max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* ---- library: posters first, words on demand ---- */
+/* The Films / TV / Favourites switcher. These were raw browser buttons —
+   Arial on a grey bevel in the middle of a dark app — because nothing ever
+   styled them. Built as a quieter sibling of the main tabs above: same
+   underline-when-selected idea, smaller and in the mono face so it reads as
+   a subdivision of the page rather than competing with the nav. */
+.subnav{display:flex;gap:4px;align-items:center;margin:2px 0 0}
+.subtab{
+  background:none;border:0;border-bottom:2px solid transparent;color:var(--muted);
+  font-family:var(--mono);font-size:11.5px;letter-spacing:.11em;text-transform:uppercase;
+  padding:9px 2px;margin-right:16px;cursor:pointer;transition:color .12s ease;
+}
+.subtab:hover{color:var(--paper)}
+.subtab[aria-selected="true"]{color:var(--marigold);border-bottom-color:var(--marigold)}
+.subtab .count{
+  font-size:10px;letter-spacing:.06em;color:var(--muted);margin-left:6px;opacity:.75;
+}
+.subtab[aria-selected="true"] .count{color:var(--marigold)}
+
+/* ---- continue where you left off ----
+   A strip across the top of the library, above the search row rather than
+   inside the scrolling grid: it answers "what was I watching" before you've
+   asked anything, and a thing you have to scroll to find is a thing you'd
+   have searched for instead. Four at most and one line of text each, so it
+   stays a strip — the grid underneath is the part that should grow. */
+.resumestrip{margin:0 0 6px}
+.resumehead{display:flex;align-items:baseline;gap:12px;margin-bottom:9px}
+.resumehead h2{
+  font-family:var(--display);font-weight:800;font-size:15px;margin:0;
+  letter-spacing:.01em;
+}
+/* Four that shrink, never four that wrap. auto-fit was letting them fall
+   onto a second row as the window narrowed, which doubles the strip's
+   height and takes every one of those pixels out of the tile grid below —
+   at the window's own minimum size that left the grid 29px tall. Titles
+   ellipsise instead, the way they already do on a channel card. */
+.resumerow{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.resumecard{
+  display:grid;grid-template-columns:38px minmax(0,1fr);gap:11px;align-items:center;
+  background:var(--ink-2);border:1px solid var(--line);border-radius:6px;
+  padding:9px 11px;cursor:pointer;text-align:left;color:inherit;font:inherit;
+  transition:border-color .15s ease,transform .15s ease,box-shadow .15s ease;
+}
+.resumecard:hover,.resumecard:focus-visible{
+  border-color:var(--marigold);transform:translateY(-2px);
+  box-shadow:0 8px 22px rgba(0,0,0,.45);
+}
+.resumecard img,.resumecard .noart{
+  width:38px;aspect-ratio:2/3;object-fit:cover;border-radius:3px;
+  background:var(--ink-3);display:block;
+}
+/* min-width:0 on the grid child, or the ellipsis below never gets a chance
+   to fire — a long title just widens the column instead. */
+.resumecard .what{min-width:0}
+.resumecard b{
+  display:block;font-family:var(--display);font-weight:700;font-size:13px;
+  line-height:1.2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.resumecard .where{
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.04em;color:var(--muted);
+  margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.resumecard .rbar{height:3px;background:var(--ink-3);border-radius:2px;overflow:hidden;margin-top:7px}
+.resumecard .rbar i{display:block;height:100%;background:var(--marigold)}
+.resumecard.busy{opacity:.55;cursor:default}
+
+/* Heading left, toolbar right, one line. The toolbar right-aligns and takes
+   whatever the heading doesn't, so it fills the space that used to be empty
+   and disappears into a full-width row of its own when the heading is gone
+   (searching, or nothing to resume). */
+.libtop{
+  display:flex;align-items:center;gap:24px;padding:12px 0 13px;
+  border-bottom:1px solid var(--line);margin-bottom:14px;
+}
+/* Heading over its one card on the left, toolbar filling the rest. The
+   strip lives INSIDE this block now, which is what makes the divider
+   ordinary again: one border on one element, under the whole header,
+   instead of a :has() rule handing it back and forth. */
+/* History rows: the buttons sit at the end of the row. Always THERE, just
+   quiet — a control you can only find by waving the mouse at it is not a
+   control, and the point of this page now is that you can act on what you
+   see. They come up to full strength on hover and focus. */
+.histacts{display:flex;gap:6px;align-items:center;flex:none;margin-left:12px;
+  opacity:.68;transition:opacity .13s ease}
+.histrow:hover .histacts,.histacts:focus-within{opacity:1}
+.histbtn{
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.07em;padding:6px 9px;
+  background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.14);
+  border-radius:4px;color:var(--bone);cursor:pointer;white-space:nowrap;
+}
+.histbtn:hover{background:rgba(255,255,255,.12)}
+.histbtn.play{background:var(--marigold);border-color:var(--marigold);color:#12100f}
+.histbtn.play:hover{filter:brightness(1.08)}
+.histbtn:disabled{opacity:.5;cursor:default}
+/* The other evenings, folded away until asked for. */
+.sitcount{
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;margin-top:4px;
+  background:none;border:0;padding:0;color:var(--muted);cursor:pointer;
+  border-bottom:1px dashed rgba(244,241,236,.25);
+}
+.sitcount:hover,.sitcount.on{color:var(--marigold);border-bottom-color:var(--marigold)}
+.sitlist{margin-top:7px;display:flex;flex-direction:column;gap:3px}
+.sitrow{
+  display:flex;gap:12px;font-family:var(--mono);font-size:10px;
+  color:var(--muted);padding-left:10px;border-left:1px solid var(--line);
+}
+.sitwhen{min-width:128px;color:rgba(244,241,236,.55)}
+@media (hover:none){.histacts{opacity:1}}
+.libtopleft{flex:none;display:flex;flex-direction:column;gap:8px;min-width:0}
+.libtopleft:empty,.libtopleft:not(:has(> :not(.hidden))){display:none}
+.resumehead{
+  display:flex;align-items:baseline;gap:9px;background:none;border:0;padding:0;
+  cursor:pointer;color:inherit;font:inherit;text-align:left;
+}
+.resumehead:hover h2,.resumehead:focus-visible h2{color:var(--marigold)}
+.resumehead:hover .resumechev{transform:translateX(2px)}
+.resumechev{font-size:15px;color:var(--muted);transition:transform .15s ease}
+.resumehead:hover .resumechev{color:var(--marigold)}
+.resumestrip{margin:0}
+/* One card. The four-wide grid was for a row of its own; beside the toolbar
+   there is room for exactly one, and the rest of that list is a click away
+   on History now. */
+.resumerow{display:block;width:262px;max-width:100%}
+.searchrow{display:flex;gap:10px;flex-wrap:wrap;align-items:center;
+  flex:1 1 auto;min-width:0;justify-content:flex-end}
+/* Labels sit BESIDE their control now rather than stacked above it. Stacked,
+   the three of them cost about 20px of height each for three words. */
+.searchbox{flex:1 1 210px;max-width:340px;min-width:150px;
+  display:flex;flex-direction:row;align-items:center;gap:8px}
+.searchbox span{font-family:var(--mono);font-size:10px;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--muted);flex:none}
+/* Scoped to the toolbar: label.f is stacked everywhere else in the app and
+   should stay that way — only the library's own row needs to be one line. */
+.searchrow label.f{flex-direction:row;align-items:center;gap:7px;flex:none}
+.searchrow label.f span{white-space:nowrap}
+/* Capped rather than sized to the longest option ("Part way through"), which
+   was making both selects a third wider than the value they usually show. */
+.searchrow label.f select{padding-top:6px;padding-bottom:6px;font-size:13px;
+  max-width:118px}
+/* The input's placeholder already says "Title, director, actor or genre",
+   so the word SEARCH above it was 55px spent saying it twice. Gone from the
+   page, kept for anything reading the page aloud. */
+.searchbox > span{position:absolute;width:1px;height:1px;overflow:hidden;
+  clip:rect(0 0 0 0);white-space:nowrap}
+/* Below this the card and the toolbar can't share a line comfortably; the
+   card gives way, since the toolbar is the thing you came to the Library
+   to use. History still has the list. */
+@media (max-width:920px){
+  .libtopleft{display:none}
+}
+/* A narrow window can't hold the whole toolbar on one line, and a wrapped
+   toolbar costs 41px of poster grid. The count is the piece to give up: the
+   pager under the grid already says "1-120 OF 125", so nothing is lost but
+   the repetition, and the search box gets to shrink further before anything
+   has to fold. */
+/* The card takes ~262px off the toolbar's line, so the count has to give
+   way earlier than it did — the pager under the grid already reads
+   "1-120 of 125", and a wrapped toolbar costs 41px of poster grid to keep
+   a number that is on screen twice. */
+@media (max-width:1340px){
+  .searchrow .libcount{display:none}
+}
+@media (max-width:1000px){
+  .searchbox{flex:1 1 150px}
+}
+/* The same four, with the queue docked. The page is then 300px narrower
+   than the window, and each of these is about the page: a toolbar in an
+   800px page must behave the same whether the other 300px of window is a
+   queue or isn't there at all. Mirrored at +300 rather than rewritten as
+   container queries, because the page column stops growing at 1120px and a
+   container rule would change what happens on every window wider than that. */
+@media (max-width:1220px){ body.queue-docked .libtopleft{display:none} }
+@media (max-width:1640px){ body.queue-docked .searchrow .libcount{display:none} }
+@media (max-width:1300px){ body.queue-docked .searchbox{flex:1 1 150px} }
+.searchbox input{
+  background:var(--ink-2);border:1px solid var(--line);color:var(--paper);
+  border-radius:3px;padding:7px 11px;font-family:var(--body);font-size:14px;
+  width:100%;min-width:0;
+}
+.searchbox input::placeholder{color:var(--muted)}
+.libcount{font-family:var(--mono);font-size:11px;color:var(--muted);letter-spacing:.05em;
+  flex:none;white-space:nowrap}
+
+/* Re-scan, kept deliberately quiet: no border, no label, the same weight as
+   the count it sits beside. It's a thing you reach for after moving files,
+   not something the room should be arranged around. */
+.libscanmsg{font-family:var(--mono);font-size:11px;color:var(--muted);letter-spacing:.05em}
+.libscanmsg:empty{display:none}
+.libscanmsg.good{color:var(--teal)}
+.libscanmsg.bad{color:var(--rust)}
+.librefresh{
+  background:none;border:0;color:var(--muted);cursor:pointer;padding:6px;
+  margin-bottom:4px;border-radius:3px;line-height:0;
+}
+.librefresh:hover{color:var(--paper)}
+.librefresh:disabled{cursor:default}
+.librefresh svg{width:15px;height:15px;display:block}
+.librefresh.spinning{color:var(--marigold)}
+.librefresh.spinning svg{animation:spin 1.1s linear infinite;transform-origin:50% 50%}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ---- selection mode: tick posters, send them to a drive ----
+   The tray sits between the grid and the pager and only exists while you're
+   selecting. It is the docking station's front end brought to where the
+   posters are: same selection, same copy engine, same drive list. */
+.libselect[aria-pressed="true"]{background:rgba(224,163,62,.18);color:var(--marigold-2)}
+.seltray{
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  margin:12px 0 0;padding:12px 16px;border-radius:var(--r-card);
+  background-color:var(--surface);background-image:var(--sheen);box-shadow:var(--shadow-card);
+}
+.seltray .selcount{font-family:var(--display);font-weight:700;font-size:14px;flex:none}
+.seltray .seldrive{flex:none}
+.seltray .seldrive select{min-width:220px;padding:7px 10px}
+.seltray .play{padding:8px 18px;font-size:13px}
+.seltray .selstatus{flex-basis:100%;font-family:var(--mono);font-size:11px;color:var(--muted);letter-spacing:.04em}
+.seltray .selstatus:empty{display:none}
+.seltray .selstatus .progress{margin-top:8px}
+.seltray .selstatus.bad{color:var(--rust)}
+.seltray .selstatus.good{color:var(--teal)}
+/* The tick lives in the poster's bottom-right corner, where nothing else is.
+   Hidden until selection mode, then a hollow ring; ticked, a marigold disc
+   with a check, and the whole tile gets a marigold ring of its own. */
+.tile .tick{
+  position:absolute;right:8px;bottom:52px;width:24px;height:24px;border-radius:50%;
+  border:2px solid rgba(236,230,220,.85);background:rgba(6,5,9,.55);
+  display:none;align-items:center;justify-content:center;
+  font-size:14px;line-height:1;color:#1a1206;pointer-events:none;
+  box-shadow:0 2px 8px rgba(0,0,0,.6);
+}
+#view-library.selecting .tile .tick{display:flex}
+#view-library.selecting .tile{cursor:copy}
+#view-library.selecting .tile .peek{display:none}
+.tile.picked .tick{background:var(--marigold);border-color:var(--marigold-2)}
+.tile.picked .tick::before{content:"\2713"}
+/* Is it on the chosen drive? A mark in the poster's top-left corner that
+   mirrors your rating in the top-right — same face, size and padding, so the
+   two read as a pair: what you think of it, and whether it's already there.
+   Blue tick on the drive, red cross not, amber count for a show that's only
+   partly across. Every poster gets one, so a missing mark never has to mean
+   "no". Only while selecting; the watchlist bookmark that normally lives in
+   that corner steps aside until you're done. */
+.tile .drivebadge{
+  position:absolute;top:0;left:0;display:none;z-index:2;
+  font-family:var(--mono);font-size:10.5px;font-weight:700;line-height:inherit;
+  padding:3px 7px;border-bottom-right-radius:9px;
+  box-shadow:0 2px 8px rgba(0,0,0,.45);pointer-events:none;white-space:nowrap;
+}
+#view-library.selecting .tile.ondrive .drivebadge,
+#view-library.selecting .tile.offdrive .drivebadge,
+#view-library.selecting .tile.partdrive .drivebadge{display:block}
+#view-library.selecting .tile.ondrive .drivebadge{background:hsl(213 82% 54%);color:#fff}
+#view-library.selecting .tile.offdrive .drivebadge{background:hsl(2 74% 52%);color:#fff}
+#view-library.selecting .tile.partdrive .drivebadge{background:var(--marigold);color:#1a1206}
+#view-library.selecting .tile .watchbadge{display:none}
+.tile.picked{box-shadow:0 0 0 2px var(--marigold),var(--shadow-card)}
+.tile.picked:hover{box-shadow:0 0 0 2px var(--marigold-2),var(--shadow-lift)}
+
+.pager{display:flex;align-items:center;justify-content:center;gap:18px;margin-top:28px}
+.pager span{font-family:var(--mono);font-size:11.5px;color:var(--muted);letter-spacing:.05em}
+.pager button:disabled{opacity:.35;cursor:default}
+.pager button:disabled:hover{color:var(--muted);border-color:var(--line)}
+
+.tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:14px}
+.tile{
+  position:relative;border-radius:6px;overflow:hidden;background:var(--ink-2);
+  border:1px solid var(--line);cursor:pointer;padding:0;text-align:left;color:inherit;
+  display:block;
+  transition:border-color .15s ease,transform .15s ease,box-shadow .15s ease;
+}
+.tile .art{width:100%;aspect-ratio:2/3;object-fit:cover;display:block;background:var(--ink-3);
+  transition:transform .25s ease}
+/* The poster leans in with the lift. Two percent — an answer, not a zoom. */
+.tile:hover .art,.tile:focus-visible .art{transform:scale(1.03)}
+.tile .blank{
+  width:100%;aspect-ratio:2/3;background:var(--ink-3);display:flex;align-items:center;
+  justify-content:center;padding:14px;font-family:var(--display);font-weight:600;
+  font-size:15px;color:var(--muted);text-align:center;line-height:1.2;
+}
+.tile .cap{padding:8px 9px 10px;position:relative}
+.tile .cap b{display:block;font-family:var(--display);font-weight:700;font-size:13.5px;
+  line-height:1.2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tile .cap small{font-family:var(--mono);font-size:10px;color:var(--muted)}
+/* The lift is 2px and the shadow does the rest — enough that the poster
+   under the pointer answers, not so much that the grid churns. */
+.tile:hover,.tile:focus-visible{
+  border-color:var(--muted);transform:translateY(-2px);
+  box-shadow:0 10px 26px rgba(0,0,0,.5);
+}
+
+/* the hover sheet — only appears when you want it */
+.tile .peek{
+  position:absolute;inset:0;background:rgba(6,5,9,.95);padding:13px;
+  display:flex;flex-direction:column;gap:7px;opacity:0;transition:opacity .14s ease;
+  pointer-events:none;overflow:hidden;
+}
+.tile:hover .peek,.tile:focus-visible .peek{opacity:1}
+/* The overlay itself stays click-through, so hovering never gets stuck on a
+   dead layer — but the two toggles in it have to take clicks, or they land
+   on the tile underneath and open the detail sheet instead of doing what
+   they say. Only while the overlay is actually showing, so an invisible
+   button can never swallow a click. */
+.tile:hover .peek .watchtoggle,.tile:focus-visible .peek .watchtoggle,
+.tile:hover .peek .favtoggle,.tile:focus-visible .peek .favtoggle{pointer-events:auto}
+.peek h4{font-family:var(--display);font-weight:700;font-size:15px;margin:0;line-height:1.15}
+.peek .line{font-family:var(--mono);font-size:10px;color:var(--muted);letter-spacing:.03em}
+.peek .blurb{font-size:12px;color:var(--paper);line-height:1.35;overflow:hidden;flex:1}
+.peek .foot{display:flex;gap:6px;flex-wrap:wrap;margin-top:auto}
+
+/* Corners: what the world thinks on the left, what you think on the right.
+   Progress is a bar rather than a badge, and it's the only state shown at
+   all — it's the only thing the app has actually observed. */
+.mine{
+  font-family:var(--mono);font-size:10.5px;font-weight:700;
+  padding:3px 7px;border-bottom-left-radius:4px;
+  background:hsl(var(--h) 64% 48%);color:#12100f;
+}
+.bar{
+  position:absolute;left:0;right:0;height:3px;background:rgba(6,5,9,.7);
+}
+.bar i{display:block;height:100%;background:var(--marigold)}
+.unknown{
+  position:absolute;bottom:0;left:0;right:0;font-family:var(--mono);font-size:9px;
+  letter-spacing:.08em;padding:3px 7px;background:rgba(194,89,60,.9);color:#1a0f0b;
+  text-align:center;
+}
+/* Carried over from another device but not on this one. Desaturated rather
+   than dimmed alone: at a glance across a wall of tiles, colour reads faster
+   than brightness, and a dimmed poster just looks like bad artwork. Still
+   legible on purpose — the point is to browse what you own, wherever it is. */
+.tile.elsewhere .art{filter:grayscale(1) brightness(.62);}
+.tile.elsewhere .blank{opacity:.5;}
+.tile.elsewhere .cap b{color:rgba(244,241,236,.62);}
+.tile.elsewhere .cap small{color:rgba(244,241,236,.38);}
+.tile.elsewhere{cursor:default;}
+.tile.elsewhere:hover .art{filter:grayscale(.82) brightness(.72);}
+.elsewhereline{color:var(--marigold);opacity:.85;}
+/* The picker covers everything below the title bar. Not the bar itself —
+   being unable to close a window because nobody has been chosen yet is the
+   sort of trap a front door should not have. */
+.picker{
+  position:fixed;left:0;right:0;top:34px;bottom:0;z-index:60;
+  background:var(--ink);display:flex;align-items:center;justify-content:center;
+  overflow:auto;padding:24px;
+}
+.pickerinner{text-align:center;max-width:680px;width:100%}
+.pickerlogo{width:74px;height:74px;border-radius:16px;margin-bottom:14px}
+.pickertitle{font-size:26px;letter-spacing:.01em;margin:0 0 4px}
+.pickerdevice{font-family:var(--mono);font-size:11px;letter-spacing:.08em;
+  color:rgba(244,241,236,.42);margin:0 0 26px;text-transform:uppercase}
+.devicename{
+  background:none;border:none;border-bottom:1px dashed rgba(244,241,236,.3);
+  color:rgba(244,241,236,.72);font:inherit;cursor:pointer;padding:0 1px;
+}
+.devicename:hover{color:var(--marigold);border-bottom-color:var(--marigold)}
+.pickerlist{display:flex;flex-wrap:wrap;gap:18px;justify-content:center;margin-bottom:22px}
+.pickerface{
+  background:none;border:none;cursor:pointer;display:flex;flex-direction:column;
+  align-items:center;gap:9px;padding:6px;border-radius:10px;
+}
+.pickerface:hover{background:rgba(255,255,255,.04)}
+.pickeravatar{
+  width:92px;height:92px;border-radius:12px;display:flex;align-items:center;
+  justify-content:center;font-size:34px;font-weight:600;color:#12100f;
+  border:2px solid transparent;
+}
+.pickerface:hover .pickeravatar{border-color:rgba(244,241,236,.5)}
+.pickerface.active .pickeravatar{border-color:var(--marigold)}
+.pickername{font-size:13px;color:rgba(244,241,236,.78)}
+.pickeredit{font-family:var(--mono);font-size:9px;letter-spacing:.07em;
+  color:rgba(244,241,236,.34)}
+.pickerface.add .pickeravatar{
+  background:none;border:2px dashed rgba(244,241,236,.22);
+  color:rgba(244,241,236,.42);font-size:30px;font-weight:300;
+}
+.pickerform{max-width:330px;margin:0 auto 18px;text-align:left}
+.pickerinput{
+  width:100%;padding:9px 11px;background:rgba(255,255,255,.05);
+  border:1px solid rgba(255,255,255,.13);border-radius:6px;
+  color:var(--bone);font:inherit;margin-bottom:11px;
+}
+.pickerinput:focus{outline:none;border-color:var(--marigold)}
+.pickeraccents{display:flex;gap:8px;margin-bottom:13px}
+.pickerswatch{width:25px;height:25px;border-radius:50%;border:2px solid transparent;cursor:pointer}
+.pickerswatch.on{border-color:var(--bone)}
+.pickerformrow{display:flex;gap:8px}
+.pickerbtn{
+  font-family:var(--mono);font-size:10px;letter-spacing:.08em;padding:8px 14px;
+  background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.14);
+  border-radius:5px;color:var(--bone);cursor:pointer;
+}
+.pickerbtn:hover{background:rgba(255,255,255,.11)}
+.pickerbtn.primary{background:var(--marigold);border-color:var(--marigold);color:#12100f}
+.pickerbtn.danger{margin-left:auto;color:#d9836a;border-color:rgba(217,131,106,.35)}
+.pickerskip{
+  display:inline-flex;align-items:center;gap:7px;font-size:12px;
+  color:rgba(244,241,236,.45);cursor:pointer;
+}
+.dupes{
+  position:fixed;left:0;right:0;top:34px;bottom:0;z-index:55;
+  background:rgba(6,5,9,.97);overflow:auto;padding:26px;
+}
+.dupesinner{max-width:860px;margin:0 auto}
+.dupeshead{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.dupeshead h2{margin:0;font-size:21px}
+.dupesnote{color:rgba(244,241,236,.45);font-size:12px;margin:0 0 22px;line-height:1.55}
+.dupegroup{
+  border:1px solid rgba(255,255,255,.09);border-radius:8px;padding:15px;
+  margin-bottom:15px;background:rgba(255,255,255,.02);
+}
+.dupetop{display:flex;gap:13px;align-items:flex-start;margin-bottom:11px}
+.dupeposter{width:48px;border-radius:4px;flex:none}
+.dupetitle{font-size:15px;margin:0 0 3px}
+.dupereason{font-size:11.5px;color:var(--marigold);opacity:.82;line-height:1.45}
+.dupereason.close{color:#d9836a}
+.dupefile{
+  display:flex;gap:11px;align-items:center;padding:9px 11px;border-radius:6px;
+  background:rgba(255,255,255,.03);margin-bottom:7px;cursor:pointer;
+  border:1px solid transparent;
+}
+.dupefile:hover{background:rgba(255,255,255,.06)}
+.dupefile.keep{border-color:var(--marigold);background:rgba(232,176,75,.07)}
+.dupefile input{flex:none;margin:0}
+.dupefileinfo{min-width:0;flex:1}
+.dupefilename{font-size:12px;word-break:break-all;line-height:1.4}
+.dupefilemeta{font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;
+  color:rgba(244,241,236,.4);margin-top:3px;text-transform:uppercase}
+.dupefilekept{font-family:var(--mono);font-size:9px;color:var(--marigold);flex:none}
+.dupefilegoes{font-family:var(--mono);font-size:9px;color:#d9836a;flex:none}
+.dupefile.going{opacity:.62}
+.dupeactions{display:flex;gap:8px;align-items:center;margin-top:11px;flex-wrap:wrap}
+.dupewhy{font-size:11px;color:rgba(244,241,236,.38);flex:1;min-width:180px}
+.pickerbtn:disabled{opacity:.36;cursor:not-allowed}
+.pickernote{
+  font-size:11px;color:rgba(244,241,236,.3);margin:16px auto 0;max-width:430px;
+  line-height:1.5;
+}
+.elsewherebadge{
+  position:absolute;bottom:0;left:0;right:0;font-family:var(--mono);font-size:9px;
+  letter-spacing:.08em;padding:3px 7px;background:rgba(6,5,9,.82);
+  color:rgba(244,241,236,.66);text-align:center;
+}
+.watchbadge{
+  position:absolute;top:0;left:0;padding:5px 8px 4px;border-bottom-right-radius:4px;
+  background:rgba(6,5,9,.86);color:var(--marigold);line-height:0;
+}
+.watchbadge .mark{width:12px;height:12px;display:block}
+/* The top-right corner is a stack: your rating as it always was, with the
+   favourite heart directly under it. Absolutely positioned so it sits OVER
+   the poster and adds no height — left in normal flow it made every rated
+   tile taller than its unrated neighbours and threw the grid out. */
+/* Centred, not right-aligned: the column shrink-wraps to the rating badge
+   (the wider of the two), which keeps that flush to the corner while the
+   heart centres beneath the number rather than hanging off its edge. */
+.tilecorner{
+  position:absolute;top:0;right:0;display:flex;flex-direction:column;
+  align-items:center;gap:4px;pointer-events:none;
+}
+.favbadge{
+  font-size:17px;line-height:1;padding:0;color:var(--rust);
+  /* Widened a little because the glyph reads narrow under the badge above
+     it. Stretched from its own centre so it stays centred while doing so. */
+  transform:scaleX(1.22);transform-origin:center;
+}
+.favtoggle{
+  background:none;border:1px solid var(--line);color:var(--muted);border-radius:3px;
+  font-family:var(--mono);font-size:10px;letter-spacing:.05em;padding:4px 8px;cursor:pointer;
+  align-self:flex-start;
+}
+.favtoggle.on{color:var(--rust);border-color:var(--rust)}
+.favtoggle:hover{color:var(--paper)}
+.watchtoggle{
+  background:none;border:1px solid var(--line);color:var(--muted);border-radius:3px;
+  font-family:var(--mono);font-size:10px;letter-spacing:.05em;padding:4px 8px;cursor:pointer;
+  align-self:flex-start;display:inline-flex;align-items:center;gap:6px;
+}
+.watchtoggle .mark{width:11px;height:11px;flex:none}
+.watchtoggle.on{color:var(--marigold);border-color:var(--marigold)}
+.watchtoggle:hover{color:var(--paper)}
+.tagline{font-family:var(--display);font-style:italic;color:var(--marigold);font-size:14px;margin:0 0 10px}
+
+/* The favourites treatment: wide art behind the title, faces on the names,
+   and the numbers TMDB actually knows. It only appears when the pictures are
+   on disk — which is to say, only for the things you've marked. */
+/* A person's page: portrait on the left, who they are on the right. */
+.personhead{display:flex;gap:22px;align-items:flex-start}
+.personhead .portrait{
+  width:150px;aspect-ratio:2/3;object-fit:cover;border-radius:3px;flex:none;
+  background:var(--ink-3);
+}
+.personhead .portrait.blank{border:1px solid var(--line)}
+.personhead h2{font-family:var(--display);font-weight:800;font-size:28px;margin:0 0 4px;
+  line-height:1.1;letter-spacing:-.02em}
+
+.factstrip{
+  display:flex;flex-wrap:wrap;gap:0 26px;padding:14px 0 4px;margin-top:16px;
+  border-top:1px solid var(--line);
+}
+.fact{display:flex;flex-direction:column;gap:3px;padding:6px 0}
+.fact .k{font-family:var(--mono);font-size:9.5px;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--muted)}
+.fact .v{font-family:var(--display);font-weight:600;font-size:14px;color:var(--paper)}
+.castchip .face{
+  width:38px;height:38px;border-radius:50%;object-fit:cover;flex:none;
+  background:var(--ink);margin-right:10px;
+}
+.castchip .facegap{
+  width:38px;height:38px;border-radius:50%;flex:none;margin-right:10px;
+  background:var(--ink);border:1px solid var(--line);
+}
+.castchip.withface{flex-direction:row;align-items:center}
+.castchip.withface .who{display:flex;flex-direction:column;gap:2px;min-width:0;text-align:left}
+
+.castgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px}
+.castrow{display:flex;flex-direction:column}
+.castchip{
+  background:var(--ink-3);border:1px solid var(--line);border-radius:3px;color:var(--paper);
+  padding:8px 10px;text-align:left;cursor:pointer;display:flex;flex-direction:column;gap:2px;
+}
+.castchip:disabled{cursor:default;opacity:.6}
+.castchip:not(:disabled):hover{border-color:var(--muted)}
+.castchip b{font-family:var(--display);font-weight:600;font-size:13px;line-height:1.2}
+.castchip small{font-family:var(--mono);font-size:10px;color:var(--muted)}
+
+/* the detail sheet */
+.sheet{
+  /* Blur as well as dim: the library stays recognisably behind the sheet
+     instead of vanishing into a black curtain, which is what places the
+     sheet OVER the page rather than instead of it. */
+  position:fixed;inset:0;background:rgba(5,4,9,.66);z-index:50;overflow:auto;
+  padding:40px 20px;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+}
+/* minmax(0,1fr), not 1fr: a plain `1fr` is `minmax(auto,1fr)`, so the track
+   is never allowed narrower than its content's own minimum — and one flex
+   row in there, an episode with a long name, has a minimum of its whole
+   untruncated title. That widened the column past the panel's padding and
+   pushed the PLAY button and the right-hand cast tile out over the edge.
+   Capping the floor at 0 lets the row shrink and the ellipsis do its job. */
+.sheetbody{
+  max-width:820px;margin:0 auto;background:var(--ink-2);border:1px solid var(--line);
+  border-radius:10px;padding:26px;display:grid;grid-template-columns:180px minmax(0,1fr);gap:24px;
+  box-shadow:0 24px 70px rgba(0,0,0,.6);
+}
+.sheetbody img{width:180px;aspect-ratio:2/3;object-fit:cover;border-radius:3px;background:var(--ink-3)}
+.sheetbody h2{font-family:var(--display);font-weight:800;font-size:30px;margin:0 0 4px;
+  line-height:1.08;letter-spacing:-.02em}
+/* three separate cards, not one long one — the dimmed backdrop between them
+   is the point, so scrolling past a film's cast still looks like a stack
+   of things sitting over the library, not a single sealed page. Main runs
+   the full width up top; cast and similar split the row below it in half,
+   so neither needs its own scroll to be seen. */
+.sheetstack{
+  max-width:920px;margin:0 auto;display:grid;
+  grid-template-columns:1fr 1fr;gap:18px;align-items:start;
+}
+/* A person's page reads top to bottom rather than as two columns — their
+   details, then everything of theirs you own underneath. */
+.sheetcolumn{max-width:920px;margin:0 auto;display:flex;flex-direction:column;gap:18px}
+.sheetpanel{
+  position:relative;background:var(--ink-2);border:1px solid var(--line);
+  border-radius:10px;padding:26px;box-shadow:0 24px 70px rgba(0,0,0,.6);
+}
+.sheetpanel.main{grid-column:1 / -1;display:grid;grid-template-columns:180px minmax(0,1fr);gap:24px}
+.sheetpanel.main img{width:180px;aspect-ratio:2/3;object-fit:cover;border-radius:3px;background:var(--ink-3)}
+.sheetpanel h2{font-family:var(--display);font-weight:800;font-size:30px;margin:0 0 4px;
+  line-height:1.08;letter-spacing:-.02em}
+.simgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:12px}
+.simcard{
+  background:var(--ink-3);border:1px solid var(--line);border-radius:3px;overflow:hidden;
+  cursor:pointer;padding:0;text-align:left;color:inherit;display:block;
+}
+.simcard:hover{border-color:var(--muted)}
+.simcard img{width:100%;aspect-ratio:2/3;object-fit:cover;display:block;background:var(--ink-3)}
+.simcard .noposter{width:100%;aspect-ratio:2/3;border-radius:0}
+.simcap{padding:6px 8px}
+.simcap b{display:block;font-family:var(--display);font-weight:600;font-size:12px;line-height:1.25;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.simcap small{font-family:var(--mono);font-size:9.5px;color:var(--muted)}
+.closex{
+  position:absolute;top:14px;right:16px;background:none;border:0;color:var(--muted);
+  font-family:var(--mono);font-size:12px;cursor:pointer;letter-spacing:.08em;
+}
+.closex:hover{color:var(--paper)}
+.seasonhead{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--muted);margin:16px 0 6px}
+.eprow{display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--line)}
+.eprow:last-child{border-bottom:0}
+.eprow .code{font-family:var(--mono);font-size:11px;color:var(--muted);width:56px;flex:none}
+.eprow .name{flex:1;min-width:0;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* The title is the only part that may give ground. Everything else is a
+   fixed thing whose whole job is to be readable. */
+.eprow .libline{flex:none}
+.eprow .iconbtn{flex:none}
+.eprow.seen .name{color:var(--muted)}
+.eprow.next .code{color:var(--marigold)}
+
+/* ---- picking a season ----
+   The Simpsons alone is 114 episodes, and stacking every season made a
+   5,700px sheet — scrolling used as navigation, which is what scrolling is
+   worst at. One season shows at a time and this bar is the way between
+   them. It carries how far through each season you are, so the bar answers
+   "where was I" without opening anything. */
+.seasonpick{
+  display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;
+  margin:22px 0 10px;padding-top:16px;border-top:1px solid var(--line);
+}
+.seasonpick .seasonhead{margin:0}
+.seasonpick .upto{font-family:var(--mono);font-size:10.5px;color:var(--marigold);
+  letter-spacing:.04em;margin-left:auto}
+.seasonbar{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:4px}
+.seasontab{
+  background:none;border:1px solid var(--line);border-radius:3px;color:var(--muted);
+  font-family:var(--mono);font-size:11px;letter-spacing:.05em;padding:5px 8px;
+  cursor:pointer;display:flex;align-items:baseline;gap:6px;
+}
+.seasontab:hover{color:var(--paper);border-color:var(--muted)}
+.seasontab[aria-selected="true"]{
+  color:var(--paper);border-color:var(--marigold);background:var(--ink-3);
+}
+/* Two marks rather than a count, because a count needs the total beside it
+   to mean anything: a dot for the season you're in the middle of, a tick for
+   one you've finished. A season not started carries neither. */
+.seasontab .flag{font-size:10px;color:var(--muted)}
+.seasontab.part .flag{color:var(--marigold)}
+.seasontab.done .flag{color:var(--teal)}
+.seasontab.done:not([aria-selected="true"]){color:var(--muted)}
+.seasoncount{font-family:var(--mono);font-size:10px;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--muted);margin:0 0 4px}
+
+/* The "are you still watching?" question. Above the sheets and everything
+   else, because it is the one thing in the app that is waiting on you
+   rather than the other way round. */
+#stillthere{
+  position:fixed;inset:0;z-index:90;display:grid;place-items:center;padding:24px;
+  background:rgba(5,4,9,.84);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+}
+.askcard{
+  width:min(520px,100%);background:var(--ink-2);border:1px solid var(--line);
+  border-radius:10px;padding:30px 32px;box-shadow:0 30px 90px rgba(0,0,0,.7);
+}
+.askcard h2{font-family:var(--display);font-weight:800;font-size:30px;
+  margin:0 0 10px;letter-spacing:-.02em;line-height:1.1}
+.askcard p{margin:0 0 10px;color:var(--muted);font-size:14px;line-height:1.5}
+.askcard p b{color:var(--paper);font-weight:600}
+.askrow{display:flex;gap:10px;margin-top:18px;flex-wrap:wrap}
+.asktimer{margin-top:14px;font-family:var(--mono);font-size:11.5px;
+  letter-spacing:.06em;color:var(--muted)}
+
+/* ---- states ---- */
+.notice{
+  border:1px solid var(--line);border-left:3px solid var(--marigold);background:var(--ink-2);
+  border-radius:3px;padding:16px 18px;margin:18px 0;
+}
+.notice.bad{border-left-color:var(--rust)}
+.notice h3{font-family:var(--display);font-weight:700;font-size:17px;margin:0 0 6px}
+.notice p{margin:0 0 8px;color:var(--muted);font-size:14px}
+.notice code{font-family:var(--mono);font-size:12.5px;color:var(--paper);background:var(--ink-3);padding:1px 5px;border-radius:2px}
+.progress{height:3px;background:var(--ink-3);border-radius:2px;overflow:hidden;margin-top:12px}
+.progress i{display:block;height:100%;background:var(--marigold);transition:width .4s ease}
+.empty{color:var(--muted);font-size:14px;padding:12px 0}
+/* Waiting on its replacement. It keeps its place and its size — only the
+   ink fades — so nothing below it moves while the swap happens. Clicks are
+   off because what's under the pointer is on its way out. */
+.swapping{opacity:.4;pointer-events:none;transition:opacity .1s ease}
+.hidden{display:none!important}
+/* The sorter's before-and-after lists. One line per release, its
+   destination hanging off the end in the quiet face. */
+.sortlist{display:flex;flex-direction:column;gap:4px;margin:6px 0 10px}
+.sortlist > div{
+  font-size:12.5px;color:var(--paper);display:flex;gap:10px;flex-wrap:wrap;
+  align-items:baseline;line-height:1.4;
+}
+.sortlist > div > b{font-weight:600;word-break:break-all}
+.sortlist > div > span{font-family:var(--mono);font-size:11px;color:var(--muted)}
+.sortlist.warn > div{color:var(--rust)}
+.dismiss{
+  background:none;border:0;color:var(--muted);font-family:var(--mono);font-size:10.5px;
+  cursor:pointer;letter-spacing:.06em;padding:4px 6px;
+}
+.dismiss:hover{color:var(--rust)}
+.toggle{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);cursor:pointer}
+input[type=range]{
+  -webkit-appearance:none;appearance:none;background:transparent;width:100%;margin:6px 0 0;
+}
+input[type=range]::-webkit-slider-runnable-track{height:3px;background:var(--ink-3);border-radius:2px}
+input[type=range]::-moz-range-track{height:3px;background:var(--ink-3);border-radius:2px}
+input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none;width:15px;height:15px;border-radius:50%;background:var(--marigold);
+  margin-top:-6px;cursor:pointer;
+}
+input[type=range]::-moz-range-thumb{
+  width:15px;height:15px;border:0;border-radius:50%;background:var(--marigold);cursor:pointer;
+}
+label.f span b{color:var(--marigold);font-weight:400;font-family:var(--mono)}
+/* A range with two ends, built from two ordinary sliders stacked on the same
+   spot — the browser has no such input and faking one with a div and mouse
+   maths gives up the keyboard, which this keeps.
+
+   The two inputs are invisible: their tracks are transparent and full height
+   so the thumbs sit centred, and only the thumbs answer the pointer, so a
+   click near the left handle grabs the left handle instead of whichever
+   input happens to be painted on top. What you can see — the rail and the
+   lit stretch between the handles — is drawn underneath by the two divs. */
+.yearrange{position:relative;width:196px;height:22px;margin-top:6px}
+.yearrange .rtrack,.yearrange .rfill{position:absolute;top:9px;height:3px;border-radius:2px}
+.yearrange .rtrack{left:0;right:0;background:var(--ink-3)}
+.yearrange .rfill{background:var(--marigold)}
+.yearrange input[type=range]{
+  position:absolute;left:0;top:0;width:100%;height:22px;margin:0;pointer-events:none;
+}
+.yearrange input[type=range]::-webkit-slider-runnable-track{height:22px;background:transparent}
+.yearrange input[type=range]::-moz-range-track{height:22px;background:transparent}
+.yearrange input[type=range]::-webkit-slider-thumb{margin-top:3.5px;pointer-events:auto}
+.yearrange input[type=range]::-moz-range-thumb{pointer-events:auto}
+/* Focus has to be visible on something with no visible box of its own. */
+.yearrange input[type=range]:focus-visible::-webkit-slider-thumb{box-shadow:0 0 0 3px rgba(224,163,62,.35)}
+.yearrange input[type=range]:focus-visible::-moz-range-thumb{box-shadow:0 0 0 3px rgba(224,163,62,.35)}
+.secfilters{display:flex;gap:18px;flex-wrap:wrap;align-items:flex-end;margin-bottom:18px}
+.settings{background:var(--ink-2);border:1px solid var(--line);border-radius:6px;padding:20px;margin-top:20px}
+.settings h3{font-family:var(--display);font-size:17px;margin:0 0 4px}
+.fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:14px 0}
+.fields input{background:var(--ink);border:1px solid var(--line);color:var(--paper);border-radius:3px;padding:8px 10px;font-family:var(--body);font-size:14px;width:100%}
+.fields label{font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);display:block;margin-bottom:5px}
+/* ---- docking station: a checklist rather than the poster grid the
+   Library uses — there's no room here for tiles, and ticking forty of them
+   wants a list you can scan, not a wall you have to hunt across. */
+.docklist{max-height:340px;overflow-y:auto;margin-top:6px;border-top:1px solid var(--line)}
+.dockrow{display:flex;align-items:center;gap:12px;padding:8px 2px;border-bottom:1px solid var(--line);cursor:pointer}
+.dockrow:hover{background:var(--ink-3)}
+.dockrow input[type=checkbox]{flex:none;width:16px;height:16px;accent-color:var(--marigold)}
+.dockrow .t{flex:1;min-width:0;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dockrow .t small{display:block;font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+select#dock_drive{background:var(--ink);border:1px solid var(--line);color:var(--paper);border-radius:3px;padding:8px 10px;font-family:var(--body);font-size:14px}
+
+#playingbar{
+  display:flex;align-items:center;gap:12px;background:var(--ink-2);border:1px solid var(--line);
+  border-left:3px solid var(--marigold);border-radius:6px;padding:9px 16px;margin-bottom:18px;
+}
+#playingbar img{width:30px;aspect-ratio:2/3;object-fit:cover;border-radius:2px;flex:none;background:var(--ink-3)}
+#playingbar .eyebrow{font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--marigold);margin-bottom:2px}
+#playingbar b{font-family:var(--display);font-weight:600;font-size:14.5px;color:var(--paper)}
+#playingbar span{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin-left:8px}
+#playingbar > div:last-child{flex:1;min-width:0}
+.playprogress{height:2px;background:var(--ink-3);border-radius:1px;overflow:hidden;margin-top:7px}
+.playprogress i{display:block;height:100%;background:var(--marigold);transition:width 1s linear}
+#playingbar .remotebtn{flex:none;align-self:center}
+.chtop{display:flex;justify-content:flex-end;gap:8px;padding-top:4px}
+
+.fixform{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
+.fixform input{
+  background:var(--ink);border:1px solid var(--line);color:var(--paper);border-radius:3px;
+  padding:7px 9px;font-family:var(--body);font-size:13px;
+}
+.fixform input.fixyear{width:80px}
+.fixform input.fixtitle{flex:1;min-width:160px}
+.fixform .msg{font-family:var(--mono);font-size:11px;color:var(--muted);width:100%}
+
+
+/* =====================================================================
+   THE FACELIFT
+   Everything below re-skins rules above it and wins by coming later at
+   the same specificity. Kept together so the whole look can be read — or
+   reverted — as one decision, rather than as forty edits that each made
+   sense on their own.
+   ===================================================================== */
+
+/* -- surfaces: elevation instead of outlines -------------------------- */
+.pick,.reason,.alt,.hubcard,.gap,.card,.coll,.dirblock,.profile,.ratecard,
+.channelcard,.toplist,.resumecard,.tile,.settings,#playingbar,.notice,
+.sheetbody,.sheetpanel,.simcard,.castchip{
+  background-color:var(--surface);background-image:var(--sheen);
+  border-color:transparent;border-radius:var(--r-card);box-shadow:var(--shadow-card);
+}
+/* The ones whose accent IS a border keep that one side. */
+.reason,.hubcard{border-top-color:var(--line)}
+.reason[data-kind="director"]{border-top-color:var(--rust)}
+.reason[data-kind="cast"]{border-top-color:var(--teal)}
+.reason[data-kind="themes"]{border-top-color:#8f6fd0}
+.reason[data-kind="reception"]{border-top-color:var(--marigold)}
+.reason[data-kind="series"]{border-top-color:#5b8dd6}
+.reason[data-kind="standout"]{border-top-color:#c98fb0}
+.hubcard[aria-selected="true"]{border-top-color:var(--marigold)}
+.hubcard.tv[aria-selected="true"]{border-top-color:var(--teal)}
+.hubcard.rust[aria-selected="true"]{border-top-color:var(--rust)}
+.notice,#playingbar{border-left-color:var(--marigold);border-radius:10px}
+.notice.bad{border-left-color:var(--rust)}
+.sheetbody,.sheetpanel{border-radius:var(--r-panel);box-shadow:var(--shadow-panel);overflow:hidden}
+.tile{border-radius:10px}
+.simcard,.castchip{border-radius:8px;box-shadow:none;background-image:none;background-color:rgba(255,255,255,.045)}
+
+/* Hover lifts by shadow and a faint edge, never by a grey line. */
+.hubcard:hover,.card:hover,.tile:hover,.tile:focus-visible,.resumecard:hover,
+.resumecard:focus-visible,.simcard:hover,.castchip:not(:disabled):hover{
+  border-color:rgba(255,255,255,.10);box-shadow:var(--shadow-lift);
+}
+.resumecard:hover,.resumecard:focus-visible{border-color:rgba(224,163,62,.45)}
+.channelcard:hover,.channelcard:focus-visible{box-shadow:var(--shadow-lift)}
+
+/* Rulers between rows and under headings: present, faint. */
+.sechead,.filters,.searchrow,.factstrip,.seasonpick,.histday,.docklist{border-color:var(--edge)}
+.toprow,.eprow,.histrow,.dockrow{border-bottom-color:var(--edge)}
+
+/* -- buttons -------------------------------------------------------------- */
+.play{
+  border-radius:999px;padding:10px 22px;
+  background:linear-gradient(180deg,#f6f1e8,var(--paper));
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.7),0 6px 18px rgba(0,0,0,.45);
+}
+.play:hover{filter:none;background:linear-gradient(180deg,#fff,#f0eae0)}
+/* A disabled primary still looked like the brightest thing on the screen —
+   ADD TO DRIVE with nothing ticked read as pressable. Faded, flat, and no
+   pointer, so the one action you can't take yet doesn't invite the click. */
+.play:disabled,.play:disabled:hover{
+  opacity:.38;cursor:default;box-shadow:none;background:linear-gradient(180deg,#f6f1e8,var(--paper));
+}
+.spin{
+  border-radius:999px;padding:10px 24px;
+  background:linear-gradient(180deg,var(--marigold-2),var(--marigold));
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.35),0 6px 20px rgba(224,163,62,.28);
+}
+.spin:hover{filter:none;box-shadow:inset 0 1px 0 rgba(255,255,255,.4),0 8px 26px rgba(224,163,62,.38)}
+.iconbtn,.spinback,.favtoggle,.watchtoggle,.seasontab{
+  background:rgba(255,255,255,.055);border-color:transparent;border-radius:var(--r-btn);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.04);
+}
+.iconbtn:hover,.spinback:hover:not(:disabled),.favtoggle:hover,.watchtoggle:hover,
+.seasontab:hover{background:rgba(255,255,255,.095);border-color:transparent;color:var(--paper)}
+.favtoggle.on{background:rgba(194,89,60,.16);color:#e8876a;border-color:transparent}
+.watchtoggle.on{background:rgba(224,163,62,.16);color:var(--marigold-2);border-color:transparent}
+.seasontab{border-radius:999px;padding:5px 11px}
+.seasontab[aria-selected="true"]{background:rgba(224,163,62,.18);color:var(--paper);border-color:transparent}
+.pager button:disabled:hover{background:rgba(255,255,255,.055);color:var(--muted)}
+.score{border-radius:7px;box-shadow:0 2px 8px rgba(0,0,0,.4)}
+.chip{border-radius:999px;padding:3px 8px;background:rgba(255,255,255,.05);border-color:transparent}
+.chip.strong{background:rgba(224,163,62,.14);color:var(--marigold-2)}
+.gap-top .tag{border-radius:999px;padding:3px 9px;background:rgba(194,89,60,.14);border-color:transparent}
+.closex{
+  border-radius:999px;padding:7px 12px;z-index:3;color:var(--paper);
+  background:rgba(6,5,9,.55);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+}
+.closex:hover{background:rgba(6,5,9,.8)}
+.notch{border-radius:4px}
+.notches.big .notch{border-radius:6px}
+.rate.prompt{border-radius:10px}
+
+/* -- inputs ----------------------------------------------------------------- */
+select,textarea,.searchbox input,.fields input,.fixform input,select#dock_drive{
+  background:rgba(255,255,255,.05);border:1px solid transparent;border-radius:var(--r-btn);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.04);transition:border-color .12s ease,box-shadow .12s ease;
+  color:var(--paper);
+}
+/* The opened list of a <select> is drawn by the browser, not the page, and it
+   will only carry an OPAQUE background across from the control. The tonal
+   fill above is translucent, so the list fell back to white — with cream
+   text on it. The options get their own solid colours, and color-scheme
+   tells the control to draw its native parts dark in the first place. */
+select{color-scheme:dark}
+select option{background-color:var(--surface-2);color:var(--paper)}
+select option:checked{background-color:rgba(224,163,62,.25)}
+select:focus,textarea:focus,.searchbox input:focus,.fields input:focus,.fixform input:focus{
+  outline:none;border-color:rgba(224,163,62,.55);box-shadow:0 0 0 3px rgba(224,163,62,.14);
+}
+.searchbox input{padding:11px 14px}
+
+/* -- progress: lit bars, not painted ones ------------------------------------ */
+.progress,.playprogress,.queuebar .track,.resumecard .rbar{border-radius:999px;background:rgba(255,255,255,.07)}
+.progress{height:4px}
+.progress i,.playprogress i,.queuebar .track i,.resumecard .rbar i,.bar i{
+  background:linear-gradient(90deg,#c98a2e,var(--marigold-2));
+  box-shadow:0 0 10px rgba(224,163,62,.45);border-radius:999px;
+}
+
+/* -- tiles: a poster, not a boxed poster ---------------------------------------- */
+.tile .cap{padding:9px 10px 11px}
+.watchbadge{border-bottom-right-radius:9px;background:rgba(6,5,9,.78);backdrop-filter:blur(6px)}
+.mine{border-bottom-left-radius:9px}
+
+/* -- channels: each card faintly its own colour at rest ---------------------------- */
+.channelcard{
+  background-image:linear-gradient(150deg,hsl(var(--ch) 32% 12% / .85),rgba(19,16,23,0) 62%),var(--sheen);
+}
+
+/* -- heroes: wide art behind the words --------------------------------------------- */
+.hero{
+  position:absolute;left:0;right:0;top:0;height:100%;z-index:0;pointer-events:none;
+  background-size:cover;background-position:center 22%;opacity:.42;
+  /* The words sit centre-right, over the brightest part of the frame, so the
+     picture is strongest along the top band behind the title and has faded
+     to the panel by the time the body copy starts. A pale, busy backdrop —
+     most anime art — is the case that decides this; a dark one would have
+     tolerated far more. */
+  -webkit-mask-image:linear-gradient(90deg,rgba(0,0,0,.25) 0%,rgba(0,0,0,.7) 30%,#000 55%),
+                     linear-gradient(180deg,#000 0%,rgba(0,0,0,.55) 46%,rgba(0,0,0,0) 100%);
+  -webkit-mask-composite:source-in;
+  mask-image:linear-gradient(90deg,rgba(0,0,0,.25) 0%,rgba(0,0,0,.7) 30%,#000 55%),
+             linear-gradient(180deg,#000 0%,rgba(0,0,0,.55) 46%,rgba(0,0,0,0) 100%);
+  mask-composite:intersect;
+}
+.pick.hashero,.sheetpanel.hashero,.sheetbody.hashero,.ratecard.hashero{position:relative;overflow:hidden}
+/* Everything but the picture comes forward — except the close button, which
+   is absolutely placed in the corner and must stay so; made relative it
+   became a grid item, took the poster's column, and shoved the whole sheet
+   one cell to the right. */
+.pick.hashero > :not(.hero):not(.closex),
+.sheetpanel.hashero > :not(.hero):not(.closex),
+.sheetbody.hashero > :not(.hero):not(.closex),
+.ratecard.hashero > :not(.hero){position:relative;z-index:1}
+.pick{padding:26px 28px;gap:30px;min-height:330px}
+.pick h2{font-size:40px;text-shadow:0 2px 18px rgba(0,0,0,.6)}
+.pick img.poster,.sheetbody img,.sheetpanel.main img,.ratecard img{
+  border-radius:8px;box-shadow:0 14px 34px rgba(0,0,0,.6),0 0 0 1px rgba(255,255,255,.06);
+}
+.pick .hero,.ratecard .hero{height:130%;opacity:.46;background-position:center 30%}
+.ratecard h2{text-shadow:0 2px 18px rgba(0,0,0,.6)}
+/* One size of card, whatever the film has to say. The height is the one the
+   longest description in the library needs at an ordinary window width —
+   measured, not guessed — so the rating notches and the buttons stop jumping
+   up and down the screen as you work through the queue. The body is a
+   column with the buttons pushed to its foot, so a short description leaves
+   its space above them rather than below. */
+.ratecard{min-height:var(--ratecard-h,540px);align-items:stretch}
+/* Measured across all 242 films and 46 shows: the longest description needs
+   534px on a card 960px wide or more and 573px at 740px. Keyed on the card's
+   own width, not the window's — the docked queue takes 300px off it. */
+#rate-out{container-type:inline-size}
+@container (max-width: 900px){ .ratecard{--ratecard-h:590px} }
+.ratebody{display:flex;flex-direction:column;min-width:0}
+/* The poster keeps its own shape at the top. Stretched to the card's full
+   height, object-fit cropped it to a sliver of the middle. */
+.ratecard > img,.ratecard > .noposter{align-self:start}
+.ratebody .rowbtns{margin-top:auto;padding-top:14px}
+.ratebody .plot{margin:0 0 14px;line-height:1.55}
+/* The studio's one-liner, as a tile of its own inside the card: set apart
+   from the description because it isn't one — it's the poster talking. */
+.ratetag{
+  align-self:flex-start;max-width:100%;margin:6px 0 12px;padding:9px 15px;
+  border-radius:10px;background:rgba(6,5,9,.58);
+  backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+  box-shadow:0 0 0 1px rgba(255,255,255,.07);
+  font-family:var(--display);font-weight:700;font-size:15.5px;letter-spacing:-.01em;
+  color:var(--paper);line-height:1.3;
+}
+.ratetag::before{content:'\201C';color:var(--marigold);margin-right:2px}
+.ratetag::after{content:'\201D';color:var(--marigold);margin-left:1px}
+.sheetbody.hashero,.sheetpanel.main.hashero{padding-top:34px}
+.sheetbody .hero,.sheetpanel.main .hero{height:270px;opacity:.44;background-position:center 25%}
+.sheetbody h2,.sheetpanel h2{font-size:34px;text-shadow:0 2px 18px rgba(0,0,0,.6)}
+/* Copy that shares a panel with a picture gets a halo, and the muted lines
+   step up a shade — grey on a bright frame was the one thing that didn't
+   survive the sheets getting their art. */
+.hashero .subline,.hashero .plot,.hashero .why,.hashero .tagline,.hashero .meta,
+.hashero .rate .lbl,.hashero .rate .val{text-shadow:0 1px 12px rgba(0,0,0,.9),0 0 2px rgba(0,0,0,.85)}
+.hashero .subline,.hashero .plot,.hashero .meta{color:#cfc8d8}
+
+/* -- a drive, shown like the Library ----------------------------------------------- */
+.drvsummary{font-family:var(--mono);font-size:11px;letter-spacing:.05em;color:var(--muted);
+  margin:0 0 20px;line-height:1.8}
+.drvsummary b{color:var(--paper);font-weight:400}
+.drvsummary .warn{color:#e8876a}
+.drvsection{margin-top:30px}
+.drvsection:first-child{margin-top:0}
+.drvsearch{min-width:200px}
+.drvonly{align-self:flex-end;padding-bottom:10px}
+.drvreread{align-self:flex-end;margin-bottom:2px}
+/* Nothing to open for a file the library has never heard of, so it doesn't
+   pretend: no lift, no pointer. */
+.tile.drivetile.inert{cursor:default}
+.tile.drivetile.inert:hover{transform:none;box-shadow:var(--shadow-card)}
+.tile.drivetile.inert:hover .art{transform:none}
+.tile.drivetile.notlib .blank{background:linear-gradient(160deg,var(--surface-2),var(--ink-3));color:var(--paper)}
+.tile .notlibbadge{
+  position:absolute;left:8px;top:8px;font-family:var(--mono);font-size:8.5px;
+  letter-spacing:.08em;font-weight:700;padding:3px 7px;border-radius:999px;
+  background:rgba(6,5,9,.8);color:#e8876a;box-shadow:0 2px 8px rgba(0,0,0,.6);pointer-events:none;
+}
+
+@media (max-width:720px){
+  .pick,.ratecard{grid-template-columns:1fr}
+  .pick img.poster,.noposter,.ratecard img{width:130px}
+  .pick h2{font-size:26px}
+  .sechead p{display:none}
+  .notches.big .notch{width:26px;height:34px}
+  /* Narrower than the app window ever gets, so this is the browser-tab
+     case: two rows of two beats four unreadable slivers. */
+  .resumerow{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+/* A short window can't afford it. The strip is 109px and a row of tiles is
+   about 240 — below this there isn't room for both, and the grid is what
+   the Library tab is for. It comes back the moment the window grows. */
+@media (max-height:700px){
+  /* The heading moved out of the strip and onto the toolbar line, so it has
+     to be told about this too — left behind it kept its 227px and pushed the
+     toolbar onto a second row, costing more height than the strip saved. */
+  /* The whole left-hand column goes: on a short window the grid is what the
+     Library tab is for. The divider stays put on .libtop either way, which
+     is the point of having moved the strip inside it. */
+  .libtopleft{display:none}
+}
+/* ---- recommendations, reworked ----
+   The hub is a single row of compact counters rather than a grid of
+   panels: seven of them in a 1072px column means small, and small means
+   the number and the name are the whole card. The action bar sits above
+   the hub so the page starts with what to press. */
+.recbar{
+  display:flex;align-items:center;gap:18px;flex-wrap:wrap;
+  padding:2px 0 14px;margin-bottom:12px;border-bottom:1px solid var(--edge);
+}
+.recbar .play{padding:9px 18px}
+.recbar .scanage{margin:0;flex:1 1 auto}
+.recbar .recscore{min-width:190px}
+.recbar .recscore span b{color:var(--paper);margin-left:4px}
+.recbar .toggle{white-space:nowrap}
+#view-library > #view-upnext .hubgrid{
+  display:flex;flex-wrap:wrap;gap:8px;margin-bottom:22px;
+}
+/* Seven across at the column's full 1072px is 146px each; below about
+   900px they wrap to a second row rather than shrink to unreadable. */
+#view-library > #view-upnext .hubcard{
+  flex:1 1 118px;min-width:118px;padding:11px 13px 12px;gap:2px;
+  border-top-width:3px;
+}
+#view-library > #view-upnext .hubcard .big{font-size:26px}
+#view-library > #view-upnext .hubcard .name{font-size:13px;line-height:1.2}
+#view-library > #view-upnext .hubcard .desc{font-size:11px;line-height:1.3}
+.hubcard.plum[aria-selected="true"]{border-top-color:#8f6fd0}
+.hubcard.plum[aria-selected="true"] .big{color:#a98fe0}
+/* Where nothing has been looked up yet. */
+.recempty{max-width:60ch;padding:34px 0 10px}
+.recempty h2{font-family:var(--display);font-weight:800;font-size:26px;margin:0 0 10px;letter-spacing:-.01em}
+.recempty p{color:var(--muted);font-size:14.5px;line-height:1.55;margin:0}
+.recempty b{color:var(--paper);font-weight:600}
+/* The taste profile folds. */
+details.profile summary{
+  font-family:var(--display);font-weight:700;font-size:15px;cursor:pointer;list-style:none;
+  display:flex;align-items:center;gap:8px;
+}
+details.profile summary::-webkit-details-marker{display:none}
+details.profile summary::before{content:'›';display:inline-block;color:var(--muted);transition:transform .15s ease}
+details.profile[open] summary::before{transform:rotate(90deg)}
+details.profile{padding:14px 18px}
+details.profile > p{margin-top:12px}
+/* A show among films. */
+.kindflag{
+  position:absolute;top:8px;left:8px;font-family:var(--mono);font-size:9.5px;font-weight:700;
+  letter-spacing:.1em;padding:2px 6px;border-radius:999px;background:rgba(6,5,9,.8);
+  color:var(--teal);box-shadow:0 2px 8px rgba(0,0,0,.5);pointer-events:none;
+}
+/* One channel's block: its numbers, then what would fill it. */
+.chanblock{
+  background-color:var(--surface);background-image:var(--sheen);border:1px solid transparent;
+  border-radius:var(--r-card);box-shadow:var(--shadow-card);padding:16px 18px 18px;margin-bottom:14px;
+}
+.chanblock.thin{border-left:3px solid var(--rust)}
+.chanhead{display:flex;align-items:flex-start;gap:12px;margin-bottom:14px}
+.chanhead h3{font-family:var(--display);font-weight:800;font-size:20px;margin:0 0 3px;letter-spacing:-.01em}
+.chanhead .sub{font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+.chanhead .tag{
+  font-family:var(--mono);font-size:10.5px;color:var(--rust);letter-spacing:.08em;
+  padding:3px 9px;border-radius:999px;background:rgba(194,89,60,.14);align-self:center;
+}
+.chanblock .empty{margin:0}
+
+/* ---- right-click menu ---- */
+.ctxmenu{
+  position:fixed;z-index:200;min-width:190px;max-width:280px;padding:6px;
+  background:var(--surface-2);border-radius:12px;
+  box-shadow:0 18px 44px rgba(0,0,0,.6),0 0 0 1px rgba(255,255,255,.07);
+  animation:ctxin .1s ease;
+}
+@keyframes ctxin{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
+.ctxtitle{
+  font-family:var(--display);font-weight:700;font-size:13px;color:var(--paper);
+  padding:6px 10px 7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.ctxitem{
+  display:flex;align-items:baseline;justify-content:space-between;gap:14px;width:100%;
+  background:none;border:0;border-radius:8px;padding:8px 10px;cursor:pointer;text-align:left;
+  color:var(--paper);font-family:var(--body);font-size:13.5px;
+}
+.ctxitem:hover,.ctxitem:focus-visible{background:rgba(255,255,255,.07);outline:none}
+.ctxitem.strong .ctxlabel{color:var(--marigold);font-weight:600}
+.ctxrule{height:1px;background:rgba(255,255,255,.07);margin:4px 6px}
+
+/* ---- a word in the corner ---- */
+#toast{
+  position:fixed;left:50%;bottom:26px;z-index:210;transform:translate(-50%,12px);
+  max-width:min(560px,calc(100vw - 48px));padding:10px 18px;border-radius:999px;
+  background:var(--surface-2);color:var(--paper);font-size:13.5px;
+  box-shadow:0 14px 36px rgba(0,0,0,.55),0 0 0 1px rgba(255,255,255,.07);
+  border-left:3px solid var(--marigold);
+  opacity:0;pointer-events:none;transition:opacity .18s ease,transform .18s ease;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+#toast.on{opacity:1;transform:translate(-50%,0)}
+#toast.bad{border-left-color:var(--rust)}
+
+/* ---- the queue, docked down the right ----
+   Fixed to the window, under the title bar. When docked the body gives up
+   the same width on its right, so the page column re-centres in what's
+   left instead of sliding underneath. */
+.queueside{
+  position:fixed;top:38px;right:0;bottom:0;width:300px;z-index:60;
+  display:flex;flex-direction:column;
+  background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,.015)),var(--ink);
+  border-left:1px solid var(--edge);
+  animation:qsin .18s ease;
+}
+@keyframes qsin{from{opacity:0;transform:translateX(14px)}to{opacity:1;transform:none}}
+.queueside.hidden{display:none}
+.queueside.overlay{box-shadow:-24px 0 48px rgba(0,0,0,.55);z-index:90}
+body.queue-docked{padding-right:300px}
+.qshead{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding:16px 16px 10px}
+.qseyebrow{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--marigold);margin-bottom:3px}
+.qssum{font-size:12.5px;color:var(--muted)}
+.qssum b{font-family:var(--display);font-weight:700;font-size:16px;color:var(--paper)}
+.qsactions{display:flex;gap:8px;padding:0 16px 12px;border-bottom:1px solid var(--edge)}
+.qsactions .play{padding:8px 16px;font-size:12.5px}
+.qsactions .iconbtn{padding-block:7px}
+.qslist{flex:1;min-height:0;overflow-y:auto;padding:10px 10px 6px;display:flex;flex-direction:column;gap:4px}
+.qsnote{font-size:11.5px;line-height:1.45;color:var(--muted);margin:0;padding:10px 16px 16px;border-top:1px solid var(--edge)}
+.queuerow{
+  display:grid;grid-template-columns:18px 34px 1fr;gap:10px;align-items:center;
+  padding:6px 8px;border-radius:9px;cursor:grab;position:relative;
+  transition:background .12s ease;
+}
+.queuerow:hover,.queuerow:focus-within{background:rgba(255,255,255,.05)}
+.queuerow:active{cursor:grabbing}
+.queuerow.dragging{opacity:.35}
+.queuerow.dropbefore::before,.queuerow.dropafter::after{
+  content:'';position:absolute;left:8px;right:8px;height:2px;border-radius:2px;
+  background:var(--marigold);
+}
+.queuerow.dropbefore::before{top:-3px}
+.queuerow.dropafter::after{bottom:-3px}
+.queuerow .qpos{font-family:var(--mono);font-size:11px;color:var(--muted);text-align:center}
+.queuerow:first-child .qpos{color:var(--marigold)}
+.queuerow img,.queuerow .noposter{width:34px;aspect-ratio:2/3;object-fit:cover;border-radius:4px;background:var(--ink-3)}
+.queuerow .t{min-width:0}
+.queuerow h4{font-family:var(--display);font-weight:700;font-size:13.5px;margin:0 0 2px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.queuerow .libline{font-size:10.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* The buttons sit over the end of the text on hover, on a fade, rather
+   than taking a column the panel hasn't got. */
+.qacts{
+  position:absolute;right:6px;top:50%;transform:translateY(-50%);
+  display:flex;gap:3px;padding-left:26px;opacity:0;pointer-events:none;
+  background:linear-gradient(90deg,transparent,var(--ink) 22px);
+  transition:opacity .12s ease;
+}
+.queuerow:hover .qacts,.queuerow:focus-within .qacts{opacity:1;pointer-events:auto}
+.qbtn{
+  width:24px;height:24px;border:0;border-radius:7px;background:rgba(255,255,255,.06);
+  color:var(--muted);cursor:pointer;font-size:10.5px;line-height:1;padding:0;
+}
+.qbtn:hover:not(:disabled){background:rgba(255,255,255,.12);color:var(--paper)}
+.qbtn:disabled{opacity:.3;cursor:default}
+.qbtn.qx:hover{color:var(--rust)}
+.qbtn.qplay{color:var(--marigold)}
+.qshead .qbtn{width:28px;height:28px;font-size:18px}
+/* Tucked away: a tab on the right edge, the count on it. */
+.queuerail{
+  position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:60;
+  display:flex;flex-direction:column;align-items:center;gap:8px;
+  padding:14px 7px;border:0;border-radius:10px 0 0 10px;cursor:pointer;
+  background:var(--surface-2);color:var(--muted);
+  box-shadow:-6px 0 20px rgba(0,0,0,.45),0 0 0 1px rgba(255,255,255,.06);
+}
+.queuerail:hover{color:var(--paper)}
+.queuerail.hidden{display:none}
+.queuerail .qrlabel{writing-mode:vertical-rl;transform:rotate(180deg);font-family:var(--mono);font-size:10px;letter-spacing:.16em}
+.queuerail b{font-family:var(--display);font-size:14px;color:var(--marigold)}
+/* The word in the corner centres on the page column, not the window. */
+body.queue-docked #toast{left:calc(50% - 150px)}
+/* In the playing bar: what the queue has next. */
+.playnext{
+  font-size:12px;color:var(--muted);margin-top:5px;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;
+}
+.playnext .k{font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;color:var(--marigold);margin-right:8px}
+
+/* The one-time offer to share between devices. One slim line above the
+   toolbar rather than a notice card: the Library's height budget is the
+   subject of half the notes on this page, and this goes away for good
+   after one click either way. */
+.syncoffer{
+  display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+  margin:10px 0 4px;padding:10px 14px;border-radius:var(--r-card);
+  background:var(--surface);box-shadow:var(--shadow-card);
+  border-left:3px solid var(--marigold);
+}
+.syncoffer.hidden{display:none}
+.syncoffer-text{flex:1 1 320px;font-size:14px;color:var(--muted)}
+.syncoffer-text b{color:var(--paper);font-weight:600}
+.syncoffer .play,.syncoffer .iconbtn{padding-block:7px}
+#view-library.showing-recs .syncoffer,#view-library.showing-history .syncoffer,
+#view-library.showing-drives .syncoffer{display:none}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div id="titlebar">
+  <div class="dragzone pywebview-drag-region">
+    <img src="/logo.png" class="minimark" alt="">
+    <span>Next Up</span>
+    <!-- Facts about the library, beside the name rather than on a line of
+         their own above the tabs: the title bar had the room going spare. -->
+    <span class="libline" id="libline">loading…</span>
+  </div>
+  <div class="wincontrols hidden">
+    <button data-win="min" title="Minimise">&#8211;</button>
+    <button data-win="max" title="Maximise">&#9723;</button>
+    <button data-win="close" title="Close">&#10005;</button>
+  </div>
+</div>
+
+<!-- The front door. Below the title bar on purpose: you can still close the
+     window from here without picking anybody. -->
+<div id="picker" class="picker hidden">
+  <div class="pickerinner">
+    <img class="pickerlogo" src="/logo.png" alt="">
+    <h1 class="pickertitle">Who's watching?</h1>
+    <p class="pickerdevice">
+      on <button id="pickerdevicename" class="devicename" title="Rename this device">this device</button>
+    </p>
+    <div id="pickerlist" class="pickerlist"></div>
+    <div id="pickerform" class="pickerform hidden">
+      <input id="pickername" class="pickerinput" type="text" maxlength="40"
+             placeholder="Name" autocomplete="off" spellcheck="false">
+      <div id="pickeraccents" class="pickeraccents"></div>
+      <div class="pickerformrow">
+        <button id="pickersave" class="pickerbtn primary">SAVE</button>
+        <button id="pickercancel" class="pickerbtn">CANCEL</button>
+        <button id="pickerdelete" class="pickerbtn danger hidden">DELETE</button>
+      </div>
+    </div>
+    <label class="pickerskip">
+      <input type="checkbox" id="pickerskip"> Go straight in next time
+    </label>
+    <p class="pickernote" id="pickernote"></p>
+  </div>
+</div>
+
+<!-- Duplicates: a review screen, never a one-press cleanup. Deleting the
+     wrong copy of something costs an hour of downloading to undo. -->
+<div id="dupes" class="dupes hidden">
+  <div class="dupesinner">
+    <div class="dupeshead">
+      <h2>The same film, twice</h2>
+      <button id="dupesclose" class="pickerbtn">CLOSE</button>
+    </div>
+    <p class="dupesnote" id="dupesnote"></p>
+    <div id="dupeslist"></div>
+  </div>
+</div>
+
+<header class="mast">
+  <!-- The Library's own sections share the tabs' line instead of taking one
+       of their own under it. Only shown while the Library is. -->
+  <div class="subnav offview" id="libnav"></div>
+  <nav class="tabs" role="tablist">
+    <button class="tab" role="tab" aria-selected="false" data-view="now" title="Find something to watch">Now</button>
+    <button class="tab" role="tab" aria-selected="true" data-view="library" title="view your collection">Library</button>
+    <button class="tab" role="tab" aria-selected="false" data-view="rate" title="Rate your collection">Rate</button>
+    <button class="tab" role="tab" aria-selected="false" data-view="channels" title="What's on right now.">Channels</button>
+    <!-- The one tab that isn't somewhere you browse. It's a thing you go and
+         adjust, so it wears the gear everything else uses for that and gives
+         its width back to the tabs that name places. The label lives in
+         aria-label and the tooltip, so nothing is lost to a screen reader. -->
+    <button class="tab icon" role="tab" aria-selected="false" data-view="settings"
+            title="Settings" aria-label="Settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="3"></circle>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08A1.65 1.65 0 0 0 10 4.6V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V10a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+      </svg>
+    </button>
+  </nav>
+</header>
+
+<div id="banner"></div>
+<div id="playingbar" class="hidden"></div>
+<div id="stillthere" class="hidden"></div>
+
+<!-- ================= NOW ================= -->
+<div id="view-now" class="hidden">
+  <div class="filters">
+    <label class="f"><span>Mood</span>
+      <select id="mood">
+        <option value="any">Anything</option>
+        <option value="bleak">Bleak laughs</option>
+        <option value="heavy">Something heavy</option>
+        <option value="off">Switch off</option>
+        <option value="trash">Genre trash</option>
+      </select>
+    </label>
+    <label class="f"><span>Format</span>
+      <select id="kind">
+        <option value="any">Film or episode</option>
+        <option value="film">Film only</option>
+        <option value="tv">Episode only</option>
+      </select>
+    </label>
+    <label class="f"><span>Genre</span>
+      <select id="genre"><option value="">Any genre</option></select>
+    </label>
+    <div class="spinrow">
+      <button class="spinback" id="spinback" disabled
+              title="Back to the one before">‹ BACK</button>
+      <button class="spin" id="spin">Pick something</button>
+    </div>
+  </div>
+
+  <div id="tonight-out"><p class="empty">Loading your library…</p></div>
+  <div id="reasons-out"></div>
+
+  <section id="unfinished-sec" class="hidden">
+    <div class="sechead">
+      <h2>Continue where you left off</h2>
+      <span class="count" id="unfinished-count"></span>
+      <p>Only what this app has actually seen you start.</p>
+    </div>
+    <div class="alts" id="unfinished-out"></div>
+  </section>
+</div>
+
+<!-- ================= LIBRARY ================= -->
+<div id="view-library">
+  <!-- Asked once, when a cloud folder is found and sharing isn't set up.
+       Either answer puts it away for good; Settings has it after that. -->
+  <div class="syncoffer hidden" id="syncoffer">
+    <div class="syncoffer-text"></div>
+    <button class="play" id="syncoffer_yes" type="button">SHARE</button>
+    <button class="iconbtn" id="syncoffer_no" type="button">NOT NOW</button>
+  </div>
+  <!-- The resume heading and the whole search toolbar share one line. They
+       used to be two full-width bands stacked on top of each other, and
+       between them they pushed the first poster to 388px down a 900px
+       window — 43% of the screen spent before a single tile. The heading
+       is ~390px of a 1072px row and the toolbar fits in what was left. -->
+  <div class="libtop">
+    <div class="libtopleft">
+      <!-- A button, not a heading with a heading's manners: it goes to
+           History, which is the full list this is the first line of. -->
+      <button type="button" class="resumehead hidden" id="resumehead"
+              title="See everything you've watched">
+        <h2>Continue where you left off</h2>
+        <span class="resumechev" aria-hidden="true">&rsaquo;</span>
+      </button>
+      <section class="resumestrip hidden" id="resumestrip">
+        <div class="resumerow" id="resumerow"></div>
+      </section>
+    </div>
+  <div class="searchrow">
+    <label class="searchbox">
+      <span>Search</span>
+      <input id="q" type="search" placeholder="Title, director, actor or genre…" autocomplete="off">
+    </label>
+    <label class="f"><span>Show</span>
+      <select id="shelf">
+        <option value="all">Everything</option>
+        <option value="unrated">Not rated yet</option>
+        <option value="rated">Rated</option>
+        <option value="progress">Part way through</option>
+        <option value="watchlist">Watchlist</option>
+        <option value="favourite">Favourites</option>
+      </select>
+    </label>
+    <label class="f"><span>Sort</span>
+      <select id="libsort">
+        <option value="title">A to Z</option>
+        <option value="added">Recently added</option>
+        <option value="year">Newest first</option>
+        <option value="tmdb">TMDB score</option>
+        <option value="mine">Your score</option>
+        <option value="runtime">Shortest first</option>
+      </select>
+    </label>
+    <div class="libcount" id="libcount"></div>
+    <div class="libscanmsg" id="libscanmsg"></div>
+    <!-- Selection mode: posters become things you tick rather than open,
+         and a tray appears under the grid to send the ticked ones to a
+         drive. The list it builds is the docking station's own. -->
+    <button class="iconbtn libselect" id="libselect" title="Tick films and shows to copy to a drive"
+            aria-pressed="false">SELECT</button>
+    <button class="iconbtn libdupes hidden" id="libdupes"
+            title="The same film more than once">DUPES</button>
+    <button class="librefresh" id="librefresh" title="Look for new files"
+            aria-label="Re-scan your folders for new files">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M21 12a9 9 0 1 1-2.64-6.36"></path>
+        <polyline points="21 3 21 9 15 9"></polyline>
+      </svg>
+    </button>
+    </div><!-- /.searchrow -->
+  </div><!-- /.libtop -->
+  <div id="tiles-out"></div>
+  <div class="seltray hidden" id="seltray">
+    <div class="selcount" id="tray_count">Nothing ticked yet</div>
+    <label class="f seldrive"><span>Drive</span>
+      <select id="tray_drive"><option value="">No drives found</option></select>
+    </label>
+    <button class="iconbtn" id="tray_refresh" title="Look for drives again">↻</button>
+    <button class="play" id="tray_add" disabled>ADD TO DRIVE</button>
+    <button class="iconbtn hidden" id="tray_cancel">CANCEL</button>
+    <button class="iconbtn" id="tray_clear">CLEAR</button>
+    <button class="iconbtn" id="tray_done">DONE</button>
+    <div class="selstatus" id="tray_status"></div>
+  </div>
+  <div class="pager hidden" id="pager">
+    <button class="iconbtn" id="pagerprev">‹ PREV</button>
+    <span id="pagerpos"></span>
+    <button class="iconbtn" id="pagernext">NEXT ›</button>
+  </div>
+
+  <!-- ================= RECOMMENDATIONS =================
+       A shelf of the Library rather than a tab of its own: it's still your
+       collection you're looking at, just the part of it you don't own yet.
+       Which half of this view shows is decided by `showing-recs` on the
+       parent, in CSS, rather than by toggling `hidden` on four elements —
+       the pager owns its own `hidden` for paging and the two would fight. -->
+  <div id="view-upnext">
+  <!-- One bar: the action, when it last ran, and the two switches that
+       apply to every section. It used to be a full filters band under the
+       hub, which put two rows of chrome between the tabs and the first
+       suggestion. -->
+  <div class="recbar">
+    <button class="play" id="scan">FIND WHAT'S MISSING</button>
+    <span class="scanage" id="scanage"></span>
+    <label class="f recscore">
+      <span>Min TMDB score <b id="minscorelbl">any</b></span>
+      <input type="range" id="minscore" min="0" max="9" step="0.5" value="0">
+    </label>
+    <label class="toggle" title="Skip anything with a huge audience — you've probably considered it already"><input type="checkbox" id="hideobvious" checked> Hide the obvious</label>
+  </div>
+  <div class="hubgrid" id="hub"></div>
+  <div id="carried"></div>
+  <div id="scan-status"></div>
+  <div id="more-out"></div>
+  </div>
+
+  <!-- ================= WATCH HISTORY =================
+       The third state of the Library view, on the same footing as
+       Recommendations: still your collection, this time by the evenings you
+       spent on it. -->
+  <div id="view-history">
+    <div class="filters">
+      <label class="f"><span>Going back</span>
+        <select id="histdays">
+          <option value="7" selected>A week</option>
+          <option value="30">A month</option>
+          <option value="90">Three months</option>
+          <option value="365">A year</option>
+          <option value="3650">Everything</option>
+        </select>
+      </label>
+      <div id="histtotals" class="histtotals"></div>
+    </div>
+    <div id="history-out"><p class="empty">Loading…</p></div>
+  </div>
+
+  <!-- ================= DRIVES =================
+       A read-only shelf for whatever is plugged in: the same poster grid,
+       built from what the drive actually holds rather than from the
+       library. For seeing what went onto a drive, or what came in on one. -->
+  <div id="view-drives">
+    <div class="filters">
+      <label class="f"><span>Drive</span>
+        <select id="drv_pick" style="min-width:240px"><option value="">Looking for drives…</option></select>
+      </label>
+      <label class="f"><span>Show</span>
+        <select id="drv_kind">
+          <option value="all">Films and TV</option>
+          <option value="film">Films</option>
+          <option value="tv">TV shows</option>
+        </select>
+      </label>
+      <label class="searchbox drvsearch"><span>Search</span>
+        <input id="drv_q" type="search" placeholder="A title on this drive…" autocomplete="off">
+      </label>
+      <label class="toggle drvonly"><input type="checkbox" id="drv_notlib"> Only what isn't in my library</label>
+      <button class="iconbtn drvreread" id="drv_refresh" title="Read the drive again, for anything added since">REREAD</button>
+    </div>
+    <div id="drv_summary" class="drvsummary"></div>
+    <div id="drv_out"><p class="empty">Looking for drives…</p></div>
+  </div>
+</div>
+
+<!-- ================= RATE ================= -->
+<div id="view-rate" class="hidden">
+  <div class="filters">
+    <label class="f"><span>Queue</span>
+      <select id="rate_kind">
+        <option value="film">Films</option>
+        <option value="tv">TV shows</option>
+      </select>
+    </label>
+    <button class="spin" id="rate_refresh">Refresh queue</button>
+  </div>
+  <div id="rate-out"><p class="empty">Loading…</p></div>
+  <section>
+    <div class="sechead">
+      <h2>Your top tens</h2>
+      <span class="count" id="rated-count"></span>
+      <p>Your own scores, not TMDB's. This is what For you learns from.</p>
+    </div>
+    <div class="toplists" id="toplists"></div>
+  </section>
+</div>
+
+<!-- ================= CHANNELS ================= -->
+<div id="view-channels" class="hidden">
+  <div class="chtop">
+    <button class="iconbtn" id="shufflechannels" title="Redeal every channel: a new running order for each, and each dropped somewhere new in it — with a good few landing at the start of something, so there's always a way in. For when there's nothing on you fancy, or when you've just added a pile of files and want them in the mix.">SHUFFLE ALL</button>
+    <button class="iconbtn" id="openremote" title="A small window of channel, volume and preset buttons, held above mpv">REMOTE</button>
+  </div>
+  <div id="channels-out"><p class="empty">Loading…</p></div>
+</div>
+
+<!-- ================= SETTINGS ================= -->
+<div id="view-settings" class="hidden">
+  <div class="settings">
+    <h3>Your media folders</h3>
+    <p class="empty">One folder per line. Subfolders are searched automatically, so the top of each drive is usually enough.</p>
+    <div class="fields" style="grid-template-columns:1fr">
+      <div><label>Media folders</label>
+        <textarea id="c_folders" rows="4" placeholder="D:\Films&#10;D:\TV Shows"
+          style="width:100%;padding:9px 10px;font-family:var(--mono);font-size:13px"></textarea></div>
+      <div><label>Path to mpv.exe</label><input id="c_mpv" placeholder="C:\Program Files\MPV Player\mpv.exe"></div>
+      <div><label>Downloads folder</label><input id="c_downloads" placeholder="E:\Torrents"></div>
+    </div>
+    <p class="empty" id="sortnote">Where finished downloads land. Next Up runs the <code>process_new_movies.py</code> sorter kept in that folder, and shows you what it plans to do before anything moves.</p>
+    <div class="rowbtns">
+      <button class="play" id="savelocal">Save</button>
+      <button class="iconbtn" id="scanlib">SCAN MY FOLDERS</button>
+      <button class="iconbtn" id="sortnew">SORT NEW DOWNLOADS</button>
+      <button class="iconbtn" id="testmpv">TEST MPV</button>
+      <button class="iconbtn" id="rematch">RETRY UNIDENTIFIED</button>
+    </div>
+    <div id="libstatus"></div>
+    <div id="sortout"></div>
+    <div id="sortaside"></div>
+  </div>
+
+  <div class="settings">
+    <h3 style="margin-top:22px">TMDB key</h3>
+    <p class="empty">Optional. Without it, Next Up can only spot holes inside seasons you already own. With it you get missing seasons, film series, director filmographies and the suggestions built from your ratings. Free from themoviedb.org &gt; Settings &gt; API.</p>
+    <div class="fields">
+      <div><label>API key (v3)</label><input id="c_tmdb" placeholder="paste key"></div>
+    </div>
+    <button class="play" id="savecfg">Save settings</button>
+    <span id="savemsg" class="libline" style="margin-left:12px"></span>
+  </div>
+
+  <div class="settings">
+    <h3 style="margin-top:22px">Are you still watching?</h3>
+    <p class="empty">Episodes, the queue and the channels all carry on by themselves. After this long with nothing touched &mdash; here, or on mpv&rsquo;s own keyboard &mdash; the next one is held back and Next Up asks. It only ever asks between programmes, never over one. Minutes; <b>0</b> means never ask at that time of day.</p>
+    <div class="fields">
+      <div><label>Daytime (6am&ndash;6pm)</label><input id="c_afk_day" placeholder="240"></div>
+      <div><label>Evening (6pm&ndash;midnight)</label><input id="c_afk_evening" placeholder="150"></div>
+      <div><label>After midnight</label><input id="c_afk_late" placeholder="90"></div>
+      <div><label>Answer within</label><input id="c_afk_grace" placeholder="5"></div>
+    </div>
+    <p class="empty" style="margin-top:10px">Unanswered, it closes the player when that last one runs out &mdash; which is also what lets the PC get to sleep, since mpv holds it awake for as long as it is playing.</p>
+    <label class="toggle" style="margin-top:6px"><input type="checkbox" id="c_afk_on"> Ask when playback has been running unattended</label>
+    <div class="rowbtns" style="margin-top:12px">
+      <button class="play" id="saveafk">Save</button>
+      <span id="afkmsg" class="libline" style="margin-left:4px"></span>
+    </div>
+  </div>
+
+  <div class="settings">
+    <h3 style="margin-top:22px">Subtitles</h3>
+    <p class="empty">For the FETCH SUBS button on the remote. Searching needs only the API key — free from opensubtitles.com &gt; Consumers. Downloading needs an account too, because it's rationed against one: <b>five a day without an account, twenty with a free one</b>. Files are saved next to the film, so any player finds them.</p>
+    <div class="fields">
+      <div><label>API key</label><input id="c_oskey" placeholder="paste key"></div>
+      <div><label>Username</label><input id="c_osuser" placeholder="opensubtitles.com account" autocomplete="off"></div>
+      <div><label>Password</label><input id="c_ospass" type="password" placeholder="paste password" autocomplete="new-password"></div>
+      <div><label>Language</label><input id="c_oslang" placeholder="en" maxlength="5"></div>
+    </div>
+    <p class="empty" style="margin-top:10px">The password is kept in <code>nextup_config.json</code> in plain text, alongside the TMDB key, so the app can sign in again on its own. Anything running on this PC as you can read that file.</p>
+    <button class="play" id="savesubs">Save subtitle settings</button>
+    <span id="submsg" class="libline" style="margin-left:12px"></span>
+  </div>
+
+  <!-- ================= SHARING BETWEEN DEVICES ================= -->
+  <div class="settings" id="syncsettings">
+    <h3 style="margin-top:22px">Sharing between devices</h3>
+    <p class="empty">Your history, ratings, watchlist, favourites and where you stopped, kept the same on every computer running Next Up — through a cloud folder they all sync, such as OneDrive. Each computer writes only its own file there, so two open at once can't get in each other's way. Your library itself stays on this computer.</p>
+    <div id="sync_body"><p class="empty">Checking…</p></div>
+  </div>
+
+  <!-- ================= DOCKING STATION =================
+       One-way, additive-only: reads from the library's own drives and
+       writes to whatever's plugged in. Never touches or deletes the
+       original, so there's nothing here that needs an "are you sure". -->
+  <div class="settings">
+    <h3>Docking station</h3>
+    <p class="empty">Plug in a USB drive, tick what you want on it, and Next Up copies the files across — as <code>Films\</code> and <code>TV Shows\</code> folders, ready for another player to point at. The drive you're copying from is never touched.</p>
+    <div class="rowbtns">
+      <select id="dock_drive" style="min-width:260px"><option value="">No drives found</option></select>
+      <button class="iconbtn" id="dock_refresh">REFRESH DRIVES</button>
+    </div>
+    <div id="dock_drivenote" class="libline" style="margin-top:8px"></div>
+
+    <div class="searchrow" style="margin-top:16px">
+      <label class="searchbox"><span>Search</span>
+        <input id="dock_q" type="search" placeholder="Find something to copy across…" autocomplete="off">
+      </label>
+      <label class="f"><span>Show</span>
+        <select id="dock_kind">
+          <option value="all">Everything</option>
+          <option value="film">Films</option>
+          <option value="tv">TV shows</option>
+        </select>
+      </label>
+      <div class="libcount" id="dock_selcount">nothing selected</div>
+    </div>
+    <div id="dock_list" class="docklist"></div>
+    <div class="pager hidden" id="dock_pager">
+      <button class="iconbtn" id="dock_prev">‹ PREV</button>
+      <span id="dock_pagerpos"></span>
+      <button class="iconbtn" id="dock_next">NEXT ›</button>
+    </div>
+
+    <div class="rowbtns" style="margin-top:16px">
+      <button class="play" id="dock_start" disabled>COPY SELECTED TO DRIVE</button>
+      <button class="iconbtn hidden" id="dock_cancel">CANCEL</button>
+    </div>
+    <div id="dock_status"></div>
+  </div>
+
+  <div class="settings">
+    <h3>What's stored on this machine</h3>
+    <p class="empty" id="dbline">All of it lives in the Next Up folder. Nothing leaves your PC except the metadata lookups.</p>
+    <div class="rowbtns"><button class="iconbtn" id="exportdata">EXPORT RATINGS &amp; HISTORY (JSON)</button></div>
+    <div id="datatables"></div>
+    <h3 style="margin-top:24px">Recent activity</h3>
+    <div id="datahistory"></div>
+  </div>
+</div>
+
+</div>
+
+<!-- ================= THE QUEUE, DOCKED =================
+     Down the right-hand side of the window whenever anything is queued,
+     the way a player keeps its playlist beside the picture: visible from
+     every tab, because what's coming up next isn't a Library matter. Gone
+     entirely when the queue is empty. -->
+<aside id="queueside" class="queueside hidden" aria-label="Queue">
+  <div class="qshead">
+    <div>
+      <div class="qseyebrow">Up next</div>
+      <div class="qssum" id="qs_sum"></div>
+    </div>
+    <button class="qbtn" id="qs_collapse" type="button" title="Tuck the queue away">&rsaquo;</button>
+  </div>
+  <div class="qsactions">
+    <button class="play" id="queue_play" type="button">PLAY QUEUE</button>
+    <button class="iconbtn" id="queue_clear" type="button">CLEAR</button>
+  </div>
+  <div class="qslist" id="queue_out"></div>
+  <p class="qsnote">Each starts when the one before it finishes. Closing the player stops the queue; a channel is left to its own schedule. Drag to reorder.</p>
+</aside>
+<button id="queuerail" class="queuerail hidden" type="button" title="Show the queue">
+  <span class="qrlabel">QUEUE</span><b id="qr_count">0</b>
+</button>
+<script>
+const $ = s => document.querySelector(s);
+const el = (tag, cls, html) => { const n=document.createElement(tag); if(cls)n.className=cls; if(html!==undefined)n.innerHTML=html; return n; };
+const esc = s => (s==null?"":String(s)).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const pad = n => String(n).padStart(2,'0');
+
+async function api(path, opts){ const r = await fetch(path, opts); return r.json(); }
+async function post(path, body){
+  return api(path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
+}
+
+/* 1 is red, 10 is green, 5-6 sits in the yellows. */
+const hueFor = n => Math.round((n-1)/9*128);
+
+/* ---------- tabs ---------- */
+/* Pressing the tab you are already on puts that tab back where it starts.
+   The Library is the one that needed it: its sections are inside it, so
+   after a while in History or Drives the only way back to the shelf was to
+   find the right sub-tab. Pressing LIBRARY now means the shelf, first page,
+   nothing searched — the same thing it means when you arrive from anywhere
+   else. */
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+  if(t.dataset.view === currentView) resetView(currentView);
+  else switchTo(t.dataset.view);
+});
+
+function resetView(view){
+  if(view === 'library'){
+    if(libSelecting) setSelecting(false);
+    libSection = 'film';
+    libKind = 'film';
+    libOffset = 0;
+    $('#q').value = '';
+    $('#shelf').value = 'all';
+    $('#libsort').value = 'title';
+    drawLibNav();
+    applyLibSection();
+    loadLibrary();
+    loadResumeRow();
+    const grid = $('#tiles-out');
+    if(grid) grid.scrollTop = 0;
+  } else if(view === 'channels'){
+    loadChannels();
+  } else if(view === 'rate'){
+    loadRatings();
+  }
+  /* Everything else is one scrolling panel: the top of it is its start.
+     The Now tab deliberately keeps the pick that's on screen — throwing
+     away a suggestion because somebody pressed the tab would be a strange
+     way to reward the press. */
+  const panel = $('#view-' + view);
+  if(panel) panel.scrollTop = 0;
+}
+
+let currentView = 'now';
+function switchTo(view){
+  currentView = view;
+  document.querySelectorAll('.tab').forEach(x => x.setAttribute('aria-selected', x.dataset.view===view));
+  ['now','library','rate','channels','settings'].forEach(v => $('#view-'+v).classList.toggle('hidden', v!==view));
+  $('#libnav').classList.toggle('offview', view!=='library');
+  if(view==='now' && staleNow){ staleNow = false; loadTonight(); }
+  if(view==='library'){
+    drawLibNav(); applyLibSection(); libScanTick();
+    /* The panel sections don't use either of these, and re-running the
+       browse query behind a hidden panel is work nobody asked for. */
+    if(!LIB_PANELS[libSection]){ loadLibrary(); loadResumeRow(); }
+  }
+  if(view==='rate'){ staleRatings = false; loadRatings(); }
+  if(view==='channels') loadChannels();
+  if(view==='settings'){ loadData(); dockOnOpen(); syncLoad(); sorterLoad(); }
+}
+
+/* The shell is a fixed-height column and only the panel inside a tab
+   scrolls, which left the wheel doing nothing at all over the masthead, the
+   library's search row, or the margin either side of the content — most of
+   the window, in other words. A wheel that lands somewhere with nothing to
+   scroll under it is handed to whichever panel the current tab does scroll. */
+function activeScroller(){
+  /* The library scrolls its grid rather than the tab — and when it's showing
+     one of the panel sections instead, that panel is what scrolls. */
+  if(currentView === 'library'){
+    return $(LIB_PANELS[libSection] || '#tiles-out');
+  }
+  return $('#view-' + currentView);
+}
+
+addEventListener('wheel', e => {
+  if(!e.deltaY) return;
+  if(document.querySelector('.sheet')) return;      // open sheet, which scrolls itself
+  const panel = activeScroller();
+  if(!panel || panel.contains(e.target)) return;    // already over the real thing
+  /* deltaY is pixels in the window this runs in, but the other two modes
+     cost nothing to honour. */
+  const step = e.deltaMode === 1 ? 16 : (e.deltaMode === 2 ? panel.clientHeight : 1);
+  panel.scrollTop += e.deltaY * step;
+}, {passive:true});
+
+/* ---------- status ---------- */
+let STATUS = {};
+async function loadStatus(){
+  STATUS = await api('/api/status');
+  if(!STATUS.connected){
+    $('#libline').textContent = 'no library yet';
+    $('#banner').innerHTML =
+      '<div class="notice bad"><h3>No library yet</h3><p>'+esc(STATUS.error||'')+
+      '</p><p>Open <b>Settings</b>, add the folders your films and shows live in, then press <b>Scan my folders</b>.</p></div>';
+    return;
+  }
+  $('#banner').innerHTML = '';
+  $('#libline').textContent =
+    'v'+(STATUS.version||'?')+' · '+STATUS.movies+' films · '+STATUS.shows+' shows · '+
+    STATUS.episodes+' episodes · '+STATUS.unrated_films+' unrated';
+  const g = $('#genre');
+  g.innerHTML = '<option value="">Any genre</option>';
+  (STATUS.genres||[]).forEach(x => g.append(new Option(x, x)));
+  const c = STATUS.config||{};
+  $('#c_tmdb').placeholder = c.tmdb_key ? 'saved — leave blank to keep' : 'paste key';
+  $('#c_folders').value = (c.media_folders||[]).join('\n');
+  $('#c_mpv').value = c.mpv_path || '';
+  $('#c_oskey').placeholder  = c.os_api_key ? 'saved — leave blank to keep' : 'paste key';
+  $('#c_ospass').placeholder = c.os_password ? 'saved — leave blank to keep' : 'paste password';
+  $('#c_osuser').value = c.os_username || '';
+  $('#c_oslang').value = c.sub_language || 'en';
+  const afk = c.afk || {};
+  $('#c_afk_on').checked = afk.enabled !== false;
+  $('#c_afk_day').value = afk.day != null ? afk.day : '';
+  $('#c_afk_evening').value = afk.evening != null ? afk.evening : '';
+  $('#c_afk_late').value = afk.late != null ? afk.late : '';
+  $('#c_afk_grace').value = afk.grace != null ? afk.grace : '';
+  drawHub();
+  loadTonight();
+}
+
+/* ---------- shared rating control ---------- */
+function rateControl(p, opts){
+  opts = opts || {};
+  if(!p.rate_type) return el('div');
+  const wrap = el('div','rate'+(opts.prompt?' prompt':''));
+  wrap.append(el('span','lbl', esc(opts.label || p.rate_label || 'Your rating')));
+  const notches = el('div','notches'+(opts.big?' big':''));
+  const val = el('span','val');
+  let current = p.userrating || 0;
+
+  // Half points without taking any more room: each block is two real
+  // elements, .5 and whole, not one block guessing which half of itself
+  // the mouse is over — so the value under the cursor is never ambiguous.
+  function paint(v){
+    [...notches.querySelectorAll('.half')].forEach(b => {
+      b.classList.toggle('on', v >= +b.dataset.v);
+    });
+    val.classList.toggle('set', !!current);
+    if(current){
+      val.style.setProperty('--h', hueFor(current));
+      val.textContent = (Math.round(current*2)/2) + '/10';
+    } else {
+      val.textContent = 'Not rated';
+    }
+  }
+
+  async function send(value){
+    notches.classList.add('pending');
+    const r = await post('/api/rate',{type:p.rate_type,id:p.rate_id,rating:value});
+    notches.classList.remove('pending');
+    if(r.error){ val.textContent='Save failed'; return; }
+    current = r.rating; paint(current);
+    libraryChanged();
+    if(opts.onRated) opts.onRated(r);
+  }
+
+  for(let n=1;n<=10;n++){
+    const group = el('div','notch');
+    group.style.setProperty('--h', hueFor(n));
+    [n-0.5, n].forEach(v => {
+      const b = el('button','half'+(v===n?' hi':' lo'));
+      b.type='button';
+      b.dataset.v = v;
+      b.setAttribute('aria-label','Rate '+v+' out of 10');
+      b.title = String(v);
+      b.onmousemove = () => paint(v);
+      b.onfocus = () => paint(v);
+      b.onclick = () => send(v);
+      group.append(b);
+    });
+    notches.append(group);
+  }
+  notches.onmouseleave = () => paint(current);
+  wrap.append(notches, val);
+
+  if(!opts.hideClear){
+    const clear = el('button','clear','CLEAR');
+    clear.onclick = async () => {
+      const r = await post('/api/rate',{type:p.rate_type,id:p.rate_id,rating:0});
+      if(!r.error){ current = 0; paint(0); libraryChanged(); }
+    };
+    wrap.append(clear);
+  }
+  paint(current);
+  return wrap;
+}
+
+/* Rating something marks the other tabs stale,
+   so they refresh next time you look at them instead of showing old numbers. */
+let staleNow = false, staleRatings = false;
+function libraryChanged(){ staleNow = true; staleRatings = true; }
+
+/* ---------- now ---------- */
+const rejected = new Set();
+let currentTop = null;
+let carried = null;
+
+/* Where you've been this sitting. BACK re-renders from here rather than
+   asking the server again — the draw is random, so "the one before" is
+   something only the page still knows. The picks themselves are held, not
+   just their ids, so going back costs nothing and can't come back empty. */
+let pickTrail = [];
+let trailAt = -1;
+/* True when what's on screen isn't a trail entry at all — the "nothing
+   matches that" notice. The step back is then ONTO the trail rather than
+   one further along it, or the last thing you saw gets skipped over. */
+let offTrail = false;
+
+function paintBack(){
+  $('#spinback').disabled = offTrail ? trailAt < 0 : trailAt <= 0;
+}
+
+function showPick(p){
+  const out = $('#tonight-out');
+  out.innerHTML = '';
+  out.append(pickCard(p));
+  loadReasons(p);
+  currentTop = p.type + ':' + p.id;
+  offTrail = false;
+  paintBack();
+  fetchAhead();
+}
+
+/* ---------- the next pick, fetched ahead ----------
+   The backdrop used to pop in a beat after the words: the card was drawn
+   the moment the pick arrived, and only then did the browser start
+   downloading the picture behind it. So while you look at one pick, the
+   next is already drawn from the server and its backdrop, poster and
+   reasons are downloaded — pressing the button then swaps in a card
+   whose picture is already in the browser's cache.
+
+   Keyed on everything the draw depends on: the three filters and the set
+   of things turned down. Pressing the button adds the current pick to that
+   set, so the look-ahead is fetched as though that had already happened.
+   Change a filter and the key no longer matches; that pick is dropped and
+   a fresh draw is made, exactly as before. */
+let pickAhead = null;
+
+function tonightParams(exclude, peek){
+  const q = new URLSearchParams({
+    mood: $('#mood').value, kind: $('#kind').value,
+    genre: $('#genre').value, exclude: [...exclude].join(',')
+  });
+  if(peek) q.set('peek', '1');
+  return q;
+}
+
+function aheadKey(exclude){
+  return [$('#mood').value, $('#kind').value, $('#genre').value,
+          [...exclude].sort().join(',')].join('|');
+}
+
+/* Resolves once the pictures are in the cache — or have failed, which is
+   the browser's problem to show, not a reason to hold the card back. */
+function preloadArt(p){
+  const urls = [p && p.backdrop, p && p.art].filter(Boolean)
+    .map(u => String(u).replace(/["\\]/g, ''));
+  return Promise.all(urls.map(u => new Promise(done => {
+    const i = new Image();
+    i.onload = i.onerror = () => done();
+    i.src = u;
+  })));
+}
+
+/* Never wait longer than this for a picture. A slow one arrives late; a
+   card that sits there waiting for it feels broken. */
+function withinMs(promise, ms){
+  return Promise.race([promise, new Promise(done => setTimeout(done, ms))]);
+}
+
+function fetchAhead(){
+  const exclude = new Set(rejected);
+  if(currentTop) exclude.add(currentTop);
+  const key = aheadKey(exclude);
+  if(pickAhead && pickAhead.key === key) return;
+  const promise = api('/api/tonight?' + tonightParams(exclude, true))
+    .then(async data => {
+      const p = data && data.picks && data.picks[0];
+      if(p){
+        p._why = api('/api/why?type='+encodeURIComponent(p.type)+'&id='+p.id).catch(() => null);
+        await preloadArt(p);
+      }
+      return data;
+    })
+    .catch(() => null);
+  pickAhead = {key, promise};
+}
+
+/* A filter change starts a new line of enquiry: the picks behind you
+   answered a different question, and a card gives no sign of which mood or
+   genre produced it. Going back to one would be going back to something
+   that no longer matches what the controls say. */
+function resetTrail(){
+  pickTrail = [];
+  trailAt = -1;
+  offTrail = false;
+  paintBack();
+}
+
+$('#spinback').onclick = () => {
+  if($('#spinback').disabled) return;
+  if(!offTrail) trailAt -= 1;
+  showPick(pickTrail[trailAt]);
+};
+
+function currentGenreFilter(){
+  const g = $('#genre').value;
+  if(g) return {genres:[g], label:g};
+  const moodGenres = {
+    bleak:['Comedy','Drama'],
+    heavy:['Drama','War','History','Crime'],
+    off:['Action','Adventure','Comedy','Animation'],
+    trash:['Horror','Thriller','Science Fiction','Action']
+  }[$('#mood').value];
+  if(moodGenres) return {genres:moodGenres, label:$('#mood').selectedOptions[0].textContent};
+  return null;
+}
+
+/* Wide art behind a panel, fading into it. One element rather than a
+   background on the panel itself, so the image can sit at a lower opacity
+   than the words in front of it and be clipped to the panel's corners.
+   Nothing happens without a picture — the panel is exactly what it was. */
+function heroNode(src){
+  if(!src) return null;
+  const h = el('div','hero');
+  h.style.backgroundImage = 'url("' + String(src).replace(/["\\]/g, '') + '")';
+  return h;
+}
+
+function posterNode(src, alt){
+  if(src) { const i = el('img'); i.className='poster'; i.src=src; i.alt=alt||''; i.loading='lazy'; return i; }
+  return el('div','noposter', esc(alt||'no artwork'));
+}
+
+function pickCard(p){
+  const card = el('div','pick'+(p.type==='episode'?' tv':''));
+  const hero = heroNode(p.backdrop);
+  if(hero){ card.append(hero); card.classList.add('hashero'); }
+  card.append(posterNode(p.art, p.title));
+  const right = el('div');
+  right.append(el('div','eyebrow', p.type==='episode' ? 'Next episode' : 'Now'));
+  right.append(el('h2', null, esc(p.title)));
+  right.append(el('div','subline', esc(p.sub || [p.year, (p.genres||[]).join(' / ')].filter(Boolean).join('  ·  '))));
+  right.append(el('p','why', esc(p.why)));
+  if(p.plot) right.append(el('p','plot', esc(p.plot)+'…'));
+  const meta = el('div','meta');
+  if(p.runtime) meta.append(el('span',null,'Runtime <b>'+p.runtime+' min</b>'));
+  if(p.rating) meta.append(el('span',null,'TMDB <b>'+p.rating+'</b>'));
+  if(p.year) meta.append(el('span',null,'Year <b>'+p.year+'</b>'));
+  right.append(meta);
+
+  const rateSlot = el('div');
+  rateSlot.append(rateControl(p));
+  right.append(rateSlot);
+
+  const btns = el('div','rowbtns');
+  const problem = el('div');
+  const play = el('button','play','Play');
+  play.onclick = async () => {
+    play.textContent='Starting…';
+    problem.innerHTML='';
+    const r = await post('/api/play',{type:p.type,id:p.id});
+    if(r.error){
+      play.textContent = 'Play';
+      // Say what actually went wrong rather than just "failed".
+      problem.innerHTML = '<div class="notice bad"><h3>Couldn\'t start it</h3><p>'+
+        esc(r.error)+'</p></div>';
+      return;
+    }
+    play.textContent = 'Playing';
+    pollPlaying();
+  };
+  const skip = el('button','iconbtn','NOT THIS');
+  skip.onclick = () => { rejected.add(p.type+':'+p.id); loadTonight(); };
+
+  /* "Not tonight, but don't let me forget it." NOT THIS is the other half of
+     that thought and only does the first part — it drops the pick and moves
+     on, and the thing is gone until the draw happens to land on it again.
+     This is where you'd want to say the second part, at the moment you're
+     deciding, rather than having to go and find it in the Library afterwards.
+
+     The same control as the Rate tab's, down to the label, because it's the
+     same act. On an episode it marks the show: the watchlist holds
+     programmes, and watchlisting S03E07 on its own means nothing. */
+  let listed = !!p.watchlisted;
+  const watch = el('button','watchtoggle'+(listed?' on':''));
+  watch.innerHTML = watchLabel(listed);
+  watch.title = p.rate_type === 'tvshow'
+    ? 'Keep ' + p.title + ' on your watchlist — the show, not this episode'
+    : 'Keep this on your watchlist for another night';
+  watch.onclick = async () => {
+    watch.disabled = true;
+    const r = await post('/api/watchlist', {type:p.rate_type, id:p.rate_id});
+    watch.disabled = false;
+    if(r.error){
+      problem.innerHTML = '<div class="notice bad"><p>'+esc(r.error)+'</p></div>';
+      return;
+    }
+    listed = r.on;
+    /* The pick object is what the back button replays, so the new state has
+       to live on it too — otherwise stepping back a card and forward again
+       shows the button as it was before you pressed it. */
+    p.watchlisted = r.on;
+    watch.classList.toggle('on', r.on);
+    watch.innerHTML = watchLabel(r.on);
+    libraryChanged();
+  };
+
+  btns.append(play, skip, watch);
+  right.append(btns);
+  right.append(problem);
+  card.append(right);
+  return card;
+}
+
+function altCard(p){
+  const a = el('div','alt');
+  if(p.art){ const i = el('img'); i.src = p.art; i.alt=''; i.loading='lazy'; a.append(i); }
+  else { const d = el('div','noposter'); d.style.width='62px'; d.style.fontSize='9px'; a.append(d); }
+  const b = el('div');
+  b.append(el('h3',null,esc(p.title)));
+  b.append(el('p',null,esc([p.sub, p.why].filter(Boolean).join(' · '))));
+  const play = el('button','iconbtn','PLAY');
+  const why = el('p','empty');
+  play.onclick = async () => {
+    play.textContent='…'; why.textContent='';
+    /* Everything in this list is something you're part way through, and the
+       card says how far — so it picks up there rather than at the start. */
+    const r = await post('/api/play',{type:p.type,id:p.id,resume:true});
+    play.textContent = r.error ? 'PLAY' : 'PLAYING';
+    if(r.error) why.textContent = r.error;
+    else pollPlaying();
+  };
+  b.append(play, why);
+  a.append(b);
+  return a;
+}
+
+async function loadTonight(){
+  const q = tonightParams(rejected, false);
+  const out = $('#tonight-out');
+  const reasons = $('#reasons-out');
+  /* The pick you're looking at stays on screen until its replacement is
+     actually here. Clearing it first and writing "Picking…" collapsed 394px
+     of card and 165px of reasons, which threw "Continue where you left off"
+     551px up the page and dropped it back a frame or two later — measured,
+     not guessed. The draw takes about fifteen milliseconds, so that was one
+     or two frames of most of the window moving, every single press, and
+     pressing repeatedly is exactly what this button is for.
+
+     Dimming rather than emptying: the card is still the current pick until
+     something replaces it, so it can go on saying so. */
+  out.classList.add('swapping');
+  reasons.classList.add('swapping');
+  let data = null;
+  const ahead = pickAhead;
+  pickAhead = null;
+  if(ahead && ahead.key === aheadKey(rejected)){
+    /* Fetched while you were looking at the last one. Usually already here,
+       pictures and all; if not, it's at least already on its way. */
+    data = await ahead.promise;
+    const p = data && data.picks && data.picks[0];
+    if(p) post('/api/offered', {key: p.type + ':' + p.id});
+  }
+  if(!data || data.error){
+    data = await api('/api/tonight?'+q);
+    /* No look-ahead to use — the first pick, or a filter just changed. Give
+       the picture a moment to arrive so the card appears with it, but only
+       a moment. */
+    const p = data && data.picks && data.picks[0];
+    if(p) await withinMs(preloadArt(p), 700);
+  }
+  out.classList.remove('swapping');
+  reasons.classList.remove('swapping');
+  if(data.error){ out.innerHTML = '<div class="notice bad"><h3>Something went wrong</h3><p>'+esc(data.error)+'</p></div>'; return; }
+  if(data.reset) rejected.clear();
+  out.innerHTML = '';
+  if(!data.picks.length){
+    const f = currentGenreFilter();
+    const box = el('div','notice');
+    box.append(el('h3',null,'Nothing in your library matches that'));
+    box.append(el('p',null, f
+      ? 'Nothing unrated in your library fits that. Worth seeing what\'s out there instead.'
+      : 'Loosen the filters, or you\'ve already scored everything that fits.'));
+    if(f){
+      const go = el('button','play','Find '+esc(f.label.toLowerCase())+' to download');
+      /* Recommendations lives in the Library now, so getting there is a
+         tab and a section rather than a tab of its own. */
+      go.onclick = () => { carried = f; libSection = 'recs'; switchTo('library'); };
+      box.append(go);
+    }
+    out.append(box);
+    /* The trail is left exactly as it was, so BACK is the way out of a
+       dead end rather than another thing that doesn't work in one. */
+    currentTop = null;
+    offTrail = true;
+    paintBack();
+  } else {
+    /* A fresh draw truncates anything you had gone back past — from here
+       that's a different road, and keeping the old branch would make BACK
+       lead somewhere you never went. */
+    pickTrail = pickTrail.slice(0, trailAt + 1);
+    pickTrail.push(data.picks[0]);
+    trailAt = pickTrail.length - 1;
+    showPick(data.picks[0]);
+  }
+  const un = data['continue']||[];
+  $('#unfinished-sec').classList.toggle('hidden', !un.length);
+  $('#unfinished-count').textContent = un.length ? un.length+' IN PROGRESS' : '';
+  const uo = $('#unfinished-out'); uo.innerHTML='';
+  un.forEach(u => {
+    if(!u.why) u.why = u.percent+'% in · '+u.left+' min left';
+    uo.append(altCard(u));
+  });
+}
+
+/* Hold the space a block already occupies, so emptying it doesn't drag
+   everything below up the page. Released once the new contents are in and
+   have a height of their own — one honest settle instead of a round trip. */
+function holdHeight(node){
+  const h = node.getBoundingClientRect().height;
+  if(h) node.style.minHeight = h + 'px';
+}
+function releaseHeight(node){ node.style.minHeight = ''; }
+
+async function loadReasons(p){
+  const box = $('#reasons-out');
+  /* These belong to the pick that has just been replaced, so they can't
+     stay — but their space can, until the new ones arrive. */
+  holdHeight(box);
+  box.innerHTML = '<p class="empty">Working out why…</p>';
+  /* Already asked for if this pick was fetched ahead. */
+  const r = (await (p._why || api('/api/why?type='+encodeURIComponent(p.type)+'&id='+p.id)))
+            || {error: 'no reasons'};
+  box.innerHTML = '';
+  if(r.error || !r.cards || !r.cards.length){ releaseHeight(box); return; }
+  const grid = el('div','reasons');
+  r.cards.forEach(c => {
+    const node = el('div','reason');
+    node.dataset.kind = c.kind;
+    node.append(el('h3',null,esc(c.heading)));
+    node.append(el('p',null,esc(c.body)));
+    if(c.chips && c.chips.length){
+      const chips = el('div','rchips');
+      c.chips.forEach(x => chips.append(el('span','chip', esc(x))));
+      node.append(chips);
+    }
+    grid.append(node);
+  });
+  box.append(grid);
+  releaseHeight(box);
+}
+
+['mood','kind','genre'].forEach(id => $('#'+id).onchange = () => {
+  rejected.clear(); currentTop=null; resetTrail(); loadTonight();
+});
+$('#spin').onclick = () => { if(currentTop) rejected.add(currentTop); loadTonight(); };
+
+/* ================= LIBRARY ================= */
+let libKind = 'film';
+let libOffset = 0;
+let libRows = [];
+let searchTimer = null;
+
+/* Favourites is a section of its own rather than only a value in the Show
+   dropdown: it's a place you go, not a filter you happen to apply. Picking it
+   sets the shelf underneath, so the rest of the screen keeps working exactly
+   as it does everywhere else. */
+const LIB_SECTIONS = [['film','Films'],['tv','TV shows'],['fav','Favourites'],
+                      ['history','History'],['recs','Recommendations'],['drives','Drives']];
+/* The sections that aren't the shelf. They have no kind, no sort and no
+   pager of their own, and listing them once here means the three or four
+   places that have to know can ask rather than each keeping their own list
+   of exceptions — which is how one of them ends up out of date. */
+const LIB_PANELS = {recs:'#view-upnext', history:'#view-history', drives:'#view-drives'};
+
+let libSection = 'film';
+let favCount = null;
+let queueCount = 0;
+
+/* Which half of the Library view is showing. Everything that differs
+   between browsing your shelf and browsing what isn't on it goes through
+   here, so the two can never both be up or both be gone. */
+function applyLibSection(){
+  const recs = libSection === 'recs';
+  const hist = libSection === 'history';
+  $('#view-library').classList.toggle('showing-recs', recs);
+  $('#view-library').classList.toggle('showing-history', hist);
+  $('#view-library').classList.toggle('showing-drives', libSection === 'drives');
+  if(libSection === 'drives') driveOnOpen();
+  if(recs){
+    renderCarried(); drawHub(); paintMore();
+    /* The last scan is already on the server — written to disk when it
+       finished and read back at startup — so the shelf fills itself
+       instead of asking you to run it again to see what it found. */
+    if(!LAST_SCAN) pollScan();
+  }
+  if(hist) loadHistory();
+}
+
+function drawLibNav(){
+  const nav = $('#libnav'); nav.innerHTML='';
+  LIB_SECTIONS.forEach(([id,label]) => {
+    const b = el('button','subtab');
+    b.setAttribute('aria-selected', libSection===id);
+    b.append(document.createTextNode(label));
+    if(id==='fav' && favCount!=null) b.append(el('span','count', String(favCount)));
+    b.onclick = () => {
+      libSection = id; libOffset = 0;
+      /* Recommendations and History have no shelf, kind or sort of their own
+         — leaving those alone means going back to Films finds them as you
+         left them. */
+      if(!LIB_PANELS[id]){
+        /* Favourites holds films and shows alike — the same 'all' the
+           Shelf dropdown's Favourites has always used. */
+        libKind = id === 'tv' ? 'tv' : id === 'fav' ? 'all' : 'film';
+        if(id==='fav') $('#shelf').value = 'favourite';
+        else if($('#shelf').value === 'favourite') $('#shelf').value = 'all';
+      }
+      drawLibNav(); applyLibSection();
+      if(!LIB_PANELS[id]){ loadLibrary(); paintResumeRow(); }
+    };
+    nav.append(b);
+  });
+  $('#libsort').querySelector('option[value="runtime"]').disabled = (libKind==='tv');
+}
+
+/* ---------- a drive, shown like the Library ----------
+   Anything the library also has wears its poster and opens the page it
+   already has here. Anything it doesn't is shown by the name on the file,
+   marked as not in your library, and opens nothing — there is nothing to
+   open. Read once per drive and filtered in the page, so searching and
+   switching between films and shows costs no second look at the disk. */
+let drvData = null, drvInited = false, drvSeq = 0, drvTimer = null;
+
+function driveOnOpen(){
+  if(!drvInited){ drvInited = true; drvDrives(); return; }
+  if(drvData) drvShow(); else drvDrives();
+}
+
+async function drvDrives(){
+  const sel = $('#drv_pick');
+  const was = sel.value;
+  const r = await api('/api/dock/drives');
+  sel.innerHTML = '';
+  if(!r.supported){ sel.append(new Option('Not available on this OS', '')); drvLoad(); return; }
+  if(!r.drives.length){ sel.append(new Option('No drives found — plug one in', '')); drvLoad(); return; }
+  r.drives.forEach(d => sel.append(new Option(
+    d.letter + (d.label ? ' "' + d.label + '"' : '') + ' — ' + dockGB(d.free) + ' free', d.letter)));
+  /* The drive you were last looking at, or failing that the one picked in
+     the copy tray — the likeliest thing you want to see is where you just
+     sent something. */
+  const has = v => v && [...sel.options].some(o => o.value === v);
+  const tray = $('#tray_drive') ? $('#tray_drive').value : '';
+  if(has(was)) sel.value = was; else if(has(tray)) sel.value = tray;
+  drvLoad();
+}
+
+async function drvLoad(fresh){
+  const dest = $('#drv_pick').value;
+  const out = $('#drv_out');
+  const seq = ++drvSeq;
+  drvData = null;
+  $('#drv_summary').innerHTML = '';
+  if(!dest){ out.innerHTML = '<p class="empty">Plug in a drive to see what is on it.</p>'; return; }
+  out.innerHTML = '<p class="empty">Reading ' + esc(dest) + '…</p>';
+  const r = await api('/api/drive/catalogue?' + new URLSearchParams({dest, fresh: fresh ? '1' : '0'}));
+  if(seq !== drvSeq) return;               // a different drive was picked meanwhile
+  if(r.error){ out.innerHTML = '<div class="notice bad"><p>' + esc(r.error) + '</p></div>'; return; }
+  drvData = r;
+  drvShow();
+}
+
+$('#drv_pick').onchange = () => drvLoad();
+$('#drv_refresh').onclick = () => drvLoad(true);
+$('#drv_kind').onchange = () => drvShow();
+$('#drv_notlib').onchange = () => drvShow();
+$('#drv_q').oninput = () => { clearTimeout(drvTimer); drvTimer = setTimeout(drvShow, 150); };
+
+function drvShow(){
+  if(!drvData) return;
+  const d = drvData, out = $('#drv_out');
+  const kind = $('#drv_kind').value;
+  const onlyNew = $('#drv_notlib').checked;
+  const term = $('#drv_q').value.trim().toLowerCase();
+  const keep = it => (!onlyNew || !it.in_library) && (!term || (it.title || '').toLowerCase().includes(term));
+  const films = kind === 'tv' ? [] : d.films.filter(keep);
+  const shows = kind === 'film' ? [] : d.shows.filter(keep);
+
+  const strangers = d.films.filter(x => !x.in_library).length + d.shows.filter(x => !x.in_library).length;
+  const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many);
+  let html = ['<b>' + d.films.length + '</b> ' + (d.films.length === 1 ? 'film' : 'films'),
+              '<b>' + d.shows.length + '</b> ' + (d.shows.length === 1 ? 'show' : 'shows') + ', ' +
+                plural(d.episodes, 'episode', 'episodes'),
+              '<b>' + dockGB(d.bytes) + '</b> of video'].join('  ·  ');
+  if(d.free != null) html += '  ·  ' + dockGB(d.free) + ' free';
+  const extra = [];
+  if(strangers) extra.push(strangers + ' not in your library');
+  if(d.unidentified) extra.push('<span title="' + esc(d.unidentified_sample.join('  |  ')) + '">' +
+                                d.unidentified + ' file' + (d.unidentified === 1 ? '' : 's') + ' it couldn’t identify</span>');
+  if(extra.length) html += '<br>' + extra.join('  ·  ');
+  if(d.partial) html += '<br><span class="warn">This drive is too big to read in one go, so the list may be incomplete.</span>';
+  $('#drv_summary').innerHTML = html;
+
+  out.innerHTML = '';
+  if(!films.length && !shows.length){
+    out.innerHTML = '<p class="empty">' + (d.films.length || d.shows.length
+      ? 'Nothing on this drive matches that.' : 'No films or shows on this drive.') + '</p>';
+    return;
+  }
+  [['Films', films], ['TV shows', shows]].forEach(([label, list]) => {
+    if(!list.length) return;
+    const sec = el('div', 'drvsection');
+    sec.append(sechead(label, list.length + (list.length === 1 ? ' TITLE' : ' TITLES')));
+    const grid = el('div', 'tiles');
+    list.forEach(it => grid.append(driveTile(it)));
+    sec.append(grid);
+    out.append(sec);
+  });
+}
+
+function driveTile(it){
+  const b = el('button', 'tile drivetile' + (it.in_library ? '' : ' notlib'));
+  b.type = 'button';
+  if(it.poster){ const i = el('img', 'art'); i.src = it.poster; i.alt = ''; i.loading = 'lazy'; b.append(i); }
+  else b.append(el('div', 'blank', esc(it.title || '')));
+  const cap = el('div', 'cap');
+  const name = el('b'); name.textContent = it.title || ''; cap.append(name);
+  const bits = [];
+  if(it.kind === 'tvshow'){
+    const n = it.episodes || 0;
+    /* "11 of 28" only when the library knows a run to be part of; a drive
+       holding more than the library does just says how many. */
+    bits.push(it.of && n <= it.of ? n + ' of ' + it.of + ' eps' : n + (n === 1 ? ' ep' : ' eps'));
+  } else {
+    if(it.year) bits.push(it.year);
+    if(it.files > 1) bits.push(it.files + ' copies');
+  }
+  bits.push(dockGB(it.bytes));
+  const sub = el('small'); sub.textContent = bits.join('  ·  ');
+  cap.append(sub);
+  b.append(cap);
+  if(!it.in_library) b.append(el('span', 'notlibbadge', 'NOT IN LIBRARY'));
+  b.title = (it.title || '') + ' — ' + (it.where || '');
+  if(it.in_library && it.id) b.onclick = () => it.kind === 'tvshow' ? openShow(it.id) : openFilm(it.id);
+  else b.classList.add('inert');
+  return b;
+}
+
+/* ---------- continue where you left off ----------
+   Its own fetch rather than a corner of /api/browse: this row is the same
+   four things whatever you've searched for or filtered to, and hanging it
+   off the browse payload would rebuild it on every keystroke. */
+async function loadResumeRow(){
+  const data = await api('/api/resume');
+  resumeItems = (data && data.items) || [];
+  paintResumeRow();
+}
+
+/* Kept out of the fetch so searching can hide and show the strip without
+   asking the server the same question again. */
+let resumeItems = [];
+
+function paintResumeRow(){
+  const strip = $('#resumestrip');
+  const searching = !!$('#q').value.trim();
+  /* Hidden while you're searching: then the screen is about the thing
+     you're hunting for, and this is four other things in the way. */
+  /* The heading lives on the toolbar line now, so it hides and shows with
+     the cards rather than alongside them. */
+  /* The one that matches the shelf you're looking at: the last film on
+     Films, the last show on TV shows. Favourites holds both, so it takes
+     whichever was most recent. A shelf with nothing of its own part way
+     through shows nothing, rather than borrowing from the other one. */
+  const want = libSection === 'film' ? 'movie' : libSection === 'tv' ? 'episode' : null;
+  const mine = resumeItems.filter(it => !want || it.type === want);
+  const hide = !mine.length || searching;
+  strip.classList.toggle('hidden', hide);
+  const head = $('#resumehead');
+  if(head) head.classList.toggle('hidden', hide);
+  const row = $('#resumerow');
+  row.innerHTML = '';
+  /* One, not four. The Library is for the shelf; the one thing you were
+     halfway through is a reminder, and the rest of that list is History,
+     which the heading above now goes to. */
+  mine.slice(0, 1).forEach(item => row.append(resumeCard(item)));
+}
+
+/* The heading is the way in to the full list. Goes through the same two
+   calls the sub-nav buttons do rather than synthesising a click on one —
+   the button is drawn from LIB_SECTIONS and finding it by its label would
+   break the day the label changes. */
+$('#resumehead').onclick = () => {
+  libSection = 'history';
+  libOffset = 0;
+  drawLibNav();
+  applyLibSection();
+};
+
+function resumeCard(item){
+  const card = el('button','resumecard');
+  card.type = 'button';
+  /* The full title, which the one line below is free to ellipsise. */
+  card.title = [item.title, item.sub, item.note].filter(Boolean).join(' · ');
+
+  if(item.art){
+    const img = el('img'); img.src = item.art; img.alt = ''; img.loading = 'lazy';
+    card.append(img);
+  } else {
+    card.append(el('div','noart'));
+  }
+
+  const what = el('div','what');
+  what.append(el('b',null,esc(item.title)));
+  what.append(el('div','where', esc([item.sub, item.note].filter(Boolean).join(' · '))));
+  /* No bar where there's no length to measure against — an empty track
+     reads as "you've barely started", which would be a lie. */
+  if(item.percent > 0){
+    const bar = el('div','rbar');
+    const fill = el('i');
+    fill.style.width = Math.max(2, Math.min(100, item.percent)) + '%';
+    bar.append(fill);
+    what.append(bar);
+  }
+  card.append(what);
+
+  card.onclick = async () => {
+    if(card.classList.contains('busy')) return;
+    card.classList.add('busy');
+    const note = what.querySelector('.where');
+    const said = note.textContent;
+    note.textContent = 'STARTING…';
+    /* resume:true, or the server starts it from the beginning — an episode
+       loads with mpv's own resume turned off, so the position has to be
+       asked for by name. */
+    const r = await post('/api/play', {type:item.type, id:item.id, resume:true});
+    if(r.error){
+      note.textContent = said;
+      card.classList.remove('busy');
+      libScanNote(r.error, 'bad');
+      return;
+    }
+    note.textContent = 'PLAYING';
+    pollPlaying();
+    /* Where you are has just changed, and it'll change again as you watch.
+       Re-read it shortly rather than leaving the row describing the moment
+       before you pressed it. */
+    setTimeout(loadResumeRow, 4000);
+  };
+  return card;
+}
+
+const LIB_PAGE_SIZE = 120;
+
+async function loadLibrary(keepOffset){
+  if(!keepOffset) libOffset = 0;
+  /* Asked once and remembered: the badge on every greyed tile names the
+     machine the snapshot came from, and without this it falls back to a
+     polite "your main device" for the whole session. */
+  if(snapState === null) await refreshSnapshotState();
+  const q = new URLSearchParams({
+    kind: libKind, q: $('#q').value.trim(),
+    sort: $('#libsort').value, shelf: $('#shelf').value,
+    offset: libOffset, limit: LIB_PAGE_SIZE,
+  });
+  const out = $('#tiles-out');
+  out.innerHTML = '<p class="empty">Looking…</p>';
+  const data = await api('/api/browse?'+q);
+  if(data.error){
+    out.innerHTML = '<div class="notice bad"><p>'+esc(data.error)+'</p></div>';
+    $('#pager').classList.add('hidden');
+    return;
+  }
+  libRows = data.items;
+
+  const term = $('#q').value.trim();
+  $('#libcount').textContent = data.total
+    ? (term ? data.total+' MATCHING "'+term.toUpperCase()+'"' : data.total+' TITLES')
+    : '';
+
+  if(!libRows.length){
+    out.innerHTML = '<p class="empty">'+(term
+      ? 'Nothing matching that. Search covers titles, directors, actors and genres.'
+      : 'Nothing here yet — scan your folders on the Settings tab.')+'</p>';
+    $('#pager').classList.add('hidden');
+    return;
+  }
+
+  const grid = el('div','tiles');
+  libRows.forEach(item => grid.append(tile(item)));
+  out.innerHTML = '';
+  out.append(grid);
+  paintTicks();
+
+  const pager = $('#pager');
+  pager.classList.toggle('hidden', data.total <= LIB_PAGE_SIZE);
+  const from = data.offset + 1;
+  const to = data.offset + libRows.length;
+  $('#pagerpos').textContent = from+'–'+to+' OF '+data.total;
+  $('#pagerprev').disabled = data.offset <= 0;
+  $('#pagernext').disabled = to >= data.total;
+}
+
+$('#pagerprev').onclick = () => {
+  libOffset = Math.max(0, libOffset - LIB_PAGE_SIZE);
+  loadLibrary(true);
+  $('#view-library').scrollIntoView({block:'start'});
+};
+$('#pagernext').onclick = () => {
+  libOffset += LIB_PAGE_SIZE;
+  loadLibrary(true);
+  $('#view-library').scrollIntoView({block:'start'});
+};
+
+/* Re-scanning from the shelf you're standing at, rather than from Settings.
+   It's the same single worker on the server, so the one thing this has to
+   get right is adopting a scan it didn't start — otherwise the button sits
+   idle while the folders are being walked underneath it. */
+let libScanWatching = false;
+
+function libScanNote(text, tone){
+  const n = $('#libscanmsg');
+  n.textContent = text || '';
+  n.className = 'libscanmsg' + (tone ? ' ' + tone : '');
+}
+
+async function libScanTick(){
+  const s = await api('/api/library/status');
+  const btn = $('#librefresh');
+
+  if(s.running){
+    /* Adopted or our own, either way it's ours to report on now. */
+    libScanWatching = true;
+    btn.disabled = true;
+    btn.classList.add('spinning');
+    btn.title = 'Looking through your folders…';
+    /* Spelt out as well as spun, because the animation is the first thing
+       prefers-reduced-motion turns off. */
+    libScanNote(s.total ? 'SCANNING ' + Math.round(100*s.done/s.total) + '%'
+                        : 'SCANNING');
+    setTimeout(libScanTick, 700);
+    return;
+  }
+
+  btn.disabled = false;
+  btn.classList.remove('spinning');
+  btn.title = 'Look for new files';
+  if(!libScanWatching){ libScanNote(''); return; }
+  libScanWatching = false;
+
+  if(s.error){
+    libScanNote('SCAN STOPPED', 'bad');
+    btn.title = s.error;
+    return;
+  }
+  const r = s.result || {};
+  if(r.kept){
+    /* The mass-delete guard held. Say so plainly and leave the long version
+       on the Settings tab, which has room for it. */
+    libScanNote('NOTHING CHANGED', 'bad');
+    btn.title = r.kept + ' files in the library weren\'t found on disk this time. '
+      + 'That\'s most of them, so a drive is likelier missing than deleted — nothing '
+      + 'has been removed. There\'s more about it on the Settings tab.';
+    return;
+  }
+
+  const added = (r.movies || 0) + (r.episodes || 0);
+  const gone = r.removed || 0;
+  const bits = [];
+  if(added) bits.push('+' + added);
+  if(gone) bits.push('−' + gone);
+  libScanNote(bits.length ? bits.join(' ') : 'UP TO DATE', bits.length ? 'good' : '');
+  if(added || gone){ loadLibrary(true); loadStatus(); }
+  /* The result is worth a glance, not a permanent fixture. */
+  setTimeout(() => { if(!libScanWatching) libScanNote(''); }, 8000);
+}
+
+$('#librefresh').onclick = async () => {
+  const btn = $('#librefresh');
+  btn.disabled = true;
+  btn.classList.add('spinning');
+  libScanWatching = true;
+  libScanNote('SCANNING');
+  const r = await post('/api/library/scan');
+  /* The endpoint also refuses while a RECOMMENDATIONS scan is running, and
+     that one leaves nothing to poll — without this the button would report
+     the previous scan's result as if it were this one's. */
+  if(r.already){
+    const s = await api('/api/library/status');
+    if(!s.running){
+      libScanWatching = false;
+      btn.disabled = false;
+      btn.classList.remove('spinning');
+      libScanNote('BUSY', 'bad');
+      btn.title = 'A recommendations scan is running. Try again once it finishes.';
+      return;
+    }
+  }
+  libScanTick();
+};
+
+/* Where the snapshot came from, for the badge and the toast. Filled in by
+   refreshSnapshotState() and deliberately vague until it is. */
+let snapState = null;
+function elsewhereWhere(){
+  return (snapState && snapState.from) ? snapState.from : 'your main device';
+}
+function elsewhereLabel(){
+  return 'ON ' + elsewhereWhere().toUpperCase();
+}
+async function refreshSnapshotState(){
+  try{ snapState = await api('/api/library/snapshot/status'); }
+  catch(e){ snapState = null; }
+  return snapState;
+}
+
+function tile(item){
+  const b = el('button','tile');
+  b.dataset.key = item.kind + ':' + item.id;
+  if(dockSelected.has(b.dataset.key)) b.classList.add('picked');
+  if(item.poster){
+    const i = el('img','art'); i.src = item.poster; i.alt=''; i.loading='lazy';
+    b.append(i);
+  } else {
+    b.append(el('div','blank', esc(item.title||'')));
+  }
+
+  // Minimal text on the face of it; everything else waits for a hover.
+  const cap = el('div','cap');
+  const name = el('b'); name.textContent = item.title || '';
+  cap.append(name);
+  const sub = el('small');
+  sub.textContent = [item.year, item.kind==='tvshow'
+    ? (item.episodes+' eps') : (item.runtime ? item.runtime+' min' : '')]
+    .filter(Boolean).join('  ·  ');
+  cap.append(sub);
+  b.append(cap);
+
+  // The only state shown is where you actually got to, because it's the only
+  // thing the app has evidence for.
+  const progress = item.percent || 0;
+  if(item.in_progress && progress > 0 && progress < 100){
+    const bar = el('div','bar');
+    const fill = el('i'); fill.style.width = progress + '%';
+    bar.append(fill);
+    cap.prepend(bar);
+    bar.style.top = '-3px';
+  }
+
+  if(item.identified === false) b.append(el('div','unknown','NOT IDENTIFIED'));
+  if(item.elsewhere){
+    b.classList.add('elsewhere');
+    b.append(el('div','elsewherebadge', elsewhereLabel()));
+  }
+  const corner = el('div','tilecorner');
+  b.append(corner);
+  const syncMarks = () => {
+    corner.innerHTML = '';
+    if(item.userrating){
+      const m = el('div','mine', String(Math.round(item.userrating*2)/2));
+      m.style.setProperty('--h', hueFor(item.userrating));
+      corner.append(m);
+    }
+    if(item.favourited) corner.append(el('div','favbadge','♥'));
+    let star = b.querySelector('.watchbadge');
+    if(item.watchlisted && !star) b.append(el('div','watchbadge', BOOKMARK_ON));
+    else if(!item.watchlisted && star) star.remove();
+  };
+  syncMarks();
+
+  const peek = el('div','peek');
+  peek.append(el('h4',null,esc(item.title||'')));
+  if(item.elsewhere)
+    peek.append(el('div','line elsewhereline',
+      'On ' + esc(elsewhereWhere()) + ' — not on this device'));
+  const facts = [item.year];
+  if(item.tmdb) facts.push('TMDB '+item.tmdb);
+  if(item.kind==='movie' && item.runtime) facts.push(item.runtime+' min');
+  if(item.kind==='tvshow') facts.push(item.episodes+' episodes');
+  if(item.userrating) facts.push('you: '+(Math.round(item.userrating*2)/2));
+  if(item.progress_note) facts.push('up to '+item.progress_note);
+  peek.append(el('div','line', esc(facts.filter(Boolean).join('  ·  '))));
+  if(item.directors && item.directors.length)
+    peek.append(el('div','line', esc(item.directors.join(', '))));
+  if(item.cast && item.cast.length)
+    peek.append(el('div','line', esc(item.cast.join(', '))));
+  if(item.plot) peek.append(el('div','blurb', esc(item.plot)+'…'));
+  const watch = el('button','watchtoggle'+(item.watchlisted?' on':''),
+    watchLabel(item.watchlisted));
+  watch.onclick = async (e) => {
+    e.stopPropagation();
+    const r = await post('/api/watchlist', {type:item.kind, id:item.id});
+    item.watchlisted = r.on;
+    watch.classList.toggle('on', r.on);
+    watch.innerHTML = watchLabel(r.on);
+    syncMarks();
+  };
+  peek.append(watch);
+  const fav = el('button','favtoggle'+(item.favourited?' on':''),
+    item.favourited ? '♥ FAVOURITE' : '♡ FAVOURITE');
+  fav.onclick = async (e) => {
+    e.stopPropagation();
+    const r = await post('/api/favourite', {type:item.kind, id:item.id});
+    item.favourited = r.on;
+    fav.classList.toggle('on', r.on);
+    fav.textContent = r.on ? '♥ FAVOURITE' : '♡ FAVOURITE';
+    syncMarks();
+  };
+  /* Neither button has anything to act on without a local id — both post to
+     an endpoint keyed by one. watch is already in the panel by this point,
+     so it comes out; fav simply never goes in. */
+  if(item.elsewhere) watch.remove();
+  else peek.append(fav);
+  const foot = el('div','foot');
+  (item.genres||[]).forEach(g => foot.append(el('span','chip', esc(g))));
+  peek.append(foot);
+  b.append(peek);
+
+  b.append(el('span','tick'));
+  b.append(el('span','drivebadge'));
+  /* The right-click menu flips the same two flags as the buttons in the
+     hover panel, and the poster has to end up saying so either way. */
+  b._refresh = () => {
+    watch.classList.toggle('on', !!item.watchlisted);
+    watch.innerHTML = watchLabel(item.watchlisted);
+    fav.classList.toggle('on', !!item.favourited);
+    fav.textContent = item.favourited ? '♥ FAVOURITE' : '♡ FAVOURITE';
+    syncMarks();
+  };
+  b.oncontextmenu = (e) => {
+    e.preventDefault();
+    /* Nothing local to play, queue or mark on a machine that hasn't got it. */
+    if(item.elsewhere) return;
+    openTileMenu(e, item, b);
+  };
+  b.onclick = () => {
+    /* In selection mode a poster is a thing you tick, not a thing you open. */
+    if(libSelecting){
+      /* Nothing to copy from a machine that hasn't got the file. */
+      if(item.elsewhere) return;
+      toggleTicked(item, b); return;
+    }
+    /* No local row means no detail page and nothing to play. The hover panel
+       already says where it is, so the click is simply inert — this app has
+       no transient-message furniture and didn't want any adding for this. */
+    if(item.elsewhere) return;
+    item.kind==='tvshow' ? openShow(item.id) : openFilm(item.id);
+  };
+  return b;
+}
+
+/* ---------- right-click menu ----------
+   One menu element for the whole page, moved to wherever you clicked. Built
+   fresh on each open because its labels depend on the thing — "Remove from
+   favourites" only makes sense on a favourite. */
+let tileMenu = null;
+
+function closeTileMenu(){
+  if(tileMenu){ tileMenu.remove(); tileMenu = null; }
+}
+
+function openTileMenu(e, item, tileEl){
+  closeTileMenu();
+  const m = el('div','ctxmenu');
+  m.setAttribute('role','menu');
+  const isShow = item.kind === 'tvshow';
+  const add = (label, fn, cls) => {
+    const b = el('button','ctxitem' + (cls ? ' ' + cls : ''));
+    b.type = 'button';
+    b.setAttribute('role','menuitem');
+    b.append(el('span','ctxlabel', esc(label)));
+    b.onclick = async (ev) => { ev.stopPropagation(); closeTileMenu(); await fn(); };
+    m.append(b);
+    return b;
+  };
+  const rule = () => m.append(el('div','ctxrule'));
+
+  m.append(el('div','ctxtitle', esc(item.title || '')));
+  /* "Play", even for a show — "Play next episode" sat directly above "Play
+     next" and read as the same thing said twice. On a show it means the
+     episode you're up to, as it does everywhere else in the app.
+
+     No hints beside the items: asked for without, and the labels carry it. */
+  add('Play', async () => {
+    const r = await post('/api/playnow', {type:item.kind, id:item.id});
+    if(r.error) toast(r.error, true);
+    else { toast('Playing ' + (item.title || '')); pollPlaying(); }
+  }, 'strong');
+  rule();
+  add('Play next', () => queueAdd(item, true));
+  add('Add to queue', () => queueAdd(item, false));
+  rule();
+  add(item.favourited ? 'Remove from favourites' : 'Add to favourites', async () => {
+    const r = await post('/api/favourite', {type:item.kind, id:item.id});
+    if(r.error){ toast(r.error, true); return; }
+    item.favourited = r.on;
+    if(tileEl && tileEl._refresh) tileEl._refresh();
+    toast(r.on ? 'Added to favourites' : 'Removed from favourites');
+  });
+  add(item.watchlisted ? 'Remove from watchlist' : 'Add to watchlist', async () => {
+    const r = await post('/api/watchlist', {type:item.kind, id:item.id});
+    if(r.error){ toast(r.error, true); return; }
+    item.watchlisted = r.on;
+    if(tileEl && tileEl._refresh) tileEl._refresh();
+    toast(r.on ? 'Added to watchlist' : 'Removed from watchlist');
+  });
+  rule();
+  add('Details', async () => {
+    isShow ? openShow(item.id) : openFilm(item.id);
+  });
+
+  document.body.append(m);
+  /* Kept inside the window: flipped left or up when the click was near the
+     right or bottom edge, rather than running off it. */
+  const w = m.offsetWidth, h = m.offsetHeight;
+  let x = e.clientX, y = e.clientY;
+  if(x + w > innerWidth - 8) x = Math.max(8, x - w);
+  if(y + h > innerHeight - 8) y = Math.max(8, innerHeight - h - 8);
+  m.style.left = x + 'px';
+  m.style.top = y + 'px';
+  tileMenu = m;
+  const first = m.querySelector('.ctxitem');
+  if(first) first.focus({preventScroll:true});
+}
+
+/* Anything else closes it: a click elsewhere, Escape, a scroll, the window
+   losing focus. A menu that outlives what it was opened on is a menu that
+   acts on the wrong thing. */
+addEventListener('mousedown', e => { if(tileMenu && !tileMenu.contains(e.target)) closeTileMenu(); });
+addEventListener('keydown', e => {
+  if(!tileMenu) return;
+  if(e.key === 'Escape'){ closeTileMenu(); return; }
+  if(e.key === 'ArrowDown' || e.key === 'ArrowUp'){
+    e.preventDefault();
+    const items = [...tileMenu.querySelectorAll('.ctxitem')];
+    const at = items.indexOf(document.activeElement);
+    const next = e.key === 'ArrowDown' ? (at + 1) % items.length
+                                       : (at - 1 + items.length) % items.length;
+    items[next].focus();
+  }
+});
+addEventListener('wheel', closeTileMenu, {passive:true});
+addEventListener('blur', closeTileMenu);
+addEventListener('resize', closeTileMenu);
+
+/* ---------- a word in the corner ----------
+   The app went without transient messages on purpose, and most actions
+   still don't need one: the thing you clicked changes. Queueing is the
+   exception — the queue is somewhere else, so nothing you're looking at
+   changes, and without a word the click would look like it did nothing. */
+let toastTimer = null;
+function toast(msg, bad){
+  let t = $('#toast');
+  if(!t){ t = el('div'); t.id = 'toast'; t.setAttribute('role','status'); document.body.append(t); }
+  t.textContent = msg;
+  t.classList.toggle('bad', !!bad);
+  t.classList.add('on');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('on'), bad ? 4200 : 2600);
+}
+
+/* ---------- the queue ---------- */
+async function queueAdd(item, next){
+  const r = await post('/api/queue/add', {type:item.kind, id:item.id, next:!!next});
+  if(r.error){ toast(r.error, true); return; }
+  const what = r.title + (r.sub ? ' · ' + r.sub.split(' · ')[0] : '');
+  toast(next ? what + ' plays next'
+             : what + ' added to the queue' + (r.position > 1 ? ' (' + ordinal(r.position) + ')' : ''));
+  renderQueue(r.state);
+}
+
+function ordinal(n){
+  const s = ['th','st','nd','rd'], v = n % 100;
+  return n + (s[(v - 20) % 10] || s[v] || s[0]);
+}
+
+function setQueueCount(n){ queueCount = n; }
+
+async function loadQueue(){
+  const q = await api('/api/queue');
+  if(!q.error) renderQueue(q);
+}
+
+function fmtRun(mins){
+  if(!mins) return '';
+  const h = Math.floor(mins / 60), m = mins % 60;
+  return h ? h + 'h' + (m ? ' ' + pad(m) + 'm' : '') : m + 'm';
+}
+
+/* ---------- the side panel ----------
+   Three states, only ever one at a time:
+     docked    beside the page, which narrows to make room — a wide window
+     overlay   over the page's right edge, when docking would squash it
+     tucked    a slim tab on the right edge with the count on it
+   Below QUEUE_DOCK_MIN the page can't give up 300px and keep the Library's
+   header on one line, so the panel starts tucked there and slides out over
+   the page when asked, rather than crushing the posters. Tucking is your
+   choice and is remembered; the width decides only between docked and
+   overlay. */
+const QUEUE_DOCK_MIN = 1100;
+let queueTucked = false;      // filled in from the server, see renderQueue
+let queueOverlayOpen = false;
+
+/* Remembered where the rest of the settings live, so it survives a
+   restart — the window's own storage does not. */
+function setTucked(on){
+  queueTucked = on;
+  post('/api/queue/tuck', {tucked: on});
+}
+
+function placeQueueSide(){
+  const side = $('#queueside'), rail = $('#queuerail');
+  const any = queueCount > 0;
+  const wide = innerWidth >= QUEUE_DOCK_MIN;
+  const open = any && (wide ? !queueTucked : queueOverlayOpen);
+  side.classList.toggle('hidden', !open);
+  side.classList.toggle('overlay', open && !wide);
+  rail.classList.toggle('hidden', !any || open);
+  $('#qr_count').textContent = String(queueCount);
+  document.body.classList.toggle('queue-docked', open && wide);
+}
+
+$('#qs_collapse').onclick = () => {
+  if(innerWidth >= QUEUE_DOCK_MIN) setTucked(true);
+  queueOverlayOpen = false;
+  placeQueueSide();
+};
+$('#queuerail').onclick = () => {
+  if(innerWidth >= QUEUE_DOCK_MIN) setTucked(false);
+  else queueOverlayOpen = true;
+  placeQueueSide();
+};
+/* An overlay closes the way a menu does: click away from it, or Escape. */
+addEventListener('mousedown', e => {
+  if(!queueOverlayOpen) return;
+  const side = $('#queueside');
+  if(side.contains(e.target) || $('#queuerail').contains(e.target)) return;
+  if(tileMenu && tileMenu.contains(e.target)) return;
+  queueOverlayOpen = false; placeQueueSide();
+});
+addEventListener('keydown', e => {
+  if(e.key === 'Escape' && queueOverlayOpen && !tileMenu){ queueOverlayOpen = false; placeQueueSide(); }
+});
+/* Told the moment the window crosses the line, rather than working it out
+   from resize events — those can arrive before the new width does, which
+   left the panel docked one resize too long. */
+try{ matchMedia('(min-width:' + QUEUE_DOCK_MIN + 'px)').addEventListener('change', () => {
+  queueOverlayOpen = false; placeQueueSide();
+}); }catch(e){ addEventListener('resize', placeQueueSide); }
+
+let queueDrag = null;
+
+function renderQueue(q){
+  setQueueCount(q.count);
+  if(q.tucked !== undefined) queueTucked = !!q.tucked;
+  placeQueueSide();
+  $('#qs_sum').innerHTML = q.count
+    ? '<b>' + q.count + (q.count === 1 ? ' thing' : ' things') + '</b>'
+      + (q.minutes ? ' · ' + fmtRun(q.minutes) : '')
+    : '<b>Nothing queued</b>';
+  const out = $('#queue_out'); out.innerHTML = '';
+  if(!q.count) return;
+  q.items.forEach((it, idx) => {
+    const row = el('div','queuerow');
+    row.draggable = true;
+    row.dataset.qid = it.qid;
+    row.append(el('div','qpos', String(idx + 1)));
+    if(it.art){ const i = el('img'); i.src = it.art; i.alt = ''; i.loading = 'lazy'; i.draggable = false; row.append(i); }
+    else row.append(el('div','noposter'));
+    const t = el('div','t');
+    const h = el('h4'); h.textContent = it.title; h.title = it.title; t.append(h);
+    const bits = [];
+    if(it.kind === 'episode' && it.sub) bits.push(it.sub.split(' · ')[0]);
+    else if(it.sub) bits.push(it.sub);
+    if(it.minutes) bits.push(fmtRun(it.minutes));
+    if(it.resume && it.minutes) bits.push('from ' + fmtClock(it.resume));
+    const line = el('div','libline'); line.textContent = bits.join('  ·  ');
+    if(it.kind === 'episode' && it.sub) line.title = it.sub;
+    t.append(line);
+    row.append(t);
+
+    /* Shown on hover, over the end of the text, because 300px won't hold a
+       title and four buttons side by side. Keyboard focus shows them too. */
+    const acts = el('div','qacts');
+    const btn = (label, title, fn, cls) => {
+      const b = el('button','qbtn' + (cls ? ' ' + cls : ''), label);
+      b.type = 'button'; b.title = title;
+      b.onclick = (e) => { e.stopPropagation(); fn(b); };
+      acts.append(b); return b;
+    };
+    btn('▶', 'Play this now — the rest follows it', async (b) => {
+      b.disabled = true;
+      const r = await post('/api/queue/play', {qid: it.qid});
+      if(r.error){ toast(r.error, true); b.disabled = false; return; }
+      renderQueue(r.state); pollPlaying();
+    }, 'qplay');
+    btn('▲', 'Earlier', () => queueMove(it.qid, idx - 1)).disabled = idx === 0;
+    btn('▼', 'Later', () => queueMove(it.qid, idx + 1)).disabled = idx === q.items.length - 1;
+    btn('✕', 'Take it out of the queue', async () => {
+      const r = await post('/api/queue/remove', {qid: it.qid});
+      if(!r.error) renderQueue(r.state);
+    }, 'qx');
+    row.append(acts);
+
+    /* Drag to reorder. The row under the pointer shows a line where the
+       dragged one would land; letting go asks the server to put it there
+       and redraws from what comes back, so the panel can't drift from the
+       order that actually plays. */
+    row.ondragstart = (e) => {
+      queueDrag = it.qid; row.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      try{ e.dataTransfer.setData('text/plain', String(it.qid)); }catch(_){}
+    };
+    row.ondragend = () => {
+      queueDrag = null; row.classList.remove('dragging');
+      out.querySelectorAll('.dropbefore,.dropafter').forEach(n => n.classList.remove('dropbefore','dropafter'));
+    };
+    row.ondragover = (e) => {
+      if(queueDrag == null || queueDrag === it.qid) return;
+      e.preventDefault();
+      const r = row.getBoundingClientRect();
+      const after = e.clientY > r.top + r.height / 2;
+      row.classList.toggle('dropafter', after);
+      row.classList.toggle('dropbefore', !after);
+    };
+    row.ondragleave = () => row.classList.remove('dropbefore','dropafter');
+    row.ondrop = (e) => {
+      e.preventDefault();
+      if(queueDrag == null || queueDrag === it.qid) return;
+      const after = row.classList.contains('dropafter');
+      const from = q.items.findIndex(x => x.qid === queueDrag);
+      let to = idx + (after ? 1 : 0);
+      if(from < to) to -= 1;          // the list closes up behind the one lifted out
+      queueMove(queueDrag, to);
+    };
+    out.append(row);
+  });
+}
+
+async function queueMove(qid, to){
+  const r = await post('/api/queue/move', {qid: qid, to: to});
+  if(r.error){ toast(r.error, true); return; }
+  renderQueue(r.state);
+}
+
+$('#queue_play').onclick = async () => {
+  $('#queue_play').disabled = true;
+  const r = await post('/api/queue/play', {});
+  $('#queue_play').disabled = false;
+  if(r.error){ toast(r.error, true); return; }
+  renderQueue(r.state); pollPlaying();
+};
+$('#queue_clear').onclick = async () => {
+  const r = await post('/api/queue/clear', {});
+  if(!r.error){ queueOverlayOpen = false; renderQueue(r.state); }
+};
+
+/* ---------- selection mode ----------
+   One selection for the whole app: this is the docking station's own Map,
+   so a film ticked here is ticked in the Settings checklist and vice versa,
+   and a copy started from either place is the same job. */
+let libSelecting = false;
+let trayPhase = 'idle';           // idle | confirm | running
+let trayPolling = false;
+
+function toggleTicked(item, tileEl){
+  const key = item.kind + ':' + item.id;
+  if(dockSelected.has(key)) dockSelected.delete(key);
+  else dockSelected.set(key, {kind:item.kind, id:item.id, title:item.title});
+  if(tileEl) tileEl.classList.toggle('picked', dockSelected.has(key));
+  trayUpdate();
+  if(typeof dockUpdateStartState === 'function') dockUpdateStartState();
+}
+
+function paintTicks(){
+  document.querySelectorAll('.tile[data-key]').forEach(t =>
+    t.classList.toggle('picked', dockSelected.has(t.dataset.key)));
+  if(libSelecting) trayPresence();
+}
+
+/* What's already on the chosen drive, for the posters on screen. Asked of
+   the drive rather than remembered, because the drive is the truth: it may
+   have been filled by another machine, or emptied, since anything here was
+   written down. One request per page, re-asked when the drive changes. */
+let presenceSeq = 0;
+async function trayPresence(){
+  const dest = $('#tray_drive').value;
+  const tiles = [...document.querySelectorAll('.tile[data-key]')];
+  const clear = () => tiles.forEach(clearDriveMark);
+  if(!dest || !tiles.length){ clear(); trayUpdate(); return; }
+  const seq = ++presenceSeq;
+  const items = tiles.map(t => { const [kind, id] = t.dataset.key.split(':'); return {kind, id}; });
+  /* The first look at a drive walks the whole thing, which can take a few
+     seconds on a big one; after that it's answered from memory. */
+  if(trayPhase !== 'confirm' && trayPhase !== 'running') trayNote('Reading the drive…');
+  const r = await post('/api/dock/present', {items, dest});
+  if(seq !== presenceSeq) return;          // a newer answer is on its way
+  const present = (r && r.present) || {};
+  if(present._stalled){ trayNote('That drive isn\'t answering — is it awake?', 'bad'); clear(); return; }
+  if(trayPhase !== 'confirm' && trayPhase !== 'running'){
+    trayNote(present._partial ? 'That drive is too big to read through in one go — marks may be incomplete.' : '', present._partial ? 'bad' : '');
+  }
+  const driveName = dest;
+  tiles.forEach(t => {
+    const p = present[t.dataset.key];
+    const badge = t.querySelector('.drivebadge');
+    clearDriveMark(t);
+    /* No answer for this poster at all — nothing on disk to look for, such
+       as a show with no episode files — so no mark, rather than a guess. */
+    if(!p || !p.of) return;
+    if(t.dataset.t0 === undefined) t.dataset.t0 = t.title || '';
+    if(p.have >= p.of){
+      t.classList.add('ondrive'); badge.textContent = '✓';
+      /* Where it was found — the whole point when it isn't where the app
+         would have put it. */
+      t.title = 'On ' + driveName + (p.where ? ' at ' + p.where : '');
+    } else if(p.have > 0){
+      t.classList.add('partdrive'); badge.textContent = p.have + '/' + p.of;
+      t.title = p.have + ' of ' + p.of + ' files already on ' + driveName;
+    } else {
+      t.classList.add('offdrive'); badge.textContent = '✕';
+      t.title = 'Not on ' + driveName;
+    }
+  });
+  lastPresence = present;
+  trayUpdate();
+}
+let lastPresence = {};
+
+function clearDriveMark(t){
+  t.classList.remove('ondrive', 'offdrive', 'partdrive');
+  const badge = t.querySelector('.drivebadge');
+  if(badge) badge.textContent = '';
+  if(t.dataset.t0 !== undefined){ t.title = t.dataset.t0; delete t.dataset.t0; }
+}
+
+function setSelecting(on){
+  libSelecting = !!on;
+  $('#view-library').classList.toggle('selecting', libSelecting);
+  $('#seltray').classList.toggle('hidden', !libSelecting);
+  $('#libselect').setAttribute('aria-pressed', String(libSelecting));
+  $('#libselect').textContent = libSelecting ? 'SELECTING' : 'SELECT';
+  if(libSelecting){ trayRefreshDrives().then(trayPresence); trayUpdate(); trayPoll(); }
+  else { presenceSeq++; document.querySelectorAll('.tile[data-key]').forEach(clearDriveMark); }
+}
+$('#libselect').onclick = () => setSelecting(!libSelecting);
+$('#tray_done').onclick = () => setSelecting(false);
+document.addEventListener('keydown', e => {
+  if(e.key === 'Escape' && libSelecting && !document.querySelector('.sheet')) setSelecting(false);
+});
+
+$('#tray_clear').onclick = () => {
+  dockSelected.clear();
+  paintTicks(); trayUpdate(); trayResetConfirm();
+  if(typeof dockUpdateStartState === 'function') dockUpdateStartState();
+};
+
+function trayUpdate(){
+  const vals = [...dockSelected.values()];
+  const films = vals.filter(v => v.kind === 'movie').length;
+  const shows = vals.length - films;
+  const parts = [];
+  if(films) parts.push(films + (films === 1 ? ' film' : ' films'));
+  if(shows) parts.push(shows + (shows === 1 ? ' show' : ' shows'));
+  const there = vals.filter(v => { const p = lastPresence[v.kind + ':' + v.id]; return p && p.have >= p.of; }).length;
+  $('#tray_count').textContent = vals.length
+    ? vals.length + ' ticked · ' + parts.join(', ') + (there ? ' · ' + there + ' already on drive' : '')
+    : 'Nothing ticked yet';
+  $('#tray_add').disabled = !(vals.length && $('#tray_drive').value) || trayPhase === 'running';
+}
+
+async function trayRefreshDrives(){
+  const sel = $('#tray_drive');
+  const was = sel.value;
+  const r = await api('/api/dock/drives');
+  sel.innerHTML = '';
+  if(!r.supported){ sel.append(new Option('Not available on this OS', '')); trayUpdate(); return; }
+  if(!r.drives.length){ sel.append(new Option('No drives found — plug one in', '')); trayUpdate(); return; }
+  r.drives.forEach(d => sel.append(new Option(
+    d.letter + (d.label ? ' "' + d.label + '"' : '') + ' — ' + dockGB(d.free) + ' free', d.letter)));
+  if([...sel.options].some(o => o.value === was)) sel.value = was;
+  /* Keep the Settings picker on the same drive, so the two never disagree. */
+  const settingsPick = $('#dock_drive');
+  if(settingsPick && [...settingsPick.options].some(o => o.value === sel.value)) settingsPick.value = sel.value;
+  trayUpdate();
+}
+$('#tray_refresh').onclick = trayRefreshDrives;
+$('#tray_drive').onchange = () => { trayResetConfirm(); trayUpdate(); trayPresence(); };
+
+function trayNote(text, tone){
+  const n = $('#tray_status');
+  n.className = 'selstatus' + (tone ? ' ' + tone : '');
+  n.innerHTML = text || '';
+}
+
+function trayResetConfirm(){
+  if(trayPhase === 'confirm'){
+    trayPhase = 'idle';
+    $('#tray_add').textContent = 'ADD TO DRIVE';
+    trayNote('');
+  }
+}
+
+$('#tray_add').onclick = async () => {
+  const dest = $('#tray_drive').value;
+  const items = [...dockSelected.values()].map(v => ({kind:v.kind, id:v.id}));
+  if(!items.length || !dest) return;
+
+  if(trayPhase !== 'confirm'){
+    /* Two presses on purpose: the first prices the job — files, size, and
+       whether it fits — and the second commits. The size can't be known
+       until every source has been stat'd, and it's the number worth seeing
+       before a multi-gigabyte copy starts. */
+    $('#tray_add').disabled = true;
+    trayNote('Working out what to copy…');
+    const plan = await post('/api/dock/plan', {items, dest});
+    $('#tray_add').disabled = false;
+    if(plan.error){ trayNote(esc(plan.error), 'bad'); return; }
+    if(!plan.count){
+      trayNote(plan.already
+        ? 'Nothing to copy — all ' + plan.already + ' of those files are already on ' + esc(dest) + '.'
+        : 'Nothing left to copy — ' + esc(plan.warnings[0] || 'everything ticked has moved or gone missing.'), plan.already ? 'good' : 'bad');
+      return;
+    }
+    let note = plan.count + ' file' + (plan.count === 1 ? '' : 's') + ' to copy, ' + dockGB(plan.bytes) + '.';
+    if(plan.already) note += ' ' + plan.already + ' already on the drive (' + dockGB(plan.already_bytes) + '), skipped.';
+    if(!plan.fits){ trayNote(esc(note + ' That is more than the ' + dockGB(plan.free) + ' free on ' + dest + '.'), 'bad'); return; }
+    if(plan.warnings.length) note += ' ' + plan.warnings.length + ' skipped: ' + plan.warnings.slice(0, 2).join('; ');
+    trayNote(esc(note) + ' Press again to start.');
+    trayPhase = 'confirm';
+    $('#tray_add').textContent = 'CONFIRM — COPY ' + dockGB(plan.bytes);
+    return;
+  }
+
+  trayPhase = 'running';
+  $('#tray_add').disabled = true;
+  $('#tray_add').textContent = 'ADD TO DRIVE';
+  $('#tray_cancel').classList.remove('hidden');
+  const settingsPick = $('#dock_drive');
+  if(settingsPick && [...settingsPick.options].some(o => o.value === dest)) settingsPick.value = dest;
+  await post('/api/dock/start', {items, dest});
+  trayPoll();
+};
+
+$('#tray_cancel').onclick = async () => {
+  $('#tray_cancel').disabled = true;
+  await post('/api/dock/cancel');
+};
+
+/* Its own poller, so the tray shows progress whether or not Settings has ever
+   been opened; Settings adopts the same job independently when it is. */
+async function trayPoll(){
+  if(trayPolling) return;
+  trayPolling = true;
+  try{
+    while(true){
+      const s = await api('/api/dock/status');
+      if(!s.running){
+        $('#tray_cancel').classList.add('hidden');
+        $('#tray_cancel').disabled = false;
+        if(trayPhase === 'running'){
+          trayPhase = 'idle';
+          const bits = [];
+          if(s.done) bits.push(s.done + ' of ' + s.total + ' copied');
+          if(s.step === 'Cancelled') bits.push('stopped early');
+          trayNote(esc((s.step === 'Cancelled' ? 'Cancelled — ' : 'Done — ') + (bits.join(', ') || 'nothing copied.'))
+                   + (s.errors.length ? '<br>' + esc(s.errors.slice(0, 3).join('; ')) : ''),
+                   s.errors.length ? 'bad' : 'good');
+        }
+        trayUpdate();
+        return;
+      }
+      trayPhase = 'running';
+      $('#tray_cancel').classList.remove('hidden');
+      const pct = s.bytes_total ? Math.round(100 * s.bytes_done / s.bytes_total) : 0;
+      trayNote(esc('Copying ' + (s.done + 1) + ' of ' + s.total + ' · ' + dockGB(s.bytes_done) + ' of ' + dockGB(s.bytes_total)
+               + (s.step ? ' · ' + s.step : ''))
+               + '<div class="progress"><i style="width:' + pct + '%"></i></div>');
+      trayUpdate();
+      await new Promise(r => setTimeout(r, 900));
+    }
+  } finally { trayPolling = false; }
+}
+
+$('#q').oninput = () => {
+  /* The strip goes as soon as you start typing, not when the results
+     arrive — a search row that jumps 130px down a fifth of a second later
+     moves the grid out from under the pointer. */
+  paintResumeRow();
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => loadLibrary(), 220);
+};
+$('#libsort').onchange = () => loadLibrary();
+/* Picking Favourites from the dropdown lights the section up as well, so the
+   two controls can never sit there disagreeing about where you are. */
+$('#shelf').onchange = () => {
+  const fav = $('#shelf').value === 'favourite';
+  if(fav && libSection !== 'fav'){ libSection = 'fav'; libKind = 'all'; drawLibNav(); }
+  else if(!fav && libSection === 'fav'){ libSection = 'film'; libKind = 'film'; drawLibNav(); }
+  loadLibrary();
+};
+
+/* ---------- the detail sheet ---------- */
+function sheet(){
+  const back = el('div','sheet');
+  const body = el('div','sheetbody');
+  body.style.position = 'relative';
+  const x = el('button','closex','CLOSE ✕');
+  x.onclick = () => back.remove();
+  body.append(x);
+  back.append(body);
+  /* Closing on the backdrop alone wasn't enough: the empty half of a
+     two-column sheet is dead space belonging to the CONTAINER, not the
+     backdrop behind it, so clicking the obvious gap did nothing. Anything
+     that isn't the content itself now dismisses. */
+  back.onclick = e => { if(e.target === back || e.target === body) back.remove(); };
+  document.addEventListener('keydown', function esc2(e){
+    if(e.key === 'Escape'){ back.remove(); document.removeEventListener('keydown', esc2); }
+  });
+  document.body.append(back);
+  return body;
+}
+
+async function openFilm(id){
+  const body = sheet();
+  body.append(el('p','empty','Loading…'));
+
+  const item = await api('/api/movie?id='+id);
+  if(item.error){ body.innerHTML = '<p class="empty">'+esc(item.error)+'</p>'; return; }
+
+  body.innerHTML = '';
+  body.className = 'sheetstack';
+
+  const main = el('div','sheetpanel main');
+  const hero = heroNode(item.backdrop);
+  if(hero){ main.append(hero); main.classList.add('hashero'); }
+  const x = el('button','closex','CLOSE ✕');
+  x.onclick = () => body.closest('.sheet').remove();
+  main.append(x);
+  if(item.poster){ const i=el('img'); i.src=item.poster; i.alt=''; main.append(i); }
+  else main.append(el('div','blank'));
+  const right = el('div');
+  right.append(el('h2',null,esc(item.title||'')));
+  const facts = [item.year, item.runtime ? item.runtime+' min' : null,
+                 item.tmdb ? 'TMDB '+item.tmdb : null,
+                 (item.genres||[]).join(' / ')].filter(Boolean);
+  right.append(el('div','subline', esc(facts.join('  ·  '))));
+  if(item.directors && item.directors.length)
+    right.append(el('p','plot','Directed by '+esc(item.directors.join(', '))));
+  if(item.tagline) right.append(el('p','tagline', esc(item.tagline)));
+  if(item.plot) right.append(el('p','plot', esc(item.plot)));
+
+  right.append(rateControl(
+    {rate_type:'movie', rate_id:item.id, userrating:item.userrating},
+    {onRated:() => { libraryChanged(); loadLibrary(); }}));
+
+  const btns = el('div','rowbtns');
+  const play = el('button','play', item.in_progress ? 'Resume' : 'Play');
+  const problem = el('div');
+  play.onclick = async () => {
+    play.textContent='Starting…'; problem.innerHTML='';
+    // The button already says Resume when there's a position to resume to.
+    const r = await post('/api/play',
+                         {type:'movie', id:item.id, resume:!!item.in_progress});
+    if(r.error){
+      play.textContent = 'Play';
+      problem.innerHTML = '<div class="notice bad"><p>'+esc(r.error)+'</p></div>';
+      return;
+    }
+    play.textContent = 'Playing';
+    pollPlaying();
+  };
+  const watch = el('button','watchtoggle'+(item.watchlisted?' on':''),
+    watchLabel(item.watchlisted));
+  watch.onclick = async () => {
+    const r = await post('/api/watchlist', {type:'movie', id:item.id});
+    item.watchlisted = r.on;
+    watch.classList.toggle('on', r.on);
+    watch.innerHTML = watchLabel(r.on);
+    libraryChanged(); loadLibrary();
+  };
+  const fav = el('button','favtoggle'+(item.favourited?' on':''),
+    item.favourited ? '♥ FAVOURITE' : '♡ FAVOURITE');
+  fav.onclick = async () => {
+    const r = await post('/api/favourite', {type:'movie', id:item.id});
+    item.favourited = r.on;
+    fav.classList.toggle('on', r.on);
+    fav.textContent = r.on ? '♥ FAVOURITE' : '♡ FAVOURITE';
+    libraryChanged(); loadLibrary();
+  };
+  const fixToggle = el('button','iconbtn',
+    item.identified === false ? 'FIX TITLE' : 'WRONG MATCH?');
+  btns.append(play, watch, fav, fixToggle);
+  right.append(btns, problem);
+
+  const fixForm = el('div','fixform hidden');
+  const fixTitle = el('input'); fixTitle.className = 'fixtitle';
+  fixTitle.placeholder = 'Correct title';
+  fixTitle.value = item.identified === false ? (item.title || '') : '';
+  const fixYear = el('input'); fixYear.className = 'fixyear';
+  fixYear.placeholder = 'Year'; fixYear.value = item.year || '';
+  const fixGo = el('button','iconbtn','LOOK UP');
+  const fixMsg = el('div','msg');
+  fixForm.append(fixTitle, fixYear, fixGo, fixMsg);
+  fixToggle.onclick = () => {
+    fixForm.classList.toggle('hidden');
+    if(!fixForm.classList.contains('hidden')) fixTitle.focus();
+  };
+  fixGo.onclick = async () => {
+    if(!fixTitle.value.trim()){ fixMsg.textContent = 'Give it a title first.'; return; }
+    fixGo.disabled = true; fixMsg.textContent = 'Looking…';
+    const r = await post('/api/override',
+      {id:item.id, title:fixTitle.value.trim(), year:fixYear.value.trim()});
+    fixGo.disabled = false;
+    if(r.error){ fixMsg.textContent = r.error; return; }
+    fixMsg.textContent = r.matched
+      ? 'Found it — refreshing…'
+      : 'Saved that title, but TMDB still has nothing for it. It\'ll keep trying that title on the next scan.';
+    libraryChanged();
+    setTimeout(() => { body.closest('.sheet').remove(); loadLibrary(); }, r.matched ? 900 : 2200);
+  };
+  right.append(fixForm);
+  if(item.facts && item.facts.length) right.append(factStrip(item.facts));
+  main.append(right);
+  body.append(main);
+
+  const directorsDetail = item.directors_detail || [];
+  if((item.cast && item.cast.length) || directorsDetail.length){
+    const castPanel = el('div','sheetpanel');
+    castPanel.append(el('div','seasonhead','Cast & Director'));
+    const castGrid = el('div','castgrid');
+    const personRow = (person, roleLabel) => {
+      const row = el('div','castrow');
+      const chip = el('button','castchip');
+      const count = person.other_films.length;
+      const label = roleLabel
+        ? (count ? roleLabel+' · '+count+' more you own' : roleLabel)
+        : (count ? 'in '+count+' more you own' : 'nothing else of theirs here');
+      if(person.photo !== undefined){
+        /* A face where TMDB has one, an empty circle where it doesn't, so a
+           row without a portrait still lines up with the rest of them. */
+        chip.classList.add('withface');
+        if(person.photo){ const f=el('img','face'); f.src=person.photo; f.alt=''; chip.append(f); }
+        else chip.append(el('div','facegap'));
+        const who = el('div','who');
+        who.append(el('b',null,esc(person.name)));
+        who.append(el('small',null,label));
+        chip.append(who);
+      } else {
+        chip.append(el('b',null,esc(person.name)));
+        chip.append(el('small',null,label));
+      }
+      row.append(chip);
+      chip.onclick = () => {
+        body.closest('.sheet').remove();
+        openPerson(person.person_id, person.name);
+      };
+      return row;
+    };
+    directorsDetail.forEach(person => castGrid.append(personRow(person, 'Director')));
+    (item.cast || []).forEach(person => castGrid.append(personRow(person, null)));
+    castPanel.append(castGrid);
+    body.append(castPanel);
+  }
+
+  if(item.similar && item.similar.length){
+    const simPanel = el('div','sheetpanel');
+    simPanel.append(el('div','seasonhead','Similar films you own'));
+    const simGrid = el('div','simgrid');
+    item.similar.forEach(f => {
+      const card = el('button','simcard');
+      if(f.poster){ const i=el('img'); i.src=f.poster; i.alt=''; card.append(i); }
+      else card.append(el('div','noposter'));
+      const cap = el('div','simcap');
+      cap.append(el('b',null,esc(f.title)));
+      cap.append(el('small',null, esc([f.year, f.score ? 'you: '+fmtScoreShort(f.score) : null]
+        .filter(Boolean).join('  ·  '))));
+      card.append(cap);
+      card.onclick = () => { body.closest('.sheet').remove(); openFilm(f.id); };
+      simGrid.append(card);
+    });
+    simPanel.append(simGrid);
+    body.append(simPanel);
+  }
+}
+
+/* A person's own page. Replaces the little drop-down list of "other films you
+   own" that used to hang off a name — same information, plus who they
+   actually are, and somewhere to put a photograph. */
+async function openPerson(personId, name){
+  const body = sheet();
+  body.append(el('p','empty','Loading…'));
+  const p = await api('/api/person?id='+encodeURIComponent(personId||'')
+                      +'&name='+encodeURIComponent(name||''));
+  body.innerHTML = '';
+  body.className = 'sheetcolumn';
+
+  const head = el('div','sheetpanel personhead');
+  const x = el('button','closex','CLOSE ✕');
+  x.onclick = () => body.closest('.sheet').remove();
+  head.append(x);
+  if(p.photo){ const i=el('img','portrait'); i.src=p.photo; i.alt=''; head.append(i); }
+  else head.append(el('div','portrait blank'));
+  const who = el('div');
+  who.append(el('h2',null,esc(p.name||name||'')));
+  const line = [p.role, ...(p.life||[])].filter(Boolean).join('  ·  ');
+  if(line) who.append(el('div','subline', esc(line)));
+  if(p.bio){
+    const bio = el('p','plot', esc(p.bio.slice(0,700)) + (p.bio.length>700 ? '…' : ''));
+    who.append(bio);
+    if(p.bio.length > 700){
+      const more = el('button','iconbtn','READ MORE');
+      more.onclick = () => { bio.textContent = p.bio; more.remove(); };
+      who.append(more);
+    }
+  } else if(p.offline){
+    who.append(el('p','empty',
+      'No biography stored for them yet — that part needs an internet connection.'));
+  }
+  head.append(who);
+  body.append(head);
+
+  const owned = (p.films||[]).length + (p.shows||[]).length;
+  const panel = el('div','sheetpanel');
+  panel.append(el('div','seasonhead', owned
+    ? 'In your library ('+owned+')' : 'Nothing of theirs in your library'));
+  if(owned){
+    const grid = el('div','simgrid');
+    (p.films||[]).forEach(f => {
+      const card = el('button','simcard');
+      if(f.poster){ const i=el('img'); i.src=f.poster; i.alt=''; card.append(i); }
+      else card.append(el('div','noposter'));
+      const cap = el('div','simcap');
+      cap.append(el('b',null,esc(f.title)));
+      cap.append(el('small',null, esc([f.year, f.score ? 'you: '+fmtScoreShort(f.score) : null]
+        .filter(Boolean).join('  ·  '))));
+      card.append(cap);
+      card.onclick = () => { body.closest('.sheet').remove(); openFilm(f.id); };
+      grid.append(card);
+    });
+    (p.shows||[]).forEach(sh => {
+      const card = el('button','simcard');
+      if(sh.poster){ const i=el('img'); i.src=sh.poster; i.alt=''; card.append(i); }
+      else card.append(el('div','noposter'));
+      const cap = el('div','simcap');
+      cap.append(el('b',null,esc(sh.title)));
+      cap.append(el('small',null, esc(sh.score ? 'you: '+fmtScoreShort(sh.score) : 'TV')));
+      card.append(cap);
+      card.onclick = () => { body.closest('.sheet').remove(); openShow(sh.id); };
+      grid.append(card);
+    });
+    panel.append(grid);
+  }
+  body.append(panel);
+}
+
+function factStrip(facts){
+  const strip = el('div','factstrip');
+  facts.forEach(f => {
+    const cell = el('div','fact');
+    cell.append(el('div','k', esc(f.label)));
+    cell.append(el('div','v', esc(f.value)));
+    strip.append(cell);
+  });
+  return strip;
+}
+
+/* Faces for a show's cast and creators. Films get this through the richer
+   personRow (their names link off to other films you own); a show's names
+   have nowhere to lead, so they're just shown. */
+function faceRow(people, heading, sheetBody){
+  const wrap = el('div');
+  wrap.append(el('div','seasonhead', heading));
+  const grid = el('div','castgrid');
+  people.forEach(p => {
+    const chip = el('button','castchip withface');
+    chip.onclick = () => {
+      if(sheetBody) sheetBody.closest('.sheet').remove();
+      openPerson(p.person_id, p.name);
+    };
+    if(p.photo){ const f=el('img','face'); f.src=p.photo; f.alt=''; chip.append(f); }
+    else chip.append(el('div','facegap'));
+    const who = el('div','who');
+    who.append(el('b',null,esc(p.name)));
+    chip.append(who);
+    grid.append(chip);
+  });
+  wrap.append(grid);
+  return wrap;
+}
+
+function fmtScoreShort(v){
+  return String(Math.round(v*2)/2);
+}
+
+async function openShow(id){
+  const body = sheet();
+  body.append(el('div','blank'));
+  const right = el('div');
+  right.append(el('p','empty','Loading…'));
+  body.append(right);
+
+  const d = await api('/api/show?id='+id);
+  if(d.error){ right.innerHTML = '<p class="empty">'+esc(d.error)+'</p>'; return; }
+
+  body.innerHTML = '';
+  const hero = heroNode(d.backdrop);
+  if(hero){ body.append(hero); body.classList.add('hashero'); }
+  const x = el('button','closex','CLOSE ✕');
+  x.onclick = () => body.closest('.sheet').remove();
+  body.append(x);
+  if(d.poster){ const i=el('img'); i.src=d.poster; i.alt=''; body.append(i); }
+  else body.append(el('div','blank'));
+
+  const col = el('div');
+  col.append(el('h2',null,esc(d.title||'')));
+  col.append(el('div','subline', esc([d.year, d.tmdb?('TMDB '+d.tmdb):null,
+    (d.genres||[]).join(' / ')].filter(Boolean).join('  ·  '))));
+  if(d.plot) col.append(el('p','plot', esc(d.plot.slice(0,320))+'…'));
+  col.append(rateControl({rate_type:'tvshow', rate_id:d.id, userrating:d.userrating},
+                         {label:'Your rating for the show',
+                          onRated:() => { libraryChanged(); loadLibrary(); }}));
+  const watch = el('button','watchtoggle'+(d.watchlisted?' on':''),
+    watchLabel(d.watchlisted));
+  watch.style.marginTop = '10px';
+  watch.onclick = async () => {
+    const r = await post('/api/watchlist', {type:'tvshow', id:d.id});
+    d.watchlisted = r.on;
+    watch.classList.toggle('on', r.on);
+    watch.innerHTML = watchLabel(r.on);
+    libraryChanged(); loadLibrary();
+  };
+  col.append(watch);
+  const fav = el('button','favtoggle'+(d.favourited?' on':''),
+    d.favourited ? '♥ FAVOURITE' : '♡ FAVOURITE');
+  fav.style.marginTop = '8px';
+  fav.onclick = async () => {
+    const r = await post('/api/favourite', {type:'tvshow', id:d.id});
+    d.favourited = r.on;
+    fav.classList.toggle('on', r.on);
+    fav.textContent = r.on ? '♥ FAVOURITE' : '♡ FAVOURITE';
+    libraryChanged(); loadLibrary();
+  };
+  col.append(fav);
+  if(d.facts && d.facts.length) col.append(factStrip(d.facts));
+  if(d.creators && d.creators.length) col.append(faceRow(d.creators, 'Created by', body));
+  if(d.cast && d.cast.length) col.append(faceRow(d.cast.slice(0,8), 'Cast', body));
+
+  const seasons = d.seasons || [];
+  if(seasons.length) col.append(seasonBrowser(d, seasons));
+  body.append(col);
+}
+
+/* A season at a time, opened at whichever one you're in the middle of.
+   Everything stacked meant the only way to reach season five was the wheel,
+   and the sheet was 5,700px tall on a show like The Simpsons. */
+function seasonBrowser(d, seasons){
+  const wrap = el('div');
+
+  const head = el('div','seasonpick');
+  head.append(el('div','seasonhead','Episodes'));
+  if(d.progress_note) head.append(el('div','upto', esc(d.progress_note)));
+  wrap.append(head);
+
+  const label = s => (s.season === 0 ? 'SPECIALS' : 'S'+pad(s.season));
+  const watched = s => s.episodes.filter(ep => ep.played).length;
+  /* "Started" is wider than "played" on purpose. playcount was never written
+     before v0.1.1, so a season can be one you're plainly in the middle of and
+     still have nothing marked in it — being part way through an episode, or
+     being where the show says you're up to, both count. */
+  const started = s => s.episodes.some(
+    ep => ep.played || ep.percent || ep.id === d.next_up);
+
+  const count = el('div','seasoncount');
+  const list = el('div');
+
+  /* Where you actually are, not where the show starts. A season with nothing
+     watched but "next up" inside it is still the one you want; falling back
+     to the first season only matters for a show you've never touched.
+     Specials are never the answer — they sit outside the run. */
+  let current = seasons.findIndex(s => s.episodes.some(ep => ep.id === d.next_up));
+  if(current < 0) current = Math.max(0, seasons.findIndex(s => s.season > 0));
+
+  const bar = el('div','seasonbar');
+  const tabs = seasons.map((s, i) => {
+    const seen = watched(s);
+    const finished = seen >= s.episodes.length;
+    const state = finished ? ' done' : (started(s) ? ' part' : '');
+    const t = el('button','seasontab'+state);
+    t.append(el('span',null, label(s)));
+    if(state) t.append(el('span','flag', finished ? '✓' : '●'));
+    t.title = label(s)+' — '+s.episodes.length+' owned, '+seen+' watched';
+    t.onclick = () => show(i);
+    bar.append(t);
+    return t;
+  });
+  /* One season is not a choice, and a bar of one button reads as a bar with
+     something missing from it. */
+  if(seasons.length > 1) wrap.append(bar);
+  wrap.append(count);
+  wrap.append(list);
+
+  function show(index){
+    current = index;
+    const s = seasons[index];
+    tabs.forEach((t, i) => t.setAttribute('aria-selected', i === index));
+    const seen = watched(s);
+    count.textContent = [
+      s.season === 0 ? 'Specials' : 'Season '+pad(s.season),
+      s.episodes.length + (s.episodes.length === 1 ? ' episode' : ' episodes'),
+      seen ? seen+' watched' : null,
+    ].filter(Boolean).join('  ·  ');
+    list.innerHTML = '';
+    s.episodes.forEach(ep => list.append(episodeRow(ep, d)));
+  }
+
+  show(current);
+  return wrap;
+}
+
+function episodeRow(ep, d){
+  const row = el('div','eprow'+(ep.played?' seen':'')+(ep.id===d.next_up?' next':''));
+  row.append(el('div','code', ep.code));
+  const name = el('div','name');
+  name.textContent = ep.title || '';
+  name.title = ep.title || '';
+  row.append(name);
+  if(ep.percent) row.append(el('div','libline', ep.percent+'% in'));
+  else if(ep.id===d.next_up) row.append(el('div','libline','carry on here'));
+  else if(ep.played) row.append(el('div','libline','played here'));
+  const go = el('button','iconbtn','PLAY');
+  go.onclick = async () => {
+    go.textContent='…';
+    const r = await post('/api/play',{type:'episode',id:ep.id});
+    go.textContent = r.error ? 'FAILED' : 'PLAYING';
+    if(!r.error) pollPlaying();
+  };
+  row.append(go);
+  return row;
+}
+
+/* ================= UP NEXT ================= */
+let LAST_SCAN = null;
+let section = 'episodes';
+let epStarted = false;
+let epSort = 'close';
+let dirSort = 'owned';
+let actorSort = 'owned';
+
+/* Seven now. The two groups read left to right as "finish what you have"
+   and "find something new", with the channels last because it's the one
+   that's about the app rather than about you. */
+const HUB = [
+  {id:'episodes',  cls:'tv',   name:'Missing episodes', desc:'Seasons with holes in them'},
+  {id:'series',    cls:'',     name:'Film series',      desc:'Franchises you own part of'},
+  {id:'directors', cls:'rust', name:'Directors',        desc:'Whose work you collect'},
+  {id:'actors',    cls:'rust', name:'Actors',           desc:'Whose work you collect'},
+  {id:'foryou',    cls:'',     name:'Films for you',    desc:'From your own ratings'},
+  {id:'shows',     cls:'tv',   name:'Shows for you',    desc:'From what you rate on TV'},
+  {id:'channels',  cls:'plum', name:'For your channels',desc:'What would fill the thin ones'},
+];
+
+let minScore = 0;
+
+function passesScore(item){
+  if(!minScore) return true;
+  // Something with no TMDB score at all shouldn't be hidden by a score
+  // filter — you can't judge it either way.
+  if(!item.rating) return true;
+  return item.rating >= minScore;
+}
+
+function matchesCarried(item){
+  if(!carried) return true;
+  const g = item.genres || [];
+  if(!g.length) return false;
+  return g.some(x => carried.genres.includes(x));
+}
+
+function keep(item){ return matchesCarried(item) && passesScore(item); }
+
+function filtered(){
+  const r = LAST_SCAN || {};
+  return {
+    episodes: (r.gaps||[]).filter(keep),
+    series: (r.collections||[]).map(c => Object.assign({}, c, {missing:c.missing.filter(keep)})).filter(c => c.missing.length),
+    directors: (r.directors||[]).map(d => Object.assign({}, d, {missing:d.missing.filter(keep)})).filter(d => d.missing.length),
+    actors: (r.actors||[]).map(d => Object.assign({}, d, {missing:d.missing.filter(keep)})).filter(d => d.missing.length),
+    foryou: (r.bangers||[]).filter(keep),
+    shows: (r.shows||[]).filter(keep),
+    /* A channel stays listed even when the score slider empties its picks:
+       the point of the row is the channel's own numbers. */
+    channels: (r.channels||[]).map(c => Object.assign({}, c, {picks:c.picks.filter(keep)})),
+  };
+}
+
+$('#minscore').oninput = () => {
+  minScore = parseFloat($('#minscore').value) || 0;
+  $('#minscorelbl').textContent = minScore ? minScore.toFixed(1)+'+' : 'any';
+  drawHub(); paintMore();
+};
+
+/* The hub stays on screen and is the navigation, so the counts never leave
+   the page just because you opened one of the sections. */
+function drawHub(){
+  const wrap = $('#hub'); wrap.innerHTML='';
+  const f = filtered();
+  HUB.forEach(h => {
+    const n = LAST_SCAN ? f[h.id].length : 0;
+    const b = el('button','hubcard '+h.cls);
+    b.setAttribute('aria-selected', section===h.id);
+    /* The channels card counts the THIN channels, not every one listed:
+       "17" would say nothing, "4 thin" says the whole thing. */
+    const big = h.id === 'channels' && LAST_SCAN
+      ? f.channels.filter(c => c.thin).length : n;
+    b.append(el('div','big', LAST_SCAN ? String(big) : '–'));
+    b.append(el('div','name', esc(h.name)));
+    b.append(el('div','desc', esc(h.desc)));
+    if(LAST_SCAN && !n && section!==h.id) b.disabled = true;
+    else b.onclick = () => { section = h.id; drawHub(); paintMore(); };
+    wrap.append(b);
+  });
+}
+
+function renderCarried(){
+  const bar = $('#carried');
+  bar.innerHTML = '';
+  if(!carried) return;
+  const chip = el('div','notice');
+  chip.append(el('h3',null,'Filtered to '+esc(carried.label)));
+  chip.append(el('p',null,'Showing only suggestions in '+esc(carried.genres.join(', '))+
+    '. Runtime and format don\'t carry over — nothing here is downloaded yet, so there\'s no runtime to filter on.'));
+  const clear = el('button','iconbtn','SHOW EVERYTHING');
+  clear.onclick = () => { carried = null; renderCarried(); drawHub(); paintMore(); };
+  chip.append(clear);
+  bar.append(chip);
+}
+
+function sechead(title, count, note){
+  const h = el('div','sechead');
+  h.append(el('h2',null,esc(title)));
+  if(count) h.append(el('span','count', esc(count)));
+  if(note) h.append(el('p',null,esc(note)));
+  return h;
+}
+
+async function dismiss(key, node){
+  await post('/api/dismiss',{key});
+  node.remove();
+  if(LAST_SCAN){
+    ['gaps','collections','directors','actors','bangers','shows','channels'].forEach(k => {
+      if(LAST_SCAN[k]) LAST_SCAN[k] = LAST_SCAN[k].filter(x => x.key !== key);
+    });
+    /* A single pick hidden from a channel's list, rather than the channel. */
+    (LAST_SCAN.channels||[]).forEach(c => { c.picks = c.picks.filter(x => x.key !== key); });
+    drawHub();
+  }
+}
+
+function paintMore(){
+  const out = $('#more-out');
+  out.innerHTML = '';
+  if(!LAST_SCAN){
+    out.innerHTML = '<div class="recempty"><h2>Nothing looked up yet</h2>'+
+      '<p>Press <b>Find what\'s missing</b> and this page fills with the episodes your seasons are short of, '+
+      'the rest of the film series you\'ve started, films and shows picked from your own ratings, '+
+      'and what would give your thinnest channels something to play.</p></div>';
+    return;
+  }
+  if(!LAST_SCAN.has_key){
+    out.append(el('div','notice',
+      '<h3>Running without a TMDB key</h3><p>Only Missing episodes works without one, and only for holes inside seasons you already own. '+
+      'Add a free TMDB key on the Settings tab for the rest.</p>'));
+  }
+  const f = filtered();
+  ({episodes:renderEpisodes, series:renderSeries,
+    directors:renderDirectors, actors:renderActors, foryou:renderForYou,
+    shows:renderShows, channels:renderChannels}[section])(out, f);
+}
+
+/* ---------- shows for you ---------- */
+let showSort = 'match';
+function renderShows(out, f){
+  const s = el('section');
+  const head = sechead('Shows for you', f.shows.length+' SHOWS',
+    'Seeded by the shows you rate well and mark as favourites — not by your film taste, which is a different thing.');
+  s.append(head);
+  if(!f.shows.length){
+    s.append(el('p','empty','Nothing yet. Rate a few shows on the Rate tab — a show scored above your own average, or marked a favourite, is what this searches outward from.'));
+    out.append(s); return;
+  }
+  const controls = el('div','secfilters');
+  const lab = el('label','f');
+  lab.append(el('span',null,'Sort'));
+  const sel = el('select');
+  [['match','Best match'],['rating','TMDB rating'],['year','Newest first']].forEach(([v,t]) => {
+    const o = el('option',null,t); o.value = v; if(v === showSort) o.selected = true; sel.append(o);
+  });
+  sel.onchange = () => { showSort = sel.value; paint(); };
+  lab.append(sel);
+  controls.append(lab);
+  s.append(controls);
+  const grid = el('div','grid');
+  s.append(grid);
+  out.append(s);
+  function paint(){
+    const rows = f.shows.slice();
+    if(showSort === 'rating') rows.sort((a,b) => (b.rating||0) - (a.rating||0));
+    else if(showSort === 'year') rows.sort((a,b) => yearOf(b) - yearOf(a));
+    grid.innerHTML = '';
+    rows.forEach(sh => grid.append(filmCard(sh, true)));
+  }
+  paint();
+}
+
+/* ---------- for your channels ---------- */
+let chanOnlyThin = false;
+function renderChannels(out, f){
+  const s = el('section');
+  const thin = f.channels.filter(c => c.thin).length;
+  s.append(sechead('For your channels', thin + (thin === 1 ? ' THIN CHANNEL' : ' THIN CHANNELS'),
+    'A channel with a few hours of programmes loops them all week. These are the best-regarded things TMDB has that each channel\'s own rule would pick up the day they arrive.'));
+  if(!f.channels.length){
+    s.append(el('p','empty','Nothing measured yet — this needs a TMDB key.'));
+    out.append(s); return;
+  }
+  const controls = el('div','secfilters');
+  const only = el('label','toggle');
+  const box = el('input'); box.type = 'checkbox'; box.checked = chanOnlyThin;
+  box.onchange = () => { chanOnlyThin = box.checked; paintMore(); };
+  only.append(box, document.createTextNode('Only the thin ones'));
+  controls.append(only);
+  s.append(controls);
+
+  const rows = f.channels.filter(c => !chanOnlyThin || c.thin);
+  if(!rows.length) s.append(el('p','empty','None of your channels is thin. Untick the box to see suggestions for the rest.'));
+  rows.forEach(c => {
+    const block = el('div','chanblock' + (c.thin ? ' thin' : ''));
+    const head = el('div','chanhead');
+    const t = el('div');
+    t.append(el('h3',null,esc(c.name)));
+    const hours = c.hours >= 48 ? Math.round(c.hours/24) + ' days' : Math.round(c.hours) + ' hours';
+    t.append(el('div','sub', c.blocks + (c.blocks === 1 ? ' programme' : ' programmes') + ' · ' + hours + ' of telly'
+      + (c.thin ? ' · comes round again inside a day' : '')));
+    head.append(t);
+    if(c.thin) head.append(el('span','tag','THIN'));
+    const x = el('button','dismiss','HIDE'); x.style.marginLeft = 'auto';
+    x.title = 'Stop suggesting for this channel';
+    x.onclick = () => dismiss(c.key, block);
+    head.append(x);
+    block.append(head);
+    if(!c.picks.length){
+      block.append(el('p','empty', 'Nothing to suggest that you don\'t already own'
+        + (minScore ? ' at that score' : '') + '.'));
+    } else {
+      const grid = el('div','grid');
+      c.picks.forEach(p => grid.append(filmCard(p, false)));
+      block.append(grid);
+    }
+    s.append(block);
+  });
+  out.append(s);
+}
+
+/* ---------- missing episodes ---------- */
+function renderEpisodes(out, f){
+  const s = el('section');
+  s.append(sechead('Missing episodes', f.episodes.length+' SHOWS',
+    'Filled blocks are episodes you have. Outlined ones are the holes.'));
+
+  const controls = el('div','secfilters');
+  const startedLabel = el('label','toggle');
+  const startedBox = el('input'); startedBox.type='checkbox'; startedBox.checked = epStarted;
+  startedBox.onchange = () => { epStarted = startedBox.checked; paintMore(); };
+  startedLabel.append(startedBox, document.createTextNode('Only shows I\'m part way through'));
+  controls.append(startedLabel);
+
+  const sortLabel = el('label','f');
+  sortLabel.append(el('span',null,'Sort'));
+  const sel = el('select');
+  [['close','Closest to complete'],['most','Most missing'],['mine','Best rated by me']]
+    .forEach(([v,t]) => sel.append(new Option(t,v)));
+  sel.value = epSort;
+  sel.onchange = () => { epSort = sel.value; paintMore(); };
+  sortLabel.append(sel);
+  controls.append(sortLabel);
+  s.append(controls);
+
+  const legend = el('div','legend');
+  legend.innerHTML =
+    '<span><i class="cell have" style="display:inline-block"></i> you have it</span>'+
+    '<span><i class="cell miss" style="display:inline-block"></i> missing</span>';
+  s.append(legend);
+
+  let rows = f.episodes.slice();
+  if(epStarted) rows = rows.filter(g => g.in_progress);
+  if(epSort==='close') rows.sort((a,b) => a.missing_total - b.missing_total);
+  else if(epSort==='most') rows.sort((a,b) => b.missing_total - a.missing_total);
+  else rows.sort((a,b) => (b.yours||0) - (a.yours||0));
+
+  if(!rows.length){
+    s.append(el('p','empty', epStarted
+      ? 'No gaps in anything you\'re part way through. Untick the box above to see the rest.'
+      : 'No gaps found. Every season you own is complete.'));
+  }
+  rows.forEach(g => s.append(gapBlock(g)));
+  out.append(s);
+}
+
+function gapBlock(g){
+  const box = el('div','gap');
+  const top = el('div','gap-top');
+  if(g.art){ const i=el('img'); i.src=g.art; i.alt=''; i.loading='lazy'; top.append(i); }
+  const t = el('div');
+  t.append(el('h3',null,esc(g.title)));
+  t.append(el('div','libline', (g.in_progress ? 'you\'re part way through · ' : '')+
+    (g.source==='local' ? 'gaps found from your own numbering' : 'checked against TMDB')));
+  top.append(t);
+  top.append(el('span','tag', g.missing_total+' MISSING'));
+  const d = el('button','dismiss','HIDE'); d.style.marginLeft='auto';
+  d.onclick = () => dismiss(g.key, box);
+  top.append(d);
+  box.append(top);
+  g.seasons.forEach(se => { if(se.missing.length || se.owned.length) box.append(seasonRow(se)); });
+  return box;
+}
+
+function seasonRow(se){
+  const row = el('div','season');
+  row.append(el('div','snum','S'+pad(se.season)));
+  const cells = el('div','cells');
+  const owned = new Set(se.owned);
+  for(let n=1;n<=se.total;n++) cells.append(el('div','cell '+(owned.has(n)?'have':'miss')));
+  row.append(cells);
+  if(se.missing.length) row.append(el('div','needlist','need '+condense(se.missing)));
+  return row;
+}
+
+function condense(nums){
+  const out=[]; let i=0;
+  while(i<nums.length){
+    let j=i; while(j+1<nums.length && nums[j+1]===nums[j]+1) j++;
+    out.push(i===j?('E'+pad(nums[i])):('E'+pad(nums[i])+'–E'+pad(nums[j])));
+    i=j+1;
+  }
+  return out.join(', ');
+}
+
+/* ---------- film series ---------- */
+function renderSeries(out, f){
+  const s = el('section');
+  s.append(sechead('Film series', f.series.length+' SETS',
+    'You own part of each of these already.'));
+  if(!f.series.length) s.append(el('p','empty','Nothing half-finished here.'));
+  f.series.forEach(c => {
+    const box = el('div','coll');
+    const head = el('div'); head.style.display='flex'; head.style.alignItems='flex-start';
+    const t = el('div');
+    t.append(el('h3',null,esc(c.name)));
+    t.append(el('div','have', c.have+' of '+c.total+' owned · '+c.missing.length+' to go'));
+    head.append(t);
+    const d = el('button','dismiss','HIDE'); d.style.marginLeft='auto';
+    d.onclick = () => dismiss(c.key, box);
+    head.append(d);
+    box.append(head);
+    const grid = el('div','grid');
+    c.missing.forEach(film => grid.append(filmCard(film)));
+    box.append(grid);
+    s.append(box);
+  });
+  out.append(s);
+}
+
+/* ---------- directors & actors (same shape, different field) ---------- */
+function renderPeopleSection(out, rows, sortState, setSortState, title, emptyMsg, subMsg){
+  const s = el('section');
+  s.append(sechead(title, rows.length+' NAMES', subMsg));
+
+  const controls = el('div','secfilters');
+  const sortLabel = el('label','f');
+  sortLabel.append(el('span',null,'Sort'));
+  const sel = el('select');
+  [['owned','Most of theirs owned'],['gap','Biggest gap'],['rated','Best rated missing']]
+    .forEach(([v,t]) => sel.append(new Option(t,v)));
+  sel.value = sortState();
+  sel.onchange = () => { setSortState(sel.value); paintMore(); };
+  sortLabel.append(sel);
+  controls.append(sortLabel);
+  s.append(controls);
+
+  const sorted = rows.slice();
+  const sv = sortState();
+  if(sv==='owned') sorted.sort((a,b) => b.owned - a.owned);
+  else if(sv==='gap') sorted.sort((a,b) => b.missing.length - a.missing.length);
+  else sorted.sort((a,b) => ((b.missing[0]||{}).rating||0) - ((a.missing[0]||{}).rating||0));
+
+  if(!sorted.length) s.append(el('p','empty', emptyMsg));
+
+  sorted.forEach(d => {
+    const box = el('div','dirblock');
+    const head = el('div'); head.style.display='flex'; head.style.alignItems='flex-start';
+    const t = el('div');
+    t.append(el('h3',null,esc(d.name)));
+    t.append(el('div','sub', d.owned+' in your library · '+d.missing.length+' worth adding'));
+    head.append(t);
+    const x = el('button','dismiss','HIDE'); x.style.marginLeft='auto';
+    x.onclick = () => dismiss(d.key, box);
+    head.append(x);
+    box.append(head);
+    if(d.owned_titles && d.owned_titles.length){
+      box.append(el('div','owned','You own <b>'+d.owned_titles.map(esc).join('</b>, <b>')+'</b>'));
+    }
+    const grid = el('div','grid');
+    d.missing.forEach(film => grid.append(filmCard(film)));
+    box.append(grid);
+    s.append(box);
+  });
+  out.append(s);
+}
+
+function renderDirectors(out, f){
+  renderPeopleSection(out, f.directors, () => dirSort, v => dirSort = v, 'Directors',
+    'You\'d need two or more films by the same director for this to have anything to say.',
+    'Anyone you own more than one film by.');
+}
+
+function renderActors(out, f){
+  renderPeopleSection(out, f.actors, () => actorSort, v => actorSort = v, 'Actors',
+    'You\'d need two or more films starring the same actor for this to have anything to say.',
+    'Anyone you own more than one film starring, in a lead or prominent role.');
+}
+
+/* ---------- for you ---------- */
+function profilePanel(pr){
+  /* Folded by default: it's the working-out, and the answers are what you
+     came for. One click opens it when a suggestion needs arguing with. */
+  const box = el('details','profile');
+  box.append(el('summary',null,'What this is working from'));
+  box.append(el('p','empty', pr.from_ratings
+    ? 'Built from the '+pr.sample+' titles you\'ve rated. Films you scored high push their themes and people up; films you scored low push theirs down.'
+    : 'You haven\'t rated enough yet, so this is falling back to the best-regarded things you own. Work through the Rate tab and it gets much sharper.'));
+  const rows = [
+    ['Genres you like', pr.likes_genres, true],
+    ['Genres you avoid', pr.avoids_genres, false],
+    ['Themes', pr.likes_keywords, true],
+    ['People', pr.likes_people, true],
+  ];
+  rows.forEach(([label, items, strong]) => {
+    if(!items || !items.length) return;
+    const row = el('div','row');
+    row.append(el('div','k', esc(label)));
+    const v = el('div','v');
+    items.forEach(i => v.append(el('span','chip'+(strong?' strong':''), esc(i))));
+    row.append(v);
+    box.append(row);
+  });
+  return box;
+}
+
+let forYouSort = 'match';
+/* Null rather than a year, both of them, meaning "wherever the list starts
+   and ends". A saved 1974 would quietly hide a 1968 film the day one turned
+   up; null widens with the data instead. */
+let forYouFrom = null, forYouTo = null;
+
+const yearOf = x => parseInt(x.year, 10) || 0;
+
+function renderForYou(out, f){
+  const s = el('section');
+  const head = sechead('For you', f.foryou.length+' TITLES',
+    'Ranked by how many separate parts of your taste point at them.');
+  s.append(head);
+  if(LAST_SCAN.profile) s.append(profilePanel(LAST_SCAN.profile));
+  if(!f.foryou.length){
+    s.append(el('p','empty','Nothing yet. This needs a TMDB key and ideally a few ratings to work from.'));
+    out.append(s); return;
+  }
+  const counter = head.querySelector('.count');
+  const controls = el('div','secfilters');
+  const lab = el('label','f');
+  lab.append(el('span',null,'Sort'));
+  const sel = el('select');
+  [['match','Best match'],['rating','TMDB rating'],
+   ['year','Newest first'],['oldest','Oldest first']].forEach(([v,t]) => {
+    const o = el('option',null,t); o.value = v;
+    if(v === forYouSort) o.selected = true;
+    sel.append(o);
+  });
+  sel.onchange = () => { forYouSort = sel.value; repaint(); };
+  lab.append(sel);
+  controls.append(lab);
+
+  /* The years the list actually covers, not a fixed 1900–now: the ends of
+     the slider should be reachable, and dragging across four empty decades
+     to get to the first film anyone made is not a control, it's a corridor. */
+  const years = f.foryou.map(yearOf).filter(Boolean);
+  const lo = years.length ? Math.min.apply(null, years) : 0;
+  const hi = years.length ? Math.max.apply(null, years) : 0;
+  let readout = null, fromInput = null, toInput = null, fill = null;
+  if(hi > lo){
+    if(forYouFrom === null || forYouFrom < lo) forYouFrom = lo;
+    if(forYouTo === null || forYouTo > hi) forYouTo = hi;
+    const ylab = el('label','f');
+    const caption = el('span', null, 'Years <b></b>');
+    readout = caption.querySelector('b');
+    ylab.append(caption);
+    /* Two sliders lying on top of each other rather than one control with
+       two handles, because there is no such input. The track and the lit
+       section between the handles are drawn underneath; the inputs
+       themselves are transparent and only their thumbs take the pointer, so
+       whichever handle you reach for is the one you get. */
+    const range = el('div','yearrange');
+    fill = el('div','rfill');
+    range.append(el('div','rtrack'), fill);
+    fromInput = el('input'); toInput = el('input');
+    [[fromInput, forYouFrom], [toInput, forYouTo]].forEach(([input, value]) => {
+      input.type = 'range'; input.min = lo; input.max = hi; input.step = 1;
+      input.value = value;
+      /* Live while you drag: the years and the lit section. The grid waits
+         for you to let go — rebuilding a hundred cards on every pixel of a
+         drag is how a slider comes to feel like it's stuck. */
+      input.oninput = () => {
+        forYouFrom = Math.min(+fromInput.value, +toInput.value);
+        forYouTo = Math.max(+fromInput.value, +toInput.value);
+        drawRange();
+      };
+      input.onchange = repaint;
+      range.append(input);
+    });
+    ylab.append(range);
+    controls.append(ylab);
+  }
+  s.append(controls);
+
+  const grid = el('div','grid');
+  s.append(grid);
+  out.append(s);
+
+  function drawRange(){
+    readout.textContent = (forYouFrom === lo && forYouTo === hi)
+      ? 'all' : forYouFrom + '–' + forYouTo;
+    /* A thumb's centre travels from half its width in to half its width off
+       the far end, so a straight percentage of the track would leave the lit
+       section adrift of the handles at both ends. 15px is the thumb. */
+    const at = year => {
+      const pct = 100 * (year - lo) / (hi - lo);
+      return 'calc(' + pct + '% + ' + (7.5 - pct * 0.15) + 'px)';
+    };
+    fill.style.left = at(forYouFrom);
+    fill.style.right = 'calc(100% - ' + at(forYouTo) + ')';
+  }
+
+  function repaint(){
+    /* Sorted on a copy — the order the algorithm chose is the default, and
+       looking at the list another way shouldn't destroy it. */
+    let rows = f.foryou.slice();
+    if(hi > lo && (forYouFrom > lo || forYouTo < hi)){
+      /* Something TMDB has no year for isn't hidden by a year filter — you
+         can't place it either way. Same call as the score slider. */
+      rows = rows.filter(x => !yearOf(x)
+        || (yearOf(x) >= forYouFrom && yearOf(x) <= forYouTo));
+    }
+    if(forYouSort === 'rating') rows.sort((a,b) => (b.rating||0) - (a.rating||0));
+    else if(forYouSort === 'year') rows.sort((a,b) => yearOf(b) - yearOf(a));
+    else if(forYouSort === 'oldest') rows.sort((a,b) => (yearOf(a)||9999) - (yearOf(b)||9999));
+
+    if(counter){
+      counter.textContent = rows.length === f.foryou.length
+        ? f.foryou.length + ' TITLES'
+        : rows.length + ' OF ' + f.foryou.length;
+    }
+    grid.innerHTML = '';
+    if(!rows.length){
+      grid.append(el('p','empty','Nothing in your recommendations from those years.'));
+      return;
+    }
+    rows.forEach(film => grid.append(filmCard(film, true)));
+  }
+
+  if(readout) drawRange();
+  repaint();
+}
+
+function filmCard(f, showWhy){
+  const c = el('div','card');
+  /* The artwork is its own box so the hover details can sit inside it. They
+     used to cover the bottom of the card, which is where the title and year
+     are — the two things you'd actually want to select and copy. */
+  const art = el('div','cardart');
+  if(f.poster){ const i=el('img'); i.src=f.poster; i.alt=''; i.loading='lazy'; art.append(i); }
+  else art.append(el('div','noposter','no artwork'));
+  /* Said on the poster where films and shows share a grid. A film-only
+     grid doesn't need telling. */
+  if(f.kind === 'tv') art.append(el('span','kindflag tv','TV'));
+  c.append(art);
+  const b = el('div','body');
+  b.append(el('h4',null,esc(f.title)));
+  b.append(el('div','yr', esc(f.year||'') + (f.genres && f.genres.length ? '  ·  ' + esc(f.genres.slice(0,2).join(', ')) : '')));
+  b.append(el('div','tmdb', f.rating ? 'TMDB <b>'+f.rating+'</b>' : 'TMDB — unrated'));
+  if(showWhy && f.why && f.why.length){
+    const chips = el('div','whychips');
+    if(f.hits>1) chips.append(el('span','chip strong', f.hits+' matches'));
+    f.why.forEach(w => chips.append(el('span','chip', esc(w))));
+    b.append(chips);
+  }
+  if(f.key){
+    const d = el('button','dismiss','HIDE');
+    d.onclick = () => dismiss(f.key, c);
+    b.append(d);
+  }
+  c.append(b);
+
+  /* Who made it, filled in the first time you hover and remembered after.
+     These aren't films you own, so nothing about them is stored locally. */
+  if(f.id){
+    const peek = el('div','cardpeek');
+    art.append(peek);
+    let asked = false;
+    c.onmouseenter = async () => {
+      if(asked) return;
+      asked = true;
+      peek.innerHTML = '<div class="line">looking up…</div>';
+      const info = await api('/api/brief?id='+encodeURIComponent(f.id)
+        + (f.kind === 'tv' ? '&kind=tv' : ''));
+      const lines = [];
+      if(info.directors && info.directors.length)
+        lines.push((f.kind === 'tv' ? 'By ' : 'Dir. ') + info.directors.join(', '));
+      if(info.cast && info.cast.length) lines.push(info.cast.join(', '));
+      if(info.runtime) lines.push(info.runtime + ' min');
+      if(info.run) lines.push(info.run + (info.status === 'Ended' ? ' · ended' : ''));
+      if(info.tagline) lines.push(info.tagline);
+      peek.innerHTML = '';
+      if(!lines.length){ peek.append(el('div','line','No details on TMDB.')); return; }
+      lines.forEach(l => peek.append(el('div','line', esc(l))));
+    };
+  }
+  return c;
+}
+
+/* ---------- scanning ---------- */
+$('#scan').onclick = async () => {
+  $('#scan').disabled = true;
+  await post('/api/scan', {hide_obvious: $('#hideobvious').checked});
+  pollScan();
+};
+
+async function pollScan(){
+  const s = await api('/api/scan/status');
+  if(s.running){
+    $('#scan-status').innerHTML =
+      '<div class="notice"><h3>'+esc(s.step)+'</h3><p>First run does the lookups; after that it reads from cache and is quick.</p>'+
+      '<div class="progress"><i style="width:'+Math.round(100*s.done/(s.total||6))+'%"></i></div></div>';
+    setTimeout(pollScan, 900);
+    return;
+  }
+  $('#scan').disabled = false;
+  if(s.error){
+    $('#scan-status').innerHTML = '<div class="notice bad"><h3>The scan stopped</h3><p>'+esc(s.error)+'</p></div>';
+    return;
+  }
+  $('#scan-status').innerHTML = '';
+  if(s.result){
+    LAST_SCAN = s.result;
+    drawHub(); paintMore();
+    /* Now that a shelf can arrive already full, it has to say when it was
+       filled — a month-old list of what's missing is a different thing from
+       this morning's, and nothing else on the page would tell you. */
+    if(s.age_days != null){
+      const d = s.age_days;
+      const when = d < 1 ? "today" : d < 2 ? "yesterday"
+                 : Math.round(d) + " days ago";
+      $('#scanage').textContent = 'last looked ' + when;
+    }
+  }
+}
+
+/* ================= RATE ================= */
+
+/* This screen deals in rate_type / rate_id — 'movie' or 'tvshow' — while
+   opening and playing deal in different things. Opening a show means its
+   own page; playing one means an episode, and which episode is a question
+   the server has already answered and sent as play_id. Both lists here go
+   through these two, so the queue and the top tens behave identically. */
+function openRated(item){
+  return item.rate_type === 'tvshow' ? openShow(item.rate_id) : openFilm(item.rate_id);
+}
+
+function ratedPlayButton(item, cls){
+  const isShow = item.rate_type === 'tvshow';
+  const go = el('button', cls || 'iconbtn',
+                isShow && item.play_code ? 'PLAY ' + item.play_code : 'PLAY');
+  if(!item.play_id){
+    /* A show whose every episode is a gap — nothing of it is on disk. Saying
+       so beats a button that does nothing when you press it. */
+    go.disabled = true;
+    go.title = isShow ? 'No episodes of this on disk yet' : 'Not on disk';
+    return go;
+  }
+  go.title = isShow ? 'Play ' + item.play_code + ' — where you got to'
+                    : 'Play it now';
+  go.onclick = async (e) => {
+    /* What is behind this opens the detail sheet, so the press must not
+       reach it. */
+    e.stopPropagation();
+    go.textContent = '…';
+    /* resume:true is safe on anything here: finishing something zeroes its
+       stored position, so this starts at the beginning unless there really
+       is a place to pick up from. */
+    const r = await post('/api/play', {
+      type: isShow ? 'episode' : 'movie', id: item.play_id, resume: true});
+    go.textContent = r.error ? 'FAILED' : 'PLAYING';
+    if(!r.error) pollPlaying();
+  };
+  return go;
+}
+
+let RATINGS = null;
+let queueIndex = 0;
+// A random order assigned once per item and kept, so re-fetching the queue
+// after each rating (the item just scored has to disappear) doesn't also
+// reshuffle everything still waiting — that would make SKIP/BACK meaningless.
+let shuffleKeys = {};
+
+async function loadRatings(reset){
+  if(reset){ queueIndex = 0; shuffleKeys = {}; }
+  const out = $('#rate-out');
+  if(!RATINGS) out.innerHTML = '<p class="empty">Loading…</p>';
+  RATINGS = await post('/api/ratings', {});
+  if(RATINGS.error){
+    out.innerHTML = '<div class="notice bad"><h3>Something went wrong</h3><p>'+esc(RATINGS.error)+'</p></div>';
+    return;
+  }
+  drawQueue();
+  drawTopLists();
+}
+
+function queueList(){
+  const raw = $('#rate_kind').value === 'tv' ? RATINGS.shows : RATINGS.films;
+  const key = p => p.rate_type+':'+p.rate_id;
+  raw.forEach(p => { if(!(key(p) in shuffleKeys)) shuffleKeys[key(p)] = Math.random(); });
+  return [...raw].sort((a,b) => shuffleKeys[key(a)] - shuffleKeys[key(b)]);
+}
+
+function drawQueue(){
+  const out = $('#rate-out'); out.innerHTML='';
+  const list = queueList();
+  const noun = $('#rate_kind').value==='tv' ? 'show' : 'film';
+  if(!list.length){
+    out.append(el('div','notice',
+      '<h3>Nothing left to rate</h3><p>Every '+noun+' in your library has a score. '
+      + 'Impressive.</p>'));
+    return;
+  }
+  if(queueIndex >= list.length) queueIndex = 0;
+  const item = list[queueIndex];
+
+  const bar = el('div','queuebar');
+  bar.append(el('span',null, (queueIndex+1)+' OF '+list.length+' UNRATED'));
+  const track = el('div','track');
+  const fill = el('i');
+  fill.style.width = Math.round(100*queueIndex/list.length)+'%';
+  track.append(fill);
+  bar.append(track);
+  out.append(bar);
+
+  const card = el('div','ratecard');
+  /* The same picture behind the words as the Now tab, and loaded the same
+     way: the next cards' art is fetched while you look at this one (see
+     the end of this function), so rating or skipping never shows a card
+     with its backdrop still arriving. */
+  const hero = heroNode(item.backdrop);
+  if(hero){ card.append(hero); card.classList.add('hashero'); }
+  /* The poster and the title are the way in. Everywhere else a poster opens
+     the thing it is a picture of; this was the one screen where it didn't,
+     and the only way through to a film was to leave and find it again. */
+  const open = () => openRated(item);
+  if(item.art){
+    const i=el('img','openable'); i.src=item.art; i.alt='';
+    i.title = 'Open ' + (item.title || ''); i.onclick = open;
+    card.append(i);
+  } else {
+    const d=el('div','noposter openable'); d.style.width='150px';
+    d.onclick = open; card.append(d);
+  }
+  const right = el('div','ratebody');
+  right.append(el('div','eyebrow', item.in_progress ? 'You\'re part way through this'
+                                                    : 'Rate it if you know it'));
+  const head = el('h2','openable',esc(item.title));
+  head.title = 'Open ' + (item.title || '');
+  head.onclick = open;
+  right.append(head);
+  const bits = [item.year, (item.genres||[]).join(' / ')];
+  if(item.runtime) bits.push(item.runtime+' min');
+  if(item.episodes) bits.push(item.episodes+' episodes');
+  right.append(el('div','subline', esc(bits.filter(Boolean).join('  ·  '))));
+  /* The studio's own line, in a tile of its own. Films only: TMDB keeps
+     these for films, and the library doesn't store them for shows. */
+  if(item.tagline) right.append(el('div','ratetag', esc(item.tagline)));
+  if(item.plot) right.append(el('p','plot', esc(item.plot)));
+  /* No TMDB score here, on purpose: this is where your own score is made,
+     and a number printed right above the notches is an anchor for it. */
+
+  right.append(rateControl(item, {
+    big:true, hideClear:true, label:'Your rating',
+    /* No queueIndex++ here. Rating takes the card OUT of the list, so the
+       next one slides into this same position by itself; stepping forward
+       as well used to skip a card on every rating — it only came back when
+       the list wrapped round. SKIP is the one that has to step. */
+    onRated: () => { setTimeout(() => loadRatings(), 450); }
+  }));
+
+  const btns = el('div','rowbtns');
+  const play = ratedPlayButton(item, 'play');
+  const skip = el('button','iconbtn','SKIP');
+  skip.onclick = () => { queueIndex++; drawQueue(); };
+  const back = el('button','iconbtn','BACK');
+  back.onclick = () => { queueIndex = Math.max(0, queueIndex-1); drawQueue(); };
+  /* Not everything in this queue is something you've seen. "I don't know it,
+     but I want to" is a real answer here, and without this the only way to
+     say it was to leave the tab and find the thing again in the library. */
+  const watch = el('button','watchtoggle'+(item.watchlisted?' on':''),
+    watchLabel(item.watchlisted));
+  watch.onclick = async () => {
+    const r = await post('/api/watchlist', {type:item.rate_type, id:item.rate_id});
+    item.watchlisted = r.on;
+    watch.classList.toggle('on', r.on);
+    watch.innerHTML = watchLabel(r.on);
+    libraryChanged();
+  };
+  btns.append(play, skip, back, watch);
+  right.append(btns);
+  card.append(right);
+  out.append(card);
+
+  /* The card SKIP or a rating will show next — both land on the one after
+     this — fetched now so its picture is already in the browser's cache.
+     BACK goes to a card that was drawn a moment ago. */
+  const ahead = list[(queueIndex + 1) % list.length];
+  if(ahead && ahead !== item) preloadArt(ahead);
+}
+
+function drawTopLists(){
+  $('#rated-count').textContent =
+    RATINGS.rated_films+' FILMS · '+RATINGS.rated_shows+' SHOWS RATED';
+  const wrap = $('#toplists'); wrap.innerHTML='';
+  [['films', RATINGS.top_films], ['TV shows', RATINGS.top_shows]].forEach(([label, rows]) => {
+    const box = el('div','toplist');
+    box.append(el('h3',null,'Your top 10 '+label));
+    if(!rows.length){
+      box.append(el('p','empty','Nothing rated yet. Work through the queue above and this fills in.'));
+    }
+    rows.forEach((r,i) => {
+      /* Your ten favourites were the one list in the app you couldn't do
+         anything with — no way into them and no way to put one on. The row
+         opens the thing; the two buttons on it are the exceptions. */
+      const row = el('div','toprow openable');
+      row.title = 'Open ' + (r.title || '');
+      row.onclick = () => openRated(r);
+      row.append(el('div','pos', pad(i+1)));
+      const t = el('div','t');
+      t.append(document.createTextNode(r.title||''));
+      t.append(el('small',null, r.year ? String(r.year) : ''));
+      row.append(t);
+
+      row.append(ratedPlayButton(r, 'iconbtn toprowplay'));
+
+      const sc = el('button','score', String(Math.round(r.score*2)/2));
+      sc.style.setProperty('--h', hueFor(r.score));
+      sc.title = 'Click to change';
+      // Changed your mind about something in here? Edit it in place.
+      sc.onclick = (e) => {
+        e.stopPropagation();        // or the sheet opens over the top of it
+        /* The row stops being a way in while it is a rating control: its
+           own click would fire from every half-star in it. */
+        row.onclick = null;
+        row.classList.remove('openable');
+        row.title = '';
+        row.innerHTML = '';
+        row.append(rateControl(
+          {rate_type:r.rate_type, rate_id:r.rate_id, userrating:r.score},
+          {label:r.title, onRated:() => setTimeout(() => loadRatings(), 500)}));
+      };
+      row.append(sc);
+      box.append(row);
+    });
+    wrap.append(box);
+  });
+}
+
+$('#rate_kind').onchange = () => { queueIndex = 0; drawQueue(); };
+$('#rate_refresh').onclick = () => loadRatings(true);
+
+/* ================= CHANNELS ================= */
+function fmtClock(seconds){
+  const m = Math.floor(seconds/60);
+  const h = Math.floor(m/60);
+  return h ? (h+'h '+(m%60)+'m') : (m+'m');
+}
+
+/* What's on changes on its own — a programme ends, the next one starts, and
+   the channel advances without anyone touching the page. So the page keeps
+   itself current rather than asking you to press something.
+
+   Once a minute, because the times on the cards are written to the minute;
+   polling faster would redraw the same text. */
+const CHANNEL_REFRESH_MS = 60000;
+let channelTimer = null;
+
+/* What counts as "you haven't missed anything". Ten minutes is roughly the
+   cold open and the titles. */
+const NEAR_THE_START = 600;
+
+function channelKey(ch){
+  if(ch.live) return 'live';
+  if(!ch.now) return 'empty';
+  return ch.now.title + '|' + ch.now.sub;
+}
+
+function scheduleChannelRefresh(){
+  clearTimeout(channelTimer);
+  channelTimer = setTimeout(() => {
+    if(currentView !== 'channels') return;     // switchTo starts it again
+    if(document.hidden){ scheduleChannelRefresh(); return; }
+    loadChannels();
+  }, CHANNEL_REFRESH_MS);
+}
+
+/* A whole new deal. Everything on this page is a pure function of your
+   library and the clock, which is what makes it steady — and what means it
+   never changes on its own either. This is the one control that moves it:
+   every channel gets a new running order and a new place in that order, so
+   files you dropped on the drive this morning stop being buried behind an
+   order settled months ago.
+
+   The page is rebuilt from scratch rather than patched. Nothing on it
+   survives a shuffle, so comparing keys card by card would only be a slower
+   way of replacing all twenty-one. */
+$('#shufflechannels').onclick = async () => {
+  const btn = $('#shufflechannels');
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = 'SHUFFLING…';
+  const r = await post('/api/channels/shuffle', {});
+  if(!r.error) $('#channels-out').innerHTML = '';
+  await loadChannels();
+  btn.textContent = original;
+  btn.disabled = false;
+};
+
+async function loadChannels(){
+  const out = $('#channels-out');
+  const data = await api('/api/channels');
+  let grid = out.querySelector('.channelgrid');
+  if(!grid){ out.innerHTML = ''; grid = el('div','channelgrid'); out.append(grid); }
+  data.channels.forEach((ch, index) => {
+    const existing = grid.querySelector('[data-ch="'+ch.id+'"]');
+    /* Same programme still on: move the clock along and leave the card
+       itself alone. Rebuilding it every minute would drop whatever you were
+       hovering and wipe the TUNING/PLAYING label off a card you just used. */
+    if(existing && existing._key === channelKey(ch) && existing._patch){
+      existing._patch(ch);
+      return;
+    }
+    const fresh = channelCard(ch, index);
+    if(existing) existing.replaceWith(fresh); else grid.append(fresh);
+  });
+  scheduleChannelRefresh();
+}
+
+const BOOKMARK_ON = '<svg class="mark" viewBox="0 0 24 24" fill="currentColor" '
+  + 'aria-hidden="true"><path d="M6 2h12a2 2 0 0 1 2 2v18l-8-4.6L4 22V4a2 2 0 0 1 2-2z"/></svg>';
+const BOOKMARK_OFF = '<svg class="mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+  + 'stroke-width="2" stroke-linejoin="round" aria-hidden="true">'
+  + '<path d="M6 2h12a2 2 0 0 1 2 2v18l-8-4.6L4 22V4a2 2 0 0 1 2-2z"/></svg>';
+/* Filled when it's on, outlined when it isn't - the same read as the heart. */
+const watchLabel = on => (on ? BOOKMARK_ON + 'ON WATCHLIST' : BOOKMARK_OFF + 'WATCHLIST');
+
+const LIVE_SIGNAL_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" '
+  + 'stroke-linecap="round"><circle cx="12" cy="12" r="2.1" fill="currentColor" stroke="none"/>'
+  + '<path d="M8.4 8.4a5 5 0 0 0 0 7.2"/><path d="M15.6 8.4a5 5 0 0 1 0 7.2"/>'
+  + '<path d="M5.3 5.3a9.2 9.2 0 0 0 0 13.4"/><path d="M18.7 5.3a9.2 9.2 0 0 1 0 13.4"/></svg>';
+
+/* Spread by the golden angle rather than evenly: eighteen channels split
+   evenly land 20 degrees apart, which is nothing between two cards sitting
+   side by side. This way neighbours in the grid are nowhere near each other
+   on the wheel, and the sequence never repeats. */
+const channelHue = index => Math.round((index * 137.508) % 360);
+
+function channelCard(ch, index){
+  const wrap = el('div','channelcardwrap');
+  wrap.dataset.ch = ch.id;
+  wrap._key = channelKey(ch);
+  const card = el('button','channelcard');
+  card.style.setProperty('--ch', channelHue(index || 0));
+  /* Laid over the card rather than stacked under it. Below the card it would
+     stretch its grid row, and with every row now the same height one failed
+     tune-in would have grown all eighteen cards. */
+  const problem = el('div','chproblem');
+  const head = el('div','channelhead');
+  head.append(el('h3',null,esc(ch.name)));
+  card.append(head);
+  /* Whose turn it is, on the two channels that rotate. The slot is built on
+     every card and left empty on the other sixteen: it can't share the title
+     row (the names run to "Channel 9 (Directors Cut)" and leave no width for
+     a name beside them), and a line that appears only when it has something
+     to say is a line that makes two cards taller than the rest.
+
+     The two rotate on different clocks and say so. "Today" would be a plain
+     untruth on the one that changes when a filmography ends rather than when
+     the date does — a run can start at four in the afternoon and outlast
+     midnight by hours. */
+  const focus = el('div','featured');
+  if(ch.featured){
+    const byRun = ch.featured_when === 'run';
+    focus.textContent = (byRun ? 'This run: ' : 'Today: ') + ch.featured;
+    focus.title = byRun
+      ? 'Every one of their films in order, then the next name — the channel '
+        + 'changes when the films run out, not when the day does'
+      : 'Today\'s focus — a different one each day';
+  }
+  card.append(focus);
+
+  async function watch(){
+    const label = card.querySelector('.watchlabel');
+    const original = label ? label.textContent : '';
+    if(label) label.textContent = 'TUNING…';
+    problem.innerHTML = '';
+    const r = await post('/api/channels/tune', {channel: ch.id});
+    if(r.error){
+      if(label) label.textContent = original;
+      problem.innerHTML = '<div class="notice bad"><p>'+esc(r.error)+'</p></div>';
+      return;
+    }
+    if(label) label.textContent = 'PLAYING';
+    pollPlaying();
+  }
+
+  if(ch.live){
+    const body = el('div','channelbody');
+    body.append(el('div','noposter livesignal', LIVE_SIGNAL_SVG));
+    const info = el('div');
+    info.append(el('div','eyebrow live','LIVE'));
+    info.append(el('div','libline livenote',
+      'Streams from the web, not your library.'));
+    card.title = 'Streams from the web rather than your library — needs an '
+      + 'internet connection and yt-dlp installed alongside mpv.';
+    info.append(el('div','watchlabel','WATCH LIVE'));
+    body.append(info);
+    card.append(body);
+    card.onclick = watch;
+    card.append(problem);
+    wrap.append(card);
+    return wrap;
+  }
+
+  if(!ch.now){
+    card.append(el('p','empty','Nothing in your library fits this yet.'));
+    card.title = 'Nothing in your library fits this channel yet — add more, '
+      + 'or wait for runtimes to fill in on your next scan.';
+    card.disabled = true;
+    wrap.append(card);
+    return wrap;
+  }
+
+  const now = ch.now;
+  const body = el('div','channelbody');
+  if(now.art){ const i=el('img'); i.src=now.art; i.alt=''; body.append(i); }
+  else body.append(el('div','noposter'));
+  /* No "On now" eyebrow: the progress bar and the "12m in" underneath it
+     already say the programme is running, and the label at the foot of the
+     card turns to PLAYING once you tune in — which said it a second time.
+     The one thing worth calling out is a programme that has only just begun,
+     because that's what you're scanning twenty-one cards for. */
+  const flag = el('div','chflag');
+  head.append(flag);
+  const info = el('div');
+  info.append(el('h4',null,esc(now.title)));
+  const timing = el('div','libline');
+  info.append(timing);
+  const track = el('div','progress');
+  const fill = el('i');
+  track.append(fill);
+  info.append(track);
+  const upnext = el('div','libline');
+  info.append(upnext);
+  info.append(el('div','watchlabel','WATCH'));
+
+  /* The things that move while a programme runs. Kept as one function so the
+     first paint and every refresh after it can't drift apart. */
+  wrap._patch = (fresh) => {
+    const n = fresh.now;
+    if(!n) return;
+    flag.textContent = n.elapsed <= NEAR_THE_START ? 'JUST ON' : '';
+    timing.textContent = [n.sub, fmtClock(n.elapsed)+' in'].filter(Boolean).join('  ·  ');
+    fill.style.width = (n.duration ? Math.round(100*n.elapsed/n.duration) : 0)+'%';
+    upnext.textContent = 'Up next: ' + n.next_title
+      + (n.next_sub ? ' ('+n.next_sub+')' : '');
+    /* Held to one line, so the tooltip is where the long ones live. The
+       ellipsis eats the episode codes before the title, which is the right
+       way round. */
+    upnext.title = upnext.textContent;
+  };
+  wrap._patch(ch);
+  body.append(info);
+  card.append(body);
+
+  // Hover the poster or the name for what a busy card face doesn't have
+  // room for — who made it, who's in it, how it's rated.
+  const peekLines = [];
+  if(now.directors && now.directors.length)
+    peekLines.push((now.kind==='episodes' ? 'Created by ' : 'Directed by ') + now.directors.join(', '));
+  if(now.cast && now.cast.length)
+    peekLines.push('Starring ' + now.cast.join(', '));
+  const ratingBits = [];
+  if(now.rating) ratingBits.push('TMDB '+now.rating);
+  if(now.userrating) ratingBits.push('you: '+fmtScoreShort(now.userrating));
+  if(ratingBits.length) peekLines.push(ratingBits.join('  ·  '));
+  if(peekLines.length){
+    const peek = el('div','chpeek' + (now.art ? ' hasart' : ''));
+    peek.append(el('h4',null,esc(now.title)));
+    peekLines.forEach(line => peek.append(el('div','line', esc(line))));
+    /* Kept after the text so it can't be read as a heading by anything
+       walking the card in order — it's the same poster already named by the
+       title above it, so it's decoration and says nothing new. */
+    if(now.art){
+      const thumb = el('img','chpeekart');
+      thumb.src = now.art; thumb.alt = ''; thumb.loading = 'lazy';
+      peek.append(thumb);
+    }
+    card.append(peek);
+  }
+
+  card.onclick = watch;
+  card.append(problem);
+  wrap.append(card);
+  return wrap;
+}
+
+/* ================= WATCH HISTORY ================= */
+/* Every number on this page is runtime covered — how far through the thing
+   the playhead got — and never how long mpv was open. The two are not close:
+   the first evening this shipped it reported eight hours of Empire of the
+   Sun, which is what falling asleep in front of a film looks like from the
+   window's point of view.
+
+   Honest to the point of being awkward, too: a row that can't be measured
+   says so rather than showing 0m. */
+function histClock(seconds){
+  const m = Math.round(seconds/60);
+  if(m < 60) return m + 'm';
+  return Math.floor(m/60) + 'h ' + pad(m%60) + 'm';
+}
+
+/* "Today", "Yesterday", then the date. Comparing the date parts of the
+   stamps rather than doing arithmetic on them — the stamps are local time
+   already, and turning them into Dates only to turn them back invites an
+   off-by-one over a daylight-saving boundary. */
+function histDayLabel(datePart){
+  const now = new Date();
+  const iso = d => d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate());
+  if(datePart === iso(now)) return 'Today';
+  const y = new Date(now.getTime() - 86400000);
+  if(datePart === iso(y)) return 'Yesterday';
+  const [Y,M,D] = datePart.split('-').map(Number);
+  const when = new Date(Y, M-1, D);
+  return when.toLocaleDateString(undefined,
+    {weekday:'long', day:'numeric', month:'long'}) + (Y === now.getFullYear() ? '' : ' ' + Y);
+}
+
+async function loadHistory(){
+  const out = $('#history-out');
+  const days = parseInt($('#histdays').value, 10) || HIST_STEPS[0];
+  const data = await api('/api/history?days=' + days);
+  out.innerHTML = '';
+  if(data.error){
+    out.append(el('div','notice bad','<h3>Couldn\'t read your history</h3><p>'+esc(data.error)+'</p>'));
+    return;
+  }
+  const items = data.items || [];
+
+  const totals = $('#histtotals');
+  totals.innerHTML = '';
+  if(!items.length){
+    totals.textContent = '';
+    out.append(el('p','empty',
+      'Nothing watched in that stretch. This fills itself in as you watch — '
+      + 'every film and episode, how long you sat with it, and where you got to.'));
+    /* An empty week is exactly when you want the way further back. */
+    out.append(histMore(days, false));
+    return;
+  }
+  /* Counted over sittings, not rows — one row can be several evenings now. */
+  const count = data.sittings || items.length;
+  const sittings = count + (count === 1 ? ' sitting' : ' sittings');
+  const headline = el('div');
+  /* Nothing measurable in range and the total is zero, which is not a fact
+     about your evenings — it's a fact about what could be worked out. Saying
+     "0m" would be the one lie this page could tell. */
+  headline.innerHTML = data.measured
+    ? '<b>' + histClock(data.covered_total) + '</b> of film and telly over ' + sittings
+    : sittings;
+  totals.append(headline);
+  /* Said out loud rather than quietly folded into the total. The number is
+     the sum of what could be measured, and if some rows couldn't be then it
+     is smaller than the truth and should admit it. */
+  if(data.unmeasured){
+    totals.append(el('div', null, data.measured
+      ? data.unmeasured + " that couldn't be measured"
+      : 'nothing here could be measured'));
+  }
+
+  let currentDay = null, list = null;
+  items.forEach(item => {
+    const day = (item.at || '').slice(0, 10);
+    if(day !== currentDay){
+      currentDay = day;
+      out.append(el('div','histday', histDayLabel(day)));
+      list = el('div');
+      out.append(list);
+    }
+    const row = el('div','histrow');
+    if(item.art){ const i=el('img'); i.src=item.art; i.alt=''; i.loading='lazy'; row.append(i); }
+    else row.append(el('div','noposter'));
+
+    const t = el('div','t');
+    t.append(el('h4',null,esc(item.title)));
+    /* The headline describes the LATEST sitting, because "got to 35%" is a
+       fact about one evening rather than about a film. Everything else about
+       the other evenings is in the list underneath. */
+    const bits = [];
+    if(item.sub) bits.push(item.sub);
+    bits.push((item.at || '').slice(11, 16));
+    if(item.finished){
+      bits.push('watched to the end');
+    } else if(item.covered && item.total){
+      bits.push('got to ' + histClock(item.covered) + ' of ' + histClock(item.total));
+    } else {
+      bits.push('stopped part way');
+    }
+    /* An evening nobody closed — the app went away mid-film. The position is
+       the library's, not a logged ending, and the row says which it is
+       rather than quietly presenting one as the other. */
+    if(item.open) bits.push(item.device ? 'no ending recorded' : 'still open — position from where you left it');
+    /* Shared from another computer. Said, because "watched to the end" on a
+       film that isn't on this one otherwise reads as a mistake. */
+    if(item.device) bits.push('on ' + item.device);
+    const line = el('div','libline', esc(bits.join('  ·  ')));
+    line.title = line.textContent;
+    t.append(line);
+
+    if(item.sittings > 1){
+      const more = el('button','sitcount', item.sittings + ' sittings');
+      more.type = 'button';
+      more.setAttribute('aria-expanded','false');
+      t.append(more);
+      const list2 = el('div','sitlist hidden');
+      item.sessions.forEach(sn => {
+        const li = el('div','sitrow');
+        li.append(el('span','sitwhen', histDayLabel((sn.at||'').slice(0,10))
+                                       + '  ' + (sn.at||'').slice(11,16)));
+        const what = sn.finished ? 'watched to the end'
+          : (sn.covered && sn.total)
+            ? 'got to ' + histClock(sn.covered) + ' of ' + histClock(sn.total)
+            : (sn.open ? 'still open' : 'stopped part way');
+        li.append(el('span','sitwhat', esc(what + (sn.device ? '  ·  on ' + sn.device : ''))));
+        list2.append(li);
+      });
+      t.append(list2);
+      more.onclick = (e) => {
+        e.stopPropagation();
+        const open = list2.classList.toggle('hidden');
+        more.setAttribute('aria-expanded', String(!open));
+        more.classList.toggle('on', !open);
+      };
+    }
+    row.append(t);
+
+    /* The runtime you actually got through, and what share of the thing that
+       was. Not how long the player was open — see the note above histClock. */
+    const dur = el('div','dur' + (item.finished ? '' : ' part'));
+    if(item.covered){
+      dur.append(document.createTextNode(histClock(item.covered)));
+      dur.append(el('small',null, item.percent != null ? item.percent + '% of it'
+                                                       : 'watched'));
+    } else {
+      dur.append(document.createTextNode('—'));
+      dur.append(el('small',null,'not measured'));
+      dur.title = 'Nothing was recorded about how far through this one you '
+        + 'got, and it is no longer in the library to ask how long it is.';
+    }
+    row.append(dur);
+
+    /* What you can DO with the evening, as against what it records. Only
+       drawn when the thing is still in the library: history outlives the
+       files it is about, so a PLAY on a deleted film is a button that can
+       only apologise. Those rows keep their record and lose their buttons. */
+    const acts = el('div','histacts');
+    if(item.available){
+      const play = el('button','histbtn play', item.finished ? 'WATCH AGAIN' : 'RESUME');
+      play.title = item.finished
+        ? 'Play it from the start'
+        : 'Pick up where you stopped';
+      play.onclick = async (e) => {
+        e.stopPropagation();
+        play.disabled = true;
+        const before = play.textContent;
+        play.textContent = 'STARTING…';
+        const r = await post('/api/play', {type: item.kind, id: item.id});
+        play.textContent = r && r.error ? 'FAILED' : 'PLAYING';
+        if(r && r.error){ play.title = r.error; play.disabled = false;
+          setTimeout(() => { play.textContent = before; }, 2500); }
+      };
+      acts.append(play);
+
+      /* An episode has no page of its own — the library page it belongs to
+         is its show's. */
+      const openable = item.kind === 'movie' ? item.id : item.show_id;
+      if(openable){
+        const open = el('button','histbtn', 'MORE');
+        open.title = item.kind === 'movie'
+          ? 'Open this film in the library'
+          : 'Open the show in the library';
+        open.onclick = (e) => {
+          e.stopPropagation();
+          item.kind === 'movie' ? openFilm(openable) : openShow(openable);
+        };
+        acts.append(open);
+      }
+    }
+    row.append(acts);
+    list.append(row);
+  });
+  out.append(histMore(days, true));
+}
+
+$('#histdays').onchange = loadHistory;
+
+/* How far back the page can be asked to go, in the order it offers them.
+   It opens on the first: a hundred evenings is a wall, and the question
+   this page usually answers is "what did I watch this week". Going further
+   is one press, and the press says what it will show. */
+const HIST_STEPS = [7, 30, 90, 365, 3650];
+/* Two forms, because the two places read differently: "GO BACK A MONTH" on
+   the button, "that's the last month" in the sentence beside it. */
+const HIST_LABEL = {7: 'a week', 30: 'a month', 90: 'three months',
+                    365: 'a year', 3650: 'everything'};
+const HIST_SPAN = {7: 'week', 30: 'month', 90: 'three months', 365: 'year'};
+
+function histMore(days, shown){
+  const next = HIST_STEPS.find(d => d > days);
+  const box = el('div', 'histmore');
+  box.append(el('div', 'histmorenote',
+    days >= 3650 ? (shown ? 'That\'s everything.' : 'Nothing recorded yet.')
+    : shown ? 'That\'s the last ' + HIST_SPAN[days] + '.'
+            : 'Nothing in the last ' + HIST_SPAN[days] + '.'));
+  if(next){
+    const go = el('button', 'iconbtn',
+      next >= 3650 ? 'SHOW EVERYTHING' : 'GO BACK ' + HIST_LABEL[next].toUpperCase());
+    go.onclick = () => {
+      $('#histdays').value = String(next);
+      loadHistory();
+      $('#view-history').scrollTop = Math.max(0, $('#view-history').scrollTop - 200);
+    };
+    box.append(go);
+  }
+  return box;
+}
+
+/* ---------- what's stored ---------- */
+function kb(bytes){
+  if(!bytes) return '0 KB';
+  if(bytes > 1048576) return (bytes/1048576).toFixed(1)+' MB';
+  return Math.max(1, Math.round(bytes/1024))+' KB';
+}
+
+async function loadData(){
+  const d = await api('/api/data');
+  if(d.error) return;
+  $('#dbline').textContent =
+    'Your library and everything you\'ve rated is in ' + d.db_path + ' (' + kb(d.db_size) + '). ' +
+    'Back that one file up and you\'ve backed up the lot.';
+
+  const wrap = $('#datatables'); wrap.innerHTML='';
+  d.tables.forEach(t => {
+    const row = el('div','toprow');
+    row.append(el('div','pos', ''));
+    const label = el('div','t');
+    label.append(document.createTextNode(t.name));
+    label.append(el('small',null, esc(t.detail)));
+    row.append(label);
+    const n = el('div','libline'); n.textContent = t.rows;
+    row.append(n);
+    wrap.append(row);
+  });
+
+  const hist = $('#datahistory'); hist.innerHTML='';
+  if(!d.recent.length){
+    hist.append(el('p','empty','Nothing yet. Play or rate something and it turns up here.'));
+  }
+  d.recent.forEach(h => {
+    const row = el('div','toprow');
+    const t = el('div','t');
+    t.append(document.createTextNode(h.title || '(untitled)'));
+    t.append(el('small',null, esc(h.event + (h.value ? ' ' + h.value + '/10' : ''))));
+    row.append(t);
+    const when = el('div','libline'); when.textContent = (h.at||'').slice(0,16);
+    row.append(when);
+    hist.append(row);
+  });
+
+  d.files.forEach(f => {
+    const row = el('div','toprow');
+    const t = el('div','t');
+    t.append(document.createTextNode(f.label));
+    t.append(el('small',null, esc(f.path)));
+    row.append(t);
+    const n = el('div','libline'); n.textContent = f.exists ? kb(f.size) : 'not created yet';
+    row.append(n);
+    $('#datatables').append(row);
+  });
+}
+
+/* ---------- settings: library ---------- */
+$('#savelocal').onclick = async () => {
+  await post('/api/config', {
+    media_folders: $('#c_folders').value.split('\n'),
+    mpv_path: $('#c_mpv').value.trim(),
+    downloads_folder: $('#c_downloads').value.trim(),
+  });
+  libNote('Saved. Press SCAN MY FOLDERS to build the library.');
+  loadStatus();
+};
+
+/* Blank reads as "the default", not as zero — zero is a real setting here
+   (never ask then) and has to be typed on purpose. */
+const afkNum = (id, fallback) => {
+  const raw = $(id).value.trim();
+  if(!raw) return fallback;
+  const n = parseInt(raw, 10);
+  return isNaN(n) || n < 0 ? fallback : n;
+};
+
+$('#saveafk').onclick = async () => {
+  await post('/api/config', {afk: {
+    enabled: $('#c_afk_on').checked,
+    day: afkNum('#c_afk_day', 240),
+    evening: afkNum('#c_afk_evening', 150),
+    late: afkNum('#c_afk_late', 90),
+    grace: Math.max(1, afkNum('#c_afk_grace', 5)),
+  }});
+  $('#afkmsg').textContent = 'saved';
+  setTimeout(() => { $('#afkmsg').textContent = ''; }, 2500);
+  loadStatus();
+};
+
+function libNote(msg, bad){
+  $('#libstatus').innerHTML = '<div class="notice'+(bad?' bad':'')+'"><p>'+esc(msg)+'</p></div>';
+}
+
+$('#rematch').onclick = async () => {
+  $('#rematch').disabled = true;
+  await post('/api/library/rematch');
+  $('#rematch').disabled = false;
+  libNote('Cleared. Press SCAN MY FOLDERS and it will try those titles again — '
+        + 'worth doing after you rename anything awkward.');
+};
+
+$('#testmpv').onclick = async () => {
+  $('#testmpv').disabled = true;
+  libNote('Checking…');
+  const r = await api('/api/mpv/test');
+  $('#testmpv').disabled = false;
+  libNote(r.ok ? ('mpv is working — ' + r.message) : r.message, !r.ok);
+};
+
+$('#scanlib').onclick = async () => {
+  $('#scanlib').disabled = true;
+  await post('/api/library/scan');
+  pollLibrary();
+};
+
+$('#exportdata').onclick = () => { window.location.href = '/api/export'; };
+
+/* ---------- settings: sorting new downloads ----------
+   The sorting itself belongs to process_new_movies.py, which lives in the
+   downloads folder and is the thing that knows this library's conventions.
+   All of this is: ask it what it would do, show that, and only then let it
+   do it. Nothing here moves a file. */
+let sortTimer = null;
+
+async function sorterLoad(){
+  let st;
+  try{ st = await api('/api/sorter/status'); }catch(e){ return; }
+  if(!st || st.error === undefined && !st.folder) return;
+  if(!$('#c_downloads').value) $('#c_downloads').value = st.folder || st.suggestion || '';
+  if(!st.folder && st.suggestion){
+    sortNote('Found the sorter in <b>'+esc(st.suggestion)+'</b>, which is where your '
+           + 'library folders live. Press <b>Save</b> to use it, or type another folder.');
+  }
+  const btn = $('#sortnew');
+  btn.disabled = !st.folder || st.running;
+  btn.textContent = st.running ? 'SORTING…'
+    : (st.waiting && st.waiting.length
+        ? 'SORT ' + st.waiting.length + ' NEW DOWNLOAD' + (st.waiting.length === 1 ? '' : 'S')
+        : 'SORT NEW DOWNLOADS');
+  drawAside(st.aside);
+  if(st.folder && !st.reachable) sortNote('Can\'t reach ' + esc(st.folder) + ' — is the drive plugged in?', true);
+  else if(st.folder && !st.script) sortNote('No process_new_movies.py in that folder. That script is what does the sorting.', true);
+  if(st.running) pollSorter();
+}
+
+/* The question this whole feature exists to ask. The sorter never deletes a
+   video: when a download duplicates something you have, it keeps the better
+   copy and moves the other into _DUPLICATES. This lists what's there and
+   why, and nothing leaves until you press the button — and then only as
+   far as the Recycle Bin. Shown whenever anything is waiting, including
+   after a sort the scheduled task ran without the app. */
+function drawAside(a){
+  const box = $('#sortaside');
+  if(!a || !a.count){ box.innerHTML = ''; return; }
+  const n = a.count, up = a.upgrades;
+  const card = el('div','notice');
+  card.append(el('h3', null, n + ' duplicate cop' + (n === 1 ? 'y' : 'ies') + ' set aside · ' + dockGB(a.bytes)));
+  const said = [];
+  if(n - up) said.push((n - up) + ' download' + (n - up === 1 ? '' : 's') + ' of things you already had at the same or better quality');
+  if(up) said.push(up + ' of your old cop' + (up === 1 ? 'y' : 'ies') + ', replaced by a better download');
+  card.append(el('p', null, esc(said.join(', and ') + '. Nothing in your library is missing — '
+    + 'these are the losing copies. Move them to the Recycle Bin?')));
+  const list = document.createElement('details');
+  list.append(el('summary', null, 'What they are'));
+  const rows = el('div','sortlist');
+  a.items.forEach(i => {
+    const r = el('div');
+    r.append(el('b', null, esc(i.name)));
+    r.append(el('span', null, esc(i.why + (i.kept ? '  ·  kept ' + i.kept : ''))));
+    rows.append(r);
+  });
+  list.append(rows);
+  card.append(list);
+  const go = el('button','play','MOVE TO BIN');
+  go.onclick = async () => {
+    go.disabled = true;
+    const r = await post('/api/sorter/aside', {action:'bin'});
+    if(r.error){ go.disabled = false; sortNote(esc(r.error), true); return; }
+    drawAside(r.aside);
+    sortNote(r.binned + ' moved to the Recycle Bin, ' + dockGB(r.freed) + ' freed.'
+      + (r.failed.length ? ' ' + r.failed.length + ' couldn\'t be moved: ' + esc(r.failed.join('; ')) : ''),
+      !!r.failed.length);
+  };
+  const look = el('button','iconbtn','SHOW FOLDER');
+  look.onclick = () => post('/api/sorter/aside', {action:'open'});
+  const later = el('button','iconbtn','NOT NOW');
+  later.onclick = () => { box.innerHTML = ''; };
+  const row = el('div','rowbtns');
+  row.append(go, look, later);
+  card.append(row);
+  box.innerHTML = '';
+  box.append(card);
+}
+
+function sortNote(html, bad){
+  $('#sortout').innerHTML = '<div class="notice'+(bad?' bad':'')+'"><p>'+html+'</p></div>';
+}
+
+function sortLines(title, lines, cls){
+  if(!lines || !lines.length) return '';
+  return '<h3>'+esc(title)+'</h3><div class="sortlist'+(cls?' '+cls:'')+'">'
+       + lines.map(l => '<div>'+esc(l)+'</div>').join('') + '</div>';
+}
+
+$('#sortnew').onclick = async () => {
+  const btn = $('#sortnew');
+  btn.disabled = true;
+  sortNote('Asking the sorter what it would do…');
+  const r = await post('/api/sorter/preview');
+  btn.disabled = false;
+  if(r.error){ sortNote(esc(r.error), true); return; }
+  if(!r.items.length){
+    sortNote(r.waiting.length
+      ? 'Nothing ready yet. '+r.waiting.length+' item'+(r.waiting.length===1?'':'s')+' in the folder '
+        + 'still downloading, missing a video file, or an incomplete season pack.'
+      : 'Nothing new in the downloads folder.');
+    if(r.notes.length) $('#sortout').insertAdjacentHTML('beforeend', sortLines('Held back', r.notes, 'warn'));
+    return;
+  }
+  const box = el('div','notice');
+  box.innerHTML = '<h3>'+r.items.length+' ready to sort</h3>'
+    + '<div class="sortlist">'
+    + r.items.map(i => '<div><b>'+esc(i.name)+'</b><span>→ '+esc(i.dest)+'</span></div>').join('')
+    + '</div>'
+    + (r.notes.length ? sortLines('Held back', r.notes, 'warn') : '')
+    + '<p class="empty">Files are moved, not copied. Extras are quarantined, junk is stripped, '
+    + 'and new films go into the spreadsheet. Episode titles are filled in from TMDB afterwards.</p>';
+  const go = el('button','play','SORT THEM');
+  go.onclick = async () => {
+    go.disabled = true;
+    const started = await post('/api/sorter/run');
+    if(started.error){ sortNote(esc(started.error), true); return; }
+    pollSorter();
+  };
+  const no = el('button','iconbtn','NOT NOW');
+  no.style.marginLeft = '8px';
+  no.onclick = () => { $('#sortout').innerHTML = ''; };
+  const row = el('div','rowbtns'); row.append(go, no);
+  box.append(row);
+  $('#sortout').innerHTML = '';
+  $('#sortout').append(box);
+};
+
+async function pollSorter(){
+  const st = await api('/api/sorter/status');
+  $('#sortnew').disabled = st.running;
+  if(st.running){
+    $('#sortout').innerHTML = '<div class="notice"><h3>'+esc(st.step || 'Working')+'</h3>'
+      + '<p>Moving files, checking quality with ffprobe and updating the spreadsheet. '
+      + 'This takes a minute or two per item.</p><div class="progress"><i style="width:100%"></i></div></div>';
+    clearTimeout(sortTimer);
+    sortTimer = setTimeout(pollSorter, 1500);
+    return;
+  }
+  const done = (st.report || []).filter(l => l.indexOf('->') >= 0);
+  const other = (st.report || []).filter(l => l.indexOf('->') < 0);
+  let html = '<div class="notice'+(st.error ? ' bad' : '')+'">';
+  html += st.error ? '<h3>It stopped</h3><p>'+esc(st.error)+'</p>'
+                   : '<h3>'+(done.length ? done.length + ' sorted' : 'Nothing moved')+'</h3>';
+  html += sortLines('Moved', done);
+  html += sortLines('Needs you', other, 'warn');
+  html += sortLines('Episode titles', st.renamed, '');
+  html += '</div>';
+  $('#sortout').innerHTML = html;
+  sorterLoad();
+  loadStatus();
+}
+
+/* ---------- settings: docking station ---------- */
+/* A cart, not a per-row fetch: the selection survives paging and searching
+   because it's kept here rather than read back off checkboxes that scroll
+   out of the DOM the moment you turn the page. */
+const dockSelected = new Map();   // "kind:id" -> {kind,id,title}
+let dockOffset = 0, dockTotal = 0, dockRows = [], dockInited = false;
+const DOCK_PAGE_SIZE = 60;
+let dockPhase = 'idle';           // idle | confirm | running
+let dockPolling = false;
+
+function dockGB(bytes){
+  if(!bytes) return '0 GB';
+  const gb = bytes / (1024*1024*1024);
+  return (gb < 0.1 ? Math.max(1, Math.round(bytes/1048576))+' MB' : gb.toFixed(2)+' GB');
+}
+
+function dockOnOpen(){
+  if(dockInited) return;
+  dockInited = true;
+  dockRefreshDrives();
+  dockLoadList();
+  dockStatusTick();   // adopts a job started before Settings was opened
+}
+
+async function dockRefreshDrives(){
+  const sel = $('#dock_drive');
+  const was = sel.value;
+  const r = await api('/api/dock/drives');
+  sel.innerHTML = '';
+  if(!r.supported){
+    sel.innerHTML = '<option value="">Not available on this OS</option>';
+    $('#dock_drivenote').textContent = 'Drive detection needs Windows or macOS.';
+    dockUpdateStartState();
+    return;
+  }
+  if(!r.drives.length){
+    sel.innerHTML = '<option value="">No drives found</option>';
+    $('#dock_drivenote').textContent = 'Plug in a USB drive and press refresh.';
+    dockUpdateStartState();
+    return;
+  }
+  r.drives.forEach(d => {
+    const label = d.letter + (d.label ? ' "'+d.label+'"' : '') +
+      ' — ' + dockGB(d.free) + ' free of ' + dockGB(d.total);
+    sel.append(new Option(label, d.letter));
+  });
+  if([...sel.options].some(o => o.value === was)) sel.value = was;
+  dockNoteDrive();
+  dockUpdateStartState();
+}
+
+function dockNoteDrive(){
+  const sel = $('#dock_drive');
+  const opt = sel.selectedOptions[0];
+  $('#dock_drivenote').textContent = opt && opt.value
+    ? 'Films go to ' + opt.value + '\\Films, shows to ' + opt.value + '\\TV Shows.' : '';
+}
+
+$('#dock_drive').onchange = () => { dockNoteDrive(); dockResetConfirm(); };
+$('#dock_refresh').onclick = dockRefreshDrives;
+
+let dockSearchTimer = null;
+$('#dock_q').oninput = () => {
+  clearTimeout(dockSearchTimer);
+  dockSearchTimer = setTimeout(() => dockLoadList(), 280);
+};
+$('#dock_kind').onchange = () => dockLoadList();
+
+async function dockLoadList(keepOffset){
+  if(!keepOffset) dockOffset = 0;
+  const q = new URLSearchParams({
+    kind: $('#dock_kind').value, q: $('#dock_q').value.trim(),
+    sort: 'title', shelf: 'all', offset: dockOffset, limit: DOCK_PAGE_SIZE,
+  });
+  const out = $('#dock_list');
+  out.innerHTML = '<p class="empty">Looking…</p>';
+  const data = await api('/api/browse?'+q);
+  if(data.error){ out.innerHTML = '<div class="notice bad"><p>'+esc(data.error)+'</p></div>'; return; }
+  dockRows = data.items; dockTotal = data.total;
+  out.innerHTML = '';
+  if(!dockRows.length){
+    out.innerHTML = '<p class="empty">Nothing matching that.</p>';
+  } else {
+    dockRows.forEach(item => out.append(dockRow(item)));
+  }
+  const pager = $('#dock_pager');
+  pager.classList.toggle('hidden', dockTotal <= DOCK_PAGE_SIZE);
+  $('#dock_pagerpos').textContent =
+    (dockOffset+1)+'–'+(dockOffset+dockRows.length)+' OF '+dockTotal;
+  $('#dock_prev').disabled = dockOffset === 0;
+  $('#dock_next').disabled = dockOffset + dockRows.length >= dockTotal;
+}
+$('#dock_prev').onclick = () => { dockOffset = Math.max(0, dockOffset - DOCK_PAGE_SIZE); dockLoadList(true); };
+$('#dock_next').onclick = () => { dockOffset += DOCK_PAGE_SIZE; dockLoadList(true); };
+
+function dockRow(item){
+  const key = item.kind+':'+item.id;
+  const row = el('label','dockrow');
+  const box = el('input'); box.type = 'checkbox'; box.checked = dockSelected.has(key);
+  box.onchange = () => {
+    if(box.checked) dockSelected.set(key, {kind:item.kind, id:item.id, title:item.title});
+    else dockSelected.delete(key);
+    dockUpdateStartState();
+  };
+  row.append(box);
+  const t = el('div','t');
+  t.append(document.createTextNode(item.title + (item.year ? ' ('+item.year+')' : '')));
+  t.append(el('small', null,
+    item.kind === 'tvshow' ? (item.episodes||0)+' episodes' : 'Film'));
+  row.append(t);
+  return row;
+}
+
+function dockUpdateStartState(){
+  const n = dockSelected.size;
+  $('#dock_selcount').textContent = n ? n+' selected' : 'nothing selected';
+  const drive = $('#dock_drive').value;
+  $('#dock_start').disabled = !(n && drive) || dockPhase === 'running';
+}
+
+function dockResetConfirm(){
+  if(dockPhase === 'confirm'){
+    dockPhase = 'idle';
+    $('#dock_start').textContent = 'COPY SELECTED TO DRIVE';
+    $('#dock_status').innerHTML = '';
+  }
+  dockUpdateStartState();
+}
+
+$('#dock_start').onclick = async () => {
+  const dest = $('#dock_drive').value;
+  const items = [...dockSelected.values()].map(v => ({kind:v.kind, id:v.id}));
+  if(!items.length || !dest) return;
+
+  if(dockPhase !== 'confirm'){
+    $('#dock_start').disabled = true;
+    $('#dock_status').innerHTML = '<p class="empty">Working out what to copy…</p>';
+    const plan = await post('/api/dock/plan', {items, dest});
+    $('#dock_start').disabled = false;
+    if(plan.error){ $('#dock_status').innerHTML = '<div class="notice bad"><p>'+esc(plan.error)+'</p></div>'; return; }
+    if(!plan.count){
+      $('#dock_status').innerHTML = '<div class="notice bad"><p>Nothing left to copy — '+
+        (plan.warnings[0] || 'everything selected has moved or gone missing.')+'</p></div>';
+      return;
+    }
+    let note = plan.count+' file'+(plan.count===1?'':'s')+', '+dockGB(plan.bytes)+'.';
+    if(!plan.fits) note += ' That\'s more than the '+dockGB(plan.free)+' free on '+dest+'.';
+    let html = '<div class="notice'+(plan.fits?'':' bad')+'"><h3>Ready to copy</h3><p>'+esc(note)+'</p>';
+    if(plan.warnings.length) html += '<p>'+esc(plan.warnings.length+' item(s) skipped: '+plan.warnings.slice(0,3).join('; '))+'</p>';
+    html += '</div>';
+    $('#dock_status').innerHTML = html;
+    if(!plan.fits) return;
+    dockPhase = 'confirm';
+    $('#dock_start').textContent = 'CONFIRM — COPY ' + dockGB(plan.bytes);
+    return;
+  }
+
+  dockPhase = 'running';
+  $('#dock_start').disabled = true;
+  $('#dock_start').textContent = 'COPY SELECTED TO DRIVE';
+  $('#dock_cancel').classList.remove('hidden');
+  await post('/api/dock/start', {items, dest});
+  dockStatusTick();
+};
+
+$('#dock_cancel').onclick = async () => {
+  $('#dock_cancel').disabled = true;
+  await post('/api/dock/cancel');
+};
+
+async function dockStatusTick(){
+  if(dockPolling) return;
+  dockPolling = true;
+  try{
+    while(true){
+      const s = await api('/api/dock/status');
+      if(!s.running){
+        $('#dock_cancel').classList.add('hidden');
+        $('#dock_cancel').disabled = false;
+        dockPhase = 'idle';
+        dockUpdateStartState();
+        if(s.finished_at){
+          const bits = [];
+          if(s.done) bits.push(s.done+' of '+s.total+' copied');
+          if(s.step === 'Cancelled') bits.push('stopped early');
+          let html = '<div class="notice'+(s.errors.length?' bad':'')+'"><h3>'+
+            (s.step === 'Cancelled' ? 'Cancelled' : 'Done')+'</h3><p>'+esc(bits.join(', ') || 'Nothing copied.')+'</p>';
+          if(s.errors.length) html += '<p>'+esc(s.errors.slice(0,5).join('; '))+'</p>';
+          html += '</div>';
+          $('#dock_status').innerHTML = html;
+        }
+        break;
+      }
+      dockPhase = 'running';
+      $('#dock_start').disabled = true;
+      $('#dock_cancel').classList.remove('hidden');
+      const pct = s.bytes_total ? Math.round(100*s.bytes_done/s.bytes_total) : 0;
+      $('#dock_status').innerHTML =
+        '<div class="notice"><h3>Copying — '+esc(s.step||'')+'</h3>'+
+        '<p>'+s.done+' of '+s.total+' files · '+dockGB(s.bytes_done)+' of '+dockGB(s.bytes_total)+'</p>'+
+        '<div class="progress"><i style="width:'+pct+'%"></i></div></div>';
+      await new Promise(r => setTimeout(r, 700));
+    }
+  } finally {
+    dockPolling = false;
+  }
+}
+
+async function pollLibrary(){
+  const s = await api('/api/library/status');
+  const c = s.counts || {};
+  if(s.running){
+    const pct = s.total ? Math.round(100*s.done/s.total) : 0;
+    $('#libstatus').innerHTML =
+      '<div class="notice"><h3>'+esc(s.step||'Scanning')+'</h3>'+
+      '<p>'+(s.total ? s.done+' of '+s.total : 'Reading folders')+'</p>'+
+      '<div class="progress"><i style="width:'+pct+'%"></i></div></div>';
+    setTimeout(pollLibrary, 700);
+    return;
+  }
+  $('#scanlib').disabled = false;
+  if(s.error){ libNote('Scan stopped: '+s.error, true); return; }
+  if(s.result && s.result.kept){
+    libNote(s.result.kept+' files in the library weren\'t found on disk this time — '
+      + 'that\'s most of it, so it\'s far likelier a drive is missing than that you '
+      + 'deleted them. Nothing has been removed and your ratings are untouched. '
+      + 'Check your folders are all connected, then scan again.', true);
+    loadStatus();
+    return;
+  }
+  let msg = c.movies+' films, '+c.shows+' shows, '+c.episodes+' episodes in the library.';
+  if(c.unmatched) msg += ' '+c.unmatched+' files couldn\'t be read as a film or an episode.';
+  if(c.unidentified) msg += ' '+c.unidentified+' didn\'t match anything on TMDB — they\'re '
+    + 'still listed, just without artwork.';
+  if(c.noposter && c.noposter !== c.unidentified)
+    msg += ' '+c.noposter+' have no poster on TMDB at all.';
+  if(!STATUS.has_key) msg += ' Add a TMDB key below for posters, genres and suggestions.';
+  libNote(msg);
+  loadStatus();
+}
+
+/* ---------- settings ---------- */
+$('#savecfg').onclick = async () => {
+  const body = {};
+  if($('#c_tmdb').value.trim()) body.tmdb_key = $('#c_tmdb').value.trim();
+  await post('/api/config', body);
+  $('#savemsg').textContent = 'saved';
+  $('#c_tmdb').value='';
+  setTimeout(()=> $('#savemsg').textContent='', 2500);
+  loadStatus();
+};
+
+$('#savesubs').onclick = async () => {
+  const body = {};
+  /* Blank means "leave it alone", so a saved key isn't wiped by saving the
+     language — the page is never sent the real values back to put here. */
+  if($('#c_oskey').value.trim())  body.os_api_key = $('#c_oskey').value.trim();
+  if($('#c_osuser').value.trim()) body.os_username = $('#c_osuser').value.trim();
+  if($('#c_ospass').value)        body.os_password = $('#c_ospass').value;
+  if($('#c_oslang').value.trim()) body.sub_language = $('#c_oslang').value.trim().toLowerCase();
+  await post('/api/config', body);
+  $('#submsg').textContent = 'saved';
+  $('#c_oskey').value = ''; $('#c_ospass').value = '';
+  setTimeout(()=> $('#submsg').textContent='', 2500);
+  loadStatus();
+};
+
+/* ---------- the remote ---------- */
+/* pywebview can give us a second real window and keep it above mpv, which is
+   the whole point of a remote — mpv takes the foreground the moment it
+   starts. Without pywebview (Edge app mode, or an ordinary browser tab) a
+   popup is the best on offer and it can't be pinned on top. */
+async function openRemote(){
+  const bridge = window.pywebview && window.pywebview.api;
+  if(bridge && bridge.open_remote){
+    try { await bridge.open_remote(); return; } catch(e){ /* fall through */ }
+  }
+  window.open('/remote', 'nextup-remote',
+              'width=330,height=730,menubar=no,toolbar=no,location=no,status=no');
+}
+$('#openremote').onclick = openRemote;
+
+/* ---------- currently playing, shared across every tab ---------- */
+function renderPlaying(p, q){
+  const bar = $('#playingbar');
+  if(!p){ bar.classList.add('hidden'); bar.innerHTML=''; return; }
+  bar.classList.remove('hidden');
+  bar.innerHTML = '';
+  if(p.art){ const i = el('img'); i.src = p.art; i.alt=''; bar.append(i); }
+  const box = el('div');
+  box.append(el('div','eyebrow', p.channel || 'Now playing'));
+  const line = el('div');
+  line.append(el('b',null, esc(p.title||'')));
+  /* Position comes from mpv itself when the control channel is up. Without
+     it there's no honest progress to show, so fall back to how long ago it
+     started rather than inventing a bar. */
+  const bits = [p.sub];
+  if(p.position != null && p.duration){
+    bits.push(fmtClock(p.position) + ' of ' + fmtClock(p.duration));
+  } else {
+    const mins = Math.floor((p.elapsed||0)/60);
+    bits.push(mins ? (mins+' min ago') : 'just started');
+  }
+  line.append(el('span',null, esc(bits.filter(Boolean).join('  ·  '))));
+  box.append(line);
+  if(p.position != null && p.duration){
+    const pct = Math.max(0, Math.min(100, 100 * p.position / p.duration));
+    const track = el('div','playprogress');
+    const fill = el('i'); fill.style.width = pct + '%';
+    track.append(fill);
+    box.append(track);
+  }
+  /* What the queue has next — not on a channel, which the queue waits for. */
+  if(q && q.next && !p.channel){
+    const nx = el('div','playnext');
+    nx.append(el('span','k', 'NEXT'));
+    nx.append(document.createTextNode(q.next.title + (q.next.kind === 'episode' && q.next.sub
+      ? ' · ' + q.next.sub.split(' · ')[0] : '')
+      + (q.count > 1 ? '  (+' + (q.count - 1) + ' more)' : '')));
+    box.append(nx);
+  }
+  bar.append(box);
+  const remote = el('button','iconbtn remotebtn','REMOTE');
+  remote.title = 'Channel, volume and preset buttons in a window of their own';
+  remote.onclick = openRemote;
+  bar.append(remote);
+}
+
+/* ---------- are you still watching? ---------- */
+/* Deliberately not dismissable: waiting for an answer is the whole job.
+   No close cross, and Escape does nothing. The two buttons are the ways
+   out of it — and so is ignoring it, which the server answers by closing
+   the player once the grace runs out. */
+let askOn = false;
+let askLeft = 0;
+let askTimer = null;
+
+function askWhy(a){
+  const t = a.idle >= 120 ? (Math.round(a.idle / 60) + ' hours')
+          : a.idle >= 60  ? 'over an hour'
+          : (a.idle + ' minutes');
+  return 'Nothing has been touched for ' + t
+       + (a.band ? ', and it is ' + a.band : '') + '.';
+}
+
+function drawAskClock(){
+  const t = $('#stillthere .asktimer');
+  if(!t) return;
+  t.textContent = askLeft > 0
+    ? 'STOPPING ON ITS OWN IN ' + Math.floor(askLeft / 60) + ':' + pad(askLeft % 60)
+    : 'STOPPING\u2026';
+}
+
+function closeAsk(){
+  const box = $('#stillthere');
+  box.classList.add('hidden');
+  box.innerHTML = '';
+  askOn = false;
+  clearInterval(askTimer);
+  askTimer = null;
+}
+
+function renderAsk(a){
+  if(!a){ if(askOn) closeAsk(); return; }
+  askLeft = a.left;
+  /* Already up: the countdown is the only thing that moves. Redrawing the
+     card each poll would take the focus off the button under your finger. */
+  if(askOn){ drawAskClock(); return; }
+  askOn = true;
+  const box = $('#stillthere');
+  box.innerHTML = '';
+  const card = el('div','askcard');
+  card.append(el('h2', null, 'Are you still watching?'));
+  card.append(el('p', null, askWhy(a)));
+  const what = el('p');
+  if(a.title){
+    what.append(el('b', null, a.title));
+    what.append(document.createTextNode(' finished. '));
+  }
+  if(a.next){
+    what.append(document.createTextNode('Next up: '));
+    what.append(el('b', null, a.next));
+    what.append(document.createTextNode('.'));
+  }
+  if(what.childNodes.length) card.append(what);
+  const row = el('div','askrow');
+  const yes = el('button','play','STILL HERE');
+  yes.onclick = () => answerAsk(true);
+  const no = el('button','iconbtn','THAT\u2019S ENOUGH');
+  no.onclick = () => answerAsk(false);
+  row.append(yes);
+  row.append(no);
+  card.append(row);
+  card.append(el('div','asktimer',''));
+  box.append(card);
+  box.classList.remove('hidden');
+  try{ yes.focus(); }catch(e){}
+  drawAskClock();
+  askTimer = setInterval(() => {
+    askLeft = Math.max(0, askLeft - 1);
+    drawAskClock();
+  }, 1000);
+}
+
+async function answerAsk(still){
+  closeAsk();               /* answer first, ask questions later */
+  await post('/api/afk', {still: still});
+  pollPlaying();
+}
+
+let playTimer = null;
+async function pollPlaying(){
+  const r = await api('/api/playing');
+  renderPlaying(r.playing, r.queue);
+  renderAsk(r.ask);
+  /* The queue shrinks by itself when something hands over; the panel
+     down the side follows it here. */
+  if(r.queue && r.queue.count !== queueCount) loadQueue();
+  /* Tighter while something is on, so the progress bar moves and a channel
+     changing programme shows up promptly. Slack off when nothing's playing —
+     there's nothing to watch for. */
+  clearTimeout(playTimer);
+  /* A pending question stops anything playing, so without this case it
+     would be found on the nine-second poll — a slow thing to watch happen
+     when the next episode has visibly not started. */
+  playTimer = setTimeout(pollPlaying, r.ask ? 2000 : (r.playing ? 3000 : 9000));
+}
+pollPlaying();
+
+/* Only the native window is frameless, so only it needs our title bar. In a
+   browser this never fires and the bar stays hidden, because the browser has
+   its own controls already. */
+window.addEventListener('pywebviewready', () => {
+  $('#titlebar').querySelector('.wincontrols').classList.remove('hidden');
+  document.querySelectorAll('#titlebar [data-win]').forEach(b => {
+    b.onclick = () => {
+      const api = window.pywebview && window.pywebview.api;
+      if(!api) return;
+      if(b.dataset.win === 'min') api.minimise();
+      else if(b.dataset.win === 'max') api.maximise();
+      else api.shut();
+    };
+  });
+});
+
+/* ---------- the same film, twice ----------
+   A review screen. Nothing here acts on more than one film at a time, and
+   the button that touches the disk is never the default one. */
+let dupeState = null;
+let dupeKeep = {};              // tmdb_id -> the movie id to keep
+
+function dupeSize(bytes){
+  const gb = bytes / 1e9;
+  return gb >= 1 ? gb.toFixed(2) + ' GB' : Math.round(bytes/1e6) + ' MB';
+}
+
+async function dupesLoad(){
+  dupeState = await api('/api/duplicates');
+  dupeKeep = {};
+  (dupeState.groups||[]).forEach(g => { if(g.suggest) dupeKeep[g.tmdb_id] = g.suggest; });
+  dupesRender();
+}
+
+function dupesRender(){
+  const wrap = $('#dupeslist');
+  wrap.innerHTML = '';
+  const groups = (dupeState && dupeState.groups) || [];
+  $('#dupesnote').textContent = groups.length
+    ? 'One film, more than one file. Choose which copy to keep. "Remove from '
+      + 'library" leaves the file alone and stops it coming back on the next '
+      + 'scan; "Move to Bin" puts the file in the recycle bin, where you can '
+      + 'still get it back.'
+    : 'Nothing is in here twice.';
+  if(!groups.length){
+    wrap.append(el('p','empty','No duplicates.'));
+    return;
+  }
+  groups.forEach(g => {
+    const box = el('div','dupegroup');
+    const top = el('div','dupetop');
+    if(g.poster){ const i=el('img','dupeposter'); i.src=g.poster; i.alt=''; top.append(i); }
+    const head = el('div');
+    head.append(el('h3','dupetitle', esc([g.title, g.year].filter(Boolean).join(' · '))));
+    head.append(el('div','dupereason' + (g.too_close ? ' close' : ''), esc(g.reason)));
+    top.append(head);
+    box.append(top);
+
+    g.files.forEach(f => {
+      const row = el('label','dupefile'
+        + (dupeKeep[g.tmdb_id] === f.id ? ' keep'
+           : (dupeKeep[g.tmdb_id] ? ' going' : '')));
+      const radio = el('input'); radio.type='radio';
+      radio.name = 'dupe-' + g.tmdb_id;
+      radio.checked = dupeKeep[g.tmdb_id] === f.id;
+      radio.onchange = () => { dupeKeep[g.tmdb_id] = f.id; dupesRender(); };
+      row.append(radio);
+      const info = el('div','dupefileinfo');
+      info.append(el('div','dupefilename', esc(f.name)));
+      const bits = [dupeSize(f.size)];
+      if(f.height) bits.push(f.height + 'p');
+      if(f.hdr) bits.push('HDR');
+      if(f.codec) bits.push(f.codec);
+      if(!f.exists) bits.push('FILE MISSING');
+      if(f.exists && !f.writable) bits.push('READ-ONLY DRIVE');
+      info.append(el('div','dupefilemeta', bits.join('  ·  ')));
+      row.append(info);
+      /* Each row states its OWN fate. The radio alone was not enough: it
+         marks the copy to keep while the buttons act on the others, so
+         clicking the file you want rid of does the exact opposite of what
+         you meant. Saying "GOES" on that row makes the mistake visible
+         before the button is pressed rather than after. */
+      const chosenNow = dupeKeep[g.tmdb_id];
+      if(chosenNow === f.id) row.append(el('div','dupefilekept','KEEP THIS'));
+      else if(chosenNow) row.append(el('div','dupefilegoes','GOES'));
+      box.append(row);
+    });
+
+    const acts = el('div','dupeactions');
+    const chosen = dupeKeep[g.tmdb_id];
+    const drop = g.files.filter(f => f.id !== chosen).map(f => f.id);
+    const goingNames = g.files.filter(f => drop.indexOf(f.id) >= 0);
+    const forget = el('button','pickerbtn',
+      chosen ? 'REMOVE ' + goingNames.length + ' FROM LIBRARY'
+             : 'REMOVE FROM LIBRARY');
+    forget.disabled = !chosen;
+    forget.onclick = () => dupesResolve(g, chosen, drop, 'forget');
+    acts.append(forget);
+
+    const bin = el('button','pickerbtn danger', 'MOVE TO BIN');
+    bin.disabled = !chosen || !g.any_writable;
+    bin.onclick = () => dupesResolve(g, chosen, drop, 'trash');
+    acts.append(bin);
+
+    if(!chosen)
+      acts.append(el('div','dupewhy','Pick the one to keep first.'));
+    else if(!g.any_writable)
+      acts.append(el('div','dupewhy',
+        'The drive these are on is mounted read-only, so nothing can be '
+        + 'deleted from it here. Removing from the library still works.'));
+    box.append(acts);
+    wrap.append(box);
+  });
+}
+
+async function dupesResolve(g, keep, drop, action){
+  const kept = g.files.find(f => f.id === keep);
+  const going = g.files.filter(f => drop.indexOf(f.id) >= 0);
+  const what = action === 'trash'
+    ? 'Move to the bin:\n\n' + going.map(f => '  ' + f.name).join('\n')
+      + '\n\nKeeping:\n  ' + (kept ? kept.name : '')
+      + '\n\nThe file goes to the recycle bin, not straight out.'
+    : 'Remove from the library (the file stays on disk):\n\n'
+      + going.map(f => '  ' + f.name).join('\n');
+  if(!confirm(what)) return;
+  const r = await post('/api/duplicates/resolve',
+    {keep: keep, drop: drop, action: action});
+  if(r.error){ $('#dupesnote').textContent = r.error; return; }
+  (r.failed||[]).forEach(f => console.warn('kept back:', f.name, f.why));
+  if(r.failed && r.failed.length)
+    alert('Not everything could go:\n\n'
+      + r.failed.map(f => '  ' + f.name + ' — ' + f.why).join('\n'));
+  await dupesLoad();
+  await dupesButton();
+  loadLibrary(true);
+  loadStatus();
+}
+
+async function dupesButton(){
+  try{
+    const d = await api('/api/duplicates');
+    dupeState = d;
+    const btn = $('#libdupes');
+    btn.classList.toggle('hidden', !d.total);
+    btn.textContent = d.total === 1 ? '1 DUPE' : d.total + ' DUPES';
+  }catch(e){ /* never let this take the toolbar down */ }
+}
+
+$('#libdupes').onclick = async () => { await dupesLoad(); $('#dupes').classList.remove('hidden'); };
+$('#dupesclose').onclick = () => $('#dupes').classList.add('hidden');
+
+/* ---------- who's watching ----------
+   A front door, not a lock. It names the viewer and the machine; it does not
+   pretend to separate anybody's data, because nothing behind it does yet —
+   ratings still live on the item rows. state.separates_data says so, and the
+   wording below follows that flag rather than repeating a claim in prose
+   that would quietly become untrue the day the schema changes. */
+let pickerState = null;
+let pickerEditing = null;       // null = not editing, 0 = new, id = that one
+let pickerAccent = null;
+
+function pickerInitials(name){
+  const parts = (name||'').trim().split(/\s+/).filter(Boolean);
+  if(!parts.length) return '?';
+  if(parts.length === 1) return parts[0].slice(0,1).toUpperCase();
+  return (parts[0][0] + parts[parts.length-1][0]).toUpperCase();
+}
+
+function pickerRender(){
+  const st = pickerState;
+  if(!st) return;
+  $('#pickerdevicename').textContent = st.device;
+  $('#pickerskip').checked = !!st.skip;
+  $('#pickernote').textContent = st.separates_data
+    ? 'Each profile keeps its own ratings and history.'
+    : 'Ratings and history are shared across profiles for now — this names '
+      + 'who is watching and which machine this is.';
+
+  const list = $('#pickerlist');
+  list.innerHTML = '';
+  st.profiles.forEach(pr => {
+    const face = el('button', 'pickerface' + (pr.id === st.active ? ' active' : ''));
+    const av = el('div','pickeravatar', pickerInitials(pr.name));
+    av.style.background = pr.accent || '#c2593c';
+    face.append(av);
+    face.append(el('div','pickername', pr.name));
+    const ed = el('div','pickeredit','EDIT');
+    ed.onclick = (e) => { e.stopPropagation(); pickerOpenForm(pr); };
+    face.append(ed);
+    face.onclick = () => pickerEnter(pr.id);
+    list.append(face);
+  });
+  const add = el('button','pickerface add');
+  add.append(el('div','pickeravatar','+'));
+  add.append(el('div','pickername','Add someone'));
+  add.onclick = () => pickerOpenForm(null);
+  list.append(add);
+}
+
+function pickerOpenForm(pr){
+  pickerEditing = pr ? pr.id : 0;
+  pickerAccent = pr ? pr.accent : (pickerState.accents[0]);
+  $('#pickername').value = pr ? pr.name : '';
+  $('#pickerdelete').classList.toggle('hidden',
+    !pr || pickerState.profiles.length < 2);
+  const row = $('#pickeraccents');
+  row.innerHTML = '';
+  pickerState.accents.forEach(col => {
+    const sw = el('button','pickerswatch' + (col === pickerAccent ? ' on' : ''));
+    sw.style.background = col;
+    sw.onclick = () => { pickerAccent = col;
+      [...row.children].forEach(c => c.classList.remove('on'));
+      sw.classList.add('on'); };
+    row.append(sw);
+  });
+  $('#pickerform').classList.remove('hidden');
+  $('#pickername').focus();
+}
+
+function pickerCloseForm(){
+  pickerEditing = null;
+  $('#pickerform').classList.add('hidden');
+}
+
+$('#pickercancel').onclick = () => pickerCloseForm();
+
+$('#pickersave').onclick = async () => {
+  const name = $('#pickername').value.trim();
+  if(!name){ $('#pickername').focus(); return; }
+  const r = await post('/api/profiles/save',
+    {id: pickerEditing || null, name: name, accent: pickerAccent});
+  if(r.error){ $('#pickernote').textContent = r.error; return; }
+  pickerState = r.state;
+  pickerCloseForm();
+  pickerRender();
+};
+
+$('#pickerdelete').onclick = async () => {
+  if(!pickerEditing) return;
+  const r = await post('/api/profiles/delete', {id: pickerEditing});
+  if(r.error){ $('#pickernote').textContent = r.error; return; }
+  pickerState = r.state;
+  pickerCloseForm();
+  pickerRender();
+};
+
+$('#pickerdevicename').onclick = async () => {
+  const name = prompt('What should this machine be called?\n\n'
+    + 'This is the name the other device shows on greyed-out posters.',
+    pickerState ? pickerState.device : '');
+  if(name === null) return;
+  const r = await post('/api/profiles/device', {name: name});
+  if(r.error) return;
+  pickerState = r.state;
+  pickerRender();
+};
+
+async function pickerEnter(id){
+  const r = await post('/api/profiles/select',
+    {id: id, skip: $('#pickerskip').checked});
+  if(r.error){ $('#pickernote').textContent = r.error; return; }
+  pickerState = r.state;
+  $('#picker').classList.add('hidden');
+  loadStatus();
+  switchTo('library');
+  afterEnter();
+}
+
+async function pickerBoot(){
+  try{ pickerState = await api('/api/profiles'); }
+  catch(e){ pickerState = null; }
+
+  /* Nothing to ask if the app has never met anybody: seed one from the
+     machine's own name so the first run is a confirmation, not a form. */
+  if(pickerState && !pickerState.profiles.length){
+    const seed = await post('/api/profiles/save',
+      {id: null, name: pickerState.suggested_name,
+       accent: pickerState.accents[0]});
+    if(seed && seed.state) pickerState = seed.state;
+  }
+
+  const active = pickerState && pickerState.active;
+  if(pickerState && pickerState.skip && active){
+    /* Straight in, as asked — but keep last_used honest. */
+    post('/api/profiles/select', {id: active});
+    loadStatus();
+    switchTo('library');
+    afterEnter();
+    return;
+  }
+  if(!pickerState){ loadStatus(); switchTo('library'); afterEnter(); return; }
+  pickerRender();
+  $('#picker').classList.remove('hidden');
+}
+
+/* The count has to come from somewhere after the library exists; piggybacking
+   on whichever path actually got us into the app. */
+function afterEnter(){ dupesButton(); syncOffer(); }
+
+/* ---------- sharing between devices ---------- */
+function syncAgo(sec){
+  if(sec == null) return 'not yet';
+  if(sec < 90) return 'just now';
+  if(sec < 3600) return Math.round(sec/60) + ' min ago';
+  if(sec < 86400*2) return Math.round(sec/3600) + ' hours ago';
+  return Math.round(sec/86400) + ' days ago';
+}
+
+async function syncEnable(folder, btn){
+  if(btn){ btn.disabled = true; btn.textContent = 'SETTING UP…'; }
+  const r = await post('/api/sync/enable', {folder: folder});
+  if(r.error){
+    if(btn){ btn.disabled = false; btn.textContent = 'TRY AGAIN'; }
+    $('#sync_body').insertAdjacentHTML('beforeend',
+      '<div class="notice bad"><p>'+esc(r.error)+'</p></div>');
+    return null;
+  }
+  syncRender(r);
+  return r;
+}
+
+async function syncLoad(){
+  let s;
+  try{ s = await api('/api/sync/status'); }catch(e){ return; }
+  if(s && !s.error) syncRender(s);
+}
+
+function syncRender(s){
+  const body = $('#sync_body'); body.innerHTML = '';
+  if(!s.enabled){
+    if(s.detected.length){
+      s.detected.forEach(d => {
+        const row = el('div','rowbtns');
+        const b = el('button','play','SHARE THROUGH ' + esc(d.service.toUpperCase()));
+        b.onclick = () => syncEnable(d.path, b);
+        row.append(b);
+        row.append(el('span','libline', esc(d.path)));
+        body.append(row);
+      });
+    } else {
+      body.append(el('p','empty','No OneDrive, Dropbox or iCloud Drive folder found on this computer. Install one and sign in on every computer you use, or give any folder they all sync below.'));
+    }
+    const other = el('div','fields');
+    other.style.marginTop = '12px';
+    other.innerHTML = '<div><label>Or another synced folder</label><input id="sync_custom" placeholder="a folder every computer syncs"></div>';
+    body.append(other);
+    const go = el('button','iconbtn','USE THIS FOLDER');
+    go.style.marginTop = '8px';
+    go.onclick = () => syncEnable($('#sync_custom').value, go);
+    body.append(go);
+    return;
+  }
+
+  const where = (s.service ? s.service + ' — ' : '') + s.folder;
+  const head = el('p','libline', 'Sharing through ' + esc(where) +
+    (s.last_run ? '  ·  last checked ' + esc(s.last_run) : ''));
+  body.append(head);
+  if(s.error){
+    body.append(el('div','notice bad','<p>'+esc(s.error)+'</p>'));
+  } else if(s.client_running === false){
+    body.append(el('div','notice bad','<p>'+esc(s.service)+' isn\'t running on this computer, so nothing is leaving it or arriving. Start '+esc(s.service)+' and sharing carries on by itself — nothing waiting is lost.</p>'));
+  }
+
+  const list = el('div');
+  if(!s.devices.length){
+    list.append(el('p','empty','Nothing from another computer yet. Turn sharing on there, with the same '+esc(s.service || 'folder')+', and it turns up here within a minute or two of that computer\'s next check.'));
+  }
+  s.devices.forEach(d => {
+    const row = el('div','toprow');
+    row.append(el('div','pos',''));
+    const t = el('div','t');
+    t.append(document.createTextNode(d.name || 'another computer'));
+    t.append(el('small',null, esc(d.events + (d.events === 1 ? ' thing' : ' things') + ' shared with this one')));
+    row.append(t);
+    row.append(el('div','libline', 'last heard ' + esc(syncAgo(d.ago))));
+    list.append(row);
+  });
+  body.append(list);
+
+  const bits = ['This computer (' + esc(s.device) + ') has shared ' + s.shared + ' events'];
+  if(s.received) bits.push(s.received + ' arrived from elsewhere');
+  body.append(el('p','empty', bits.join('  ·  ') + '.'));
+  if(s.waiting){
+    body.append(el('p','empty', (s.waiting === 1
+      ? '1 thing from another computer isn\'t'
+      : s.waiting + ' things from other computers aren\'t') +
+      ' in this library — kept, and applied if a scan brings it in.'));
+  }
+
+  const btns = el('div','rowbtns');
+  const now = el('button','iconbtn','SYNC NOW');
+  now.onclick = async () => { now.disabled = true; const r = await post('/api/sync/now'); if(!r.error) syncRender(r); else now.disabled = false; };
+  const stop = el('button','iconbtn','STOP SHARING');
+  stop.title = 'This computer stops sharing. The files already in the cloud folder are left alone.';
+  stop.onclick = async () => { const r = await post('/api/sync/disable'); if(!r.error) syncRender(r); };
+  btns.append(now, stop);
+  body.append(btns);
+}
+
+async function syncOffer(){
+  let s;
+  try{ s = await api('/api/sync/status'); }catch(e){ return; }
+  if(!s || s.error || !s.offer || !s.detected.length) return;
+  const d = s.detected[0];
+  const box = $('#syncoffer');
+  box.querySelector('.syncoffer-text').innerHTML =
+    '<b>Share with your other computers?</b> History, ratings, watchlist, favourites and where you stopped, kept in step through ' +
+    esc(d.service) + '. You can change this in Settings.';
+  $('#syncoffer_yes').textContent = 'SHARE THROUGH ' + d.service.toUpperCase();
+  box.classList.remove('hidden');
+  $('#syncoffer_yes').onclick = async () => {
+    $('#syncoffer_yes').disabled = true;
+    const r = await post('/api/sync/enable', {folder: d.path});
+    if(r.error){
+      box.querySelector('.syncoffer-text').textContent = r.error;
+      $('#syncoffer_yes').disabled = false;
+      return;
+    }
+    box.querySelector('.syncoffer-text').innerHTML = '<b>Sharing is on.</b> Turn it on on your other computer too.';
+    $('#syncoffer_yes').classList.add('hidden');
+    $('#syncoffer_no').textContent = 'OK';
+    $('#syncoffer_no').onclick = () => box.classList.add('hidden');
+  };
+  $('#syncoffer_no').onclick = async () => {
+    box.classList.add('hidden');
+    await post('/api/sync/dismiss');
+  };
+}
+
+pickerBoot();
+</script>
+</body>
+</html>
+"""
+
+
+# ---------------------------------------------------------------------------
+# The remote's own page
+# ---------------------------------------------------------------------------
+# Kept apart from PAGE rather than folded into it as another tab. It opens in
+# a window of its own, sat on top of mpv, at a size where a tab strip and a
+# masthead would be most of the window — and none of the app's layout is any
+# use at 320 pixels wide.
+
+REMOTE_PAGE = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Next Up Remote</title>
+<link rel="icon" href="/favicon.ico">
+<link rel="stylesheet" href="/fonts/fonts.css">
+<style>
+:root{
+  /* Black, not the app's off-black: this window sits on top of a film, and
+     the darker it is the less of one it takes away. The button faces are
+     lifted just far enough off it to read as keys. */
+  --ink:#000000; --ink-2:#131017; --ink-3:#1f1a28; --paper:#ece6dc;
+  --muted:#8d859b; --marigold:#e0a33e; --teal:#4fa8a0; --rust:#c2593c;
+  --line:#2a2533;
+  --display:"Bricolage Grotesque","Segoe UI",sans-serif;
+  --mono:"Space Mono",ui-monospace,Consolas,monospace;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;overflow:hidden}
+body{
+  background:var(--ink);color:var(--paper);font-family:var(--mono);font-size:12px;
+  display:flex;flex-direction:column;gap:9px;padding:0 12px 12px;user-select:none;
+  -webkit-font-smoothing:antialiased;
+}
+button{font:inherit}
+
+/* ---- our own title strip ---- */
+/* The window is frameless, so this is the only way it can be moved or shut.
+   The drag class is pywebview's own; in a browser popup it does nothing and
+   the strip is just a label. */
+#bar{display:flex;align-items:stretch;height:28px;flex:none;margin:0 -12px 2px}
+#bar .drag{flex:1;display:flex;align-items:center;padding-left:12px}
+#bar .drag span{font-size:9px;letter-spacing:.2em;color:var(--muted);pointer-events:none}
+#bar .wc{display:flex}
+#bar .wc.hidden{display:none}
+#bar .wc button{width:34px;border:0;border-radius:0;background:none;color:var(--muted);
+  font-size:11px;line-height:1}
+#bar .wc button:hover{background:var(--ink-2);color:var(--paper)}
+#bar .wc button[data-win="close"]:hover{background:var(--rust);color:#140a07}
+button{font:inherit;color:inherit;cursor:pointer;background:var(--ink-2);
+  border:1px solid var(--line);border-radius:6px;transition:border-color .1s ease,background .1s ease}
+button:hover:not(:disabled){border-color:var(--muted);background:var(--ink-3)}
+button:active:not(:disabled){background:var(--ink-3);transform:translateY(1px)}
+button:disabled{opacity:.32;cursor:default}
+button:focus-visible{outline:2px solid var(--marigold);outline-offset:2px}
+
+/* ---- the little display ---- */
+/* Deliberately the one lit thing in the room: on a remote it's the part you
+   look at, and everything else is felt for. */
+.screen{
+  background:linear-gradient(168deg,#0c1d18,#040b09);border:1px solid #1b3830;
+  border-radius:5px;padding:10px 11px;display:flex;gap:9px;align-items:flex-start;
+  min-height:74px;flex:none;
+}
+.screen img{width:32px;aspect-ratio:2/3;object-fit:cover;border-radius:2px;flex:none;background:#040b09}
+.screen .txt{flex:1;min-width:0}
+.chline{display:flex;align-items:baseline;gap:6px;margin-bottom:3px}
+.chnum{font-weight:700;font-size:10px;letter-spacing:.14em;color:var(--teal);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dot{width:5px;height:5px;border-radius:50%;background:var(--teal);flex:none;
+  box-shadow:0 0 5px var(--teal)}
+.dot.off{background:#2b4a44;box-shadow:none}
+.screen b{font-family:var(--display);font-weight:700;font-size:14px;color:#d9f2ea;
+  display:block;line-height:1.2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.screen .sub{font-size:10px;color:#6f9b91;margin-top:2px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.screen .bar{height:2px;background:#1e3b34;border-radius:1px;overflow:hidden;margin-top:7px}
+.screen .bar i{display:block;height:100%;background:var(--teal);transition:width 1s linear}
+.screen.dead{background:linear-gradient(168deg,#0e0c13,#050408);border-color:var(--line)}
+.screen.dead .chnum{color:var(--muted)}
+.screen.dead b{color:var(--muted);font-size:12.5px;white-space:normal}
+
+/* ---- rows of keys ---- */
+.keys{display:grid;gap:7px;flex:none}
+.keys.two{grid-template-columns:1fr 1fr}
+.keys.three{grid-template-columns:repeat(3,1fr)}
+.key{padding:9px 4px;text-align:center;letter-spacing:.06em;font-size:10.5px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.key.tall{padding:13px 6px;font-size:12px;font-weight:700}
+.key .glyph{font-size:15px;line-height:1;display:block;margin-bottom:3px}
+.key.on{border-color:var(--marigold);color:var(--marigold)}
+
+.label{font-size:9px;letter-spacing:.16em;color:var(--muted);text-transform:uppercase;
+  display:flex;justify-content:space-between;align-items:center;flex:none}
+.label b{color:var(--paper);font-weight:700}
+/* The only label value with letters in it, and the row's blanket uppercase
+   turned it into "0MS" — directly above three buttons that say 100ms. Same
+   unit, same page, so the same spelling. */
+#delaylbl{text-transform:none}
+
+/* ---- presets ---- */
+/* A floor, not just flex:1 — the keys above it are fixed height, so without
+   one every row added to the remote comes straight out of the presets until
+   they're a sliver you can't read or press.
+   The floor has to be the height six of them ACTUALLY need, though. It was
+   112px against rows that came to 146, so the grid quietly started scrolling
+   and every name lost its bottom few pixels — which is most of what "the
+   presets look wrong" was. Six presets is three rows, so the floor is three
+   rows, written as the arithmetic rather than as a number nobody can check. */
+.presets{display:grid;grid-template-columns:1fr 1fr;gap:7px;flex:1;
+  min-height:calc(3*32px + 2*7px);overflow:auto;align-content:start}
+/* One line, not two. Stacking the label above the name cost 12px a row and
+   44px overall, which is what pushed six of them past the space there is. */
+.preset{display:grid;grid-template-columns:30px 1fr;align-items:center;gap:8px;
+  padding:7px 9px;text-align:left;font-size:10.5px;line-height:1.3;
+  overflow:hidden;min-height:32px}
+/* Fixed width, so every name in a column starts at the same place. Ragged
+   left edges are what made two aligned columns read as skewed. */
+.preset .n{font-size:8.5px;letter-spacing:.12em;color:var(--muted);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.preset .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.preset.live .n{color:var(--rust)}
+.preset.current{border-color:var(--marigold);background:var(--ink-3)}
+.preset.current .n{color:var(--marigold)}
+/* An odd number of them left a hole where the last row's second column
+   should be. The odd one out takes the whole row instead — a full-width
+   button reads as deliberate where a half-empty row reads as a mistake. */
+.preset:last-child:nth-child(odd){grid-column:1/-1}
+.preset.empty{grid-column:1/-1;display:flex;border-style:dashed;color:var(--muted);
+  justify-content:center;align-items:center}
+.preset.picked{border-color:var(--teal)}
+.preset.picked .n{color:var(--teal)}
+
+.foot{display:flex;gap:7px;flex:none}
+.foot button{flex:1;padding:7px;font-size:9.5px;letter-spacing:.1em;color:var(--muted)}
+.foot button:hover:not(:disabled){color:var(--paper)}
+.note{font-size:9.5px;color:var(--muted);line-height:1.4;flex:none;min-height:13px}
+.note.bad{color:var(--rust)}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+
+<div id="bar">
+  <div class="drag pywebview-drag-region"><span>NEXT UP REMOTE</span></div>
+  <div class="wc hidden">
+    <button data-win="min" title="Minimise">&#8211;</button>
+    <button data-win="close" title="Close">&#10005;</button>
+  </div>
+</div>
+
+<div class="screen dead" id="screen">
+  <div class="txt">
+    <div class="chline"><span class="dot off"></span><span class="chnum" id="chname">STANDBY</span></div>
+    <b id="title">Nothing playing</b>
+    <div class="sub" id="sub"></div>
+  </div>
+</div>
+
+<div class="keys two">
+  <button class="key tall" id="chdown" disabled><span class="glyph">▼</span>CH</button>
+  <button class="key tall" id="chup" disabled><span class="glyph">▲</span>CH</button>
+</div>
+
+<div class="label"><span>Volume</span><b id="vollbl">—</b></div>
+<div class="keys three">
+  <button class="key" id="voldown" disabled>−</button>
+  <button class="key" id="mute" disabled>MUTE</button>
+  <button class="key" id="volup" disabled>+</button>
+</div>
+
+<div class="keys three">
+  <button class="key" id="pause" disabled>PAUSE</button>
+  <button class="key" id="skip" disabled>SKIP</button>
+  <button class="key" id="stop" disabled>STOP</button>
+</div>
+
+<div class="keys two">
+  <button class="key" id="subs" disabled title="Cycle the subtitle tracks, and off again">SUBS</button>
+  <button class="key" id="audio" disabled title="Cycle the audio tracks">AUDIO</button>
+</div>
+
+<div class="label"><span>Audio delay</span><b id="delaylbl">—</b></div>
+<div class="keys three">
+  <button class="key" id="delayback" disabled title="Sound earlier, in 100ms steps">&#9664; 100ms</button>
+  <button class="key" id="delayzero" disabled title="Back to no offset">RESET</button>
+  <button class="key" id="delayfwd" disabled title="Sound later, in 100ms steps">100ms &#9654;</button>
+</div>
+
+<div class="keys two">
+  <button class="key" id="prevep" disabled title="The episode before this one">&#9664;&#9664; EP</button>
+  <button class="key" id="nextep" disabled title="The next episode of this show">EP &#9654;&#9654;</button>
+</div>
+
+<div class="keys">
+  <button class="key" id="getsubs" disabled title="Find a subtitle for what's on and load it straight in">FETCH SUBS</button>
+</div>
+
+<div class="label"><span id="presetlbl">Presets</span></div>
+<div class="presets" id="presets"></div>
+
+<div class="note" id="note">Connecting…</div>
+<div class="foot">
+  <button id="edit">EDIT PRESETS</button>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const el = (t,c,x) => { const n=document.createElement(t); if(c)n.className=c;
+                        if(x!==undefined)n.textContent=x; return n; };
+async function api(p,o){ const r = await fetch(p,o); return r.json(); }
+async function post(p,b){ return api(p,{method:'POST',
+  headers:{'Content-Type':'application/json'}, body:JSON.stringify(b||{})}); }
+const clock = s => { s=Math.max(0,Math.round(s||0));
+  const h=Math.floor(s/3600), m=Math.floor(s%3600/60);
+  return h ? h+'h '+String(m).padStart(2,'0')+'m' : m+'m'; };
+
+let STATE = {};
+let editing = false;
+let picked = [];
+let timer = null;
+let connected = false;      // has a reply ever arrived?
+
+function note(text, bad){
+  const n = $('#note');
+  n.textContent = text || '';
+  n.className = 'note' + (bad ? ' bad' : '');
+}
+
+/* One place that turns a state into the whole window, so nothing can be
+   left showing something the player stopped doing a moment ago. */
+function draw(){
+  const p = STATE.playing;
+  const live = p && p.sub === 'Live';
+  $('#screen').className = 'screen' + (p ? '' : ' dead');
+  $('#screen').querySelector('.dot').className = 'dot' + (p ? '' : ' off');
+  $('#chname').textContent = p ? (p.channel || 'DIRECT').toUpperCase() : 'STANDBY';
+  $('#title').textContent = p ? (p.title || '') : 'Nothing playing';
+
+  let art = $('#screen').querySelector('img');
+  if(p && p.art){
+    if(!art){ art = document.createElement('img'); art.alt='';
+              $('#screen').prepend(art); }
+    if(art.getAttribute('src') !== p.art) art.src = p.art;
+  } else if(art) art.remove();
+
+  const bits = [];
+  if(p && p.sub) bits.push(p.sub);
+  if(p && p.position != null && p.duration)
+    bits.push(clock(p.position) + ' / ' + clock(p.duration));
+  $('#sub').textContent = bits.join('  ·  ');
+
+  let bar = $('#screen').querySelector('.bar');
+  if(p && p.position != null && p.duration){
+    if(!bar){ bar = el('div','bar'); bar.append(el('i')); $('#screen').querySelector('.txt').append(bar); }
+    bar.querySelector('i').style.width =
+      Math.max(0, Math.min(100, 100*p.position/p.duration)) + '%';
+  } else if(bar) bar.remove();
+
+  const on = !!STATE.alive;
+  ['voldown','volup','mute','pause','stop','subs','audio']
+    .forEach(id => $('#'+id).disabled = !on);
+  /* The keys start dead in the markup and only this brings them to life.
+     Before the first reply arrives the window doesn't know what it's
+     controlling — what's on, which tracks exist, whether mpv is even there —
+     and a key pressed in that gap is a command sent on a guess. Channel up
+     and down stay live once connected even with nothing playing: that's how
+     you turn it on. */
+  $('#chup').disabled = !connected;
+  $('#chdown').disabled = !connected;
+
+  /* Both say what they're doing rather than only that they exist: a track
+     button with no state showing is one you press to find out. And both go
+     dead when the file gives them nothing to do — a button that looks live
+     and changes nothing reads as broken, which is exactly what it isn't. */
+  const subs = $('#subs');
+  subs.disabled = !on || !STATE.sub_count;
+  subs.textContent = !STATE.sub_count ? 'NO SUBS'
+    : (STATE.sub_on ? 'SUBS ' + (STATE.sub_lang || 'ON') : 'SUBS OFF');
+  subs.className = 'key' + (STATE.sub_on ? ' on' : '');
+
+  /* Only worth offering for something with a file behind it. A live stream
+     has nothing to match a subtitle against. */
+  $('#getsubs').disabled = !on || !STATE.playing
+    || STATE.playing.sub === 'Live' || fetching;
+
+  /* Audio delay, shown signed and in milliseconds so the direction you
+     pushed it is legible at a glance. Zero reads as "0ms", not "IN SYNC":
+     zero offset means nothing has been shifted, which is not the same as
+     the sound and picture actually lining up. The number says the true
+     thing and says it in the same units as every other value here. */
+  const delay = STATE.audio_delay || 0;
+  ['delayback','delayfwd','delayzero'].forEach(id => $('#'+id).disabled = !on);
+  $('#delayzero').disabled = !on || !delay;
+  $('#delaylbl').textContent = !on ? '—'
+    : (delay > 0 ? '+' : '') + delay + 'ms';
+  $('#delaylbl').style.color = delay ? 'var(--marigold)' : '';
+
+  /* Stepping through a series only means anything for an episode. */
+  $('#prevep').disabled = !on || !STATE.is_episode;
+  $('#nextep').disabled = !on || !STATE.is_episode;
+
+  const audio = $('#audio');
+  /* One audio track is not a choice, so the button shows what you're
+     hearing and stops there. Turning sound off is what MUTE is for. */
+  audio.disabled = !on || STATE.audio_count < 2;
+  audio.textContent = 'AUDIO ' + (STATE.audio_lang
+    || (STATE.audio_count ? 'ON' : '—'))
+    + (STATE.audio_count > 1 ? '  ' + STATE.audio_count : '');
+  audio.className = 'key';
+
+  /* Skip only means something on a channel: a film picked by hand has
+     nothing queued behind it, and live has no end to skip to. */
+  $('#skip').disabled = !on || !(STATE.channel_id || STATE.queue_count);
+  $('#vollbl').textContent = on && STATE.volume != null
+    ? (STATE.muted ? 'MUTED' : STATE.volume + '%') : '—';
+  $('#mute').className = 'key' + (STATE.muted ? ' on' : '');
+  $('#pause').className = 'key' + (STATE.paused ? ' on' : '');
+  $('#pause').textContent = STATE.paused ? 'PLAY' : 'PAUSE';
+  drawPresets();
+}
+
+/* Channel names carry their number on the end — "Directors Cut #9". On a
+   button this narrow that number is the first thing an ellipsis eats, and
+   it's the half you'd tune by, so it comes out of the name and goes in the
+   fixed slot on the left where it can't be cut. */
+const chNumber = name => (String(name||'').match(/#(\d+)\s*$/) || [,''])[1];
+const chName   = name => String(name||'').replace(/\s*#\d+\s*$/, '');
+
+function drawPresets(){
+  const box = $('#presets');
+  box.innerHTML = '';
+  const byId = {};
+  (STATE.channels||[]).forEach(c => byId[c.id] = c);
+
+  if(editing){
+    $('#presetlbl').textContent = 'Pick up to ' + STATE.max_presets;
+    (STATE.channels||[]).forEach(c => {
+      const b = el('button','preset' + (picked.indexOf(c.id) >= 0 ? ' picked' : ''));
+      const rank = picked.indexOf(c.id);
+      /* Which slot it will land in, not which channel it is — this list is
+         every channel in order, so its number is where it already sits. */
+      b.append(el('span','n', rank >= 0 ? 'P' + (rank+1) : (c.live ? 'LIVE' : '—')));
+      b.append(el('span','nm', chName(c.name)));
+      /* The slot is spent on the pick order here, so the channel's own
+         number — and any name too long for the column — lives in the
+         tooltip rather than nowhere. */
+      b.title = c.name;
+      b.onclick = () => {
+        const at = picked.indexOf(c.id);
+        if(at >= 0) picked.splice(at, 1);
+        else if(picked.length < STATE.max_presets) picked.push(c.id);
+        else { note('That\'s all ' + STATE.max_presets + ' of them. Tap one to free it up.'); return; }
+        note('');
+        drawPresets();
+      };
+      box.append(b);
+    });
+    return;
+  }
+
+  $('#presetlbl').textContent = 'Presets';
+  const ids = STATE.presets || [];
+  if(!ids.length){
+    const b = el('button','preset empty','No presets — EDIT PRESETS to set them');
+    b.onclick = startEdit;
+    box.append(b);
+    return;
+  }
+  ids.forEach((id, i) => {
+    const c = byId[id];
+    if(!c) return;
+    const b = el('button','preset'
+      + (c.live ? ' live' : '')
+      + (STATE.channel_id === id ? ' current' : ''));
+    /* The channel's own number rather than the preset's. Which slot a button
+       sits in is already said by where it is on the grid; what you can't see
+       from that is what pressing it tunes to. */
+    b.append(el('span','n', c.live ? 'LIVE' : '#' + (chNumber(c.name) || (i+1))));
+    b.append(el('span','nm', chName(c.name)));
+    b.title = c.name;
+    b.onclick = () => act(() => post('/api/remote/channel', {channel: id}), 'Tuning…');
+    box.append(b);
+  });
+}
+
+/* Every button goes through here: the reply IS the new state, so the window
+   never shows what it hoped would happen. */
+let inflight = false;
+async function act(fn, busy){
+  /* One at a time. Changing channel takes a moment, and a second press
+     landing inside the first is turned away by the server anyway — better
+     not to ask than to explain. */
+  if(inflight) return;
+  inflight = true;
+  if(busy) note(busy);
+  try {
+    const r = await fn();
+    if(r && r.error){ note(r.error, true); return; }
+    if(busy) note('');
+    STATE = r;
+    draw();
+    schedule();
+  } finally {
+    inflight = false;
+  }
+}
+
+async function refresh(){
+  const r = await api('/api/remote/state');
+  if(r && !r.error){
+    if(!connected){ connected = true; note(''); }
+    STATE = r;
+    draw();
+  }
+  schedule();
+}
+
+/* Quick while something's on so the display tracks it, slow when it isn't —
+   this window sits open for hours and each poll wakes the control channel. */
+function schedule(){
+  clearTimeout(timer);
+  timer = setTimeout(refresh, STATE.alive ? 1000 : 4000);
+}
+
+function startEdit(){
+  editing = true;
+  picked = (STATE.presets || []).slice();
+  $('#edit').textContent = 'SAVE PRESETS';
+  note('Tap channels in the order you want them.');
+  drawPresets();
+}
+
+$('#edit').onclick = async () => {
+  if(!editing){ startEdit(); return; }
+  editing = false;
+  $('#edit').textContent = 'EDIT PRESETS';
+  note('');
+  await act(() => post('/api/remote/presets', {ids: picked}));
+};
+
+$('#chup').onclick   = () => act(() => post('/api/remote/channel', {step: 1}),  'Tuning…');
+$('#chdown').onclick = () => act(() => post('/api/remote/channel', {step: -1}), 'Tuning…');
+$('#volup').onclick   = () => act(() => post('/api/remote/volume', {delta: 5}));
+$('#voldown').onclick = () => act(() => post('/api/remote/volume', {delta: -5}));
+$('#mute').onclick  = () => act(() => post('/api/remote/toggle', {what: 'mute'}));
+$('#pause').onclick = () => act(() => post('/api/remote/toggle', {what: 'pause'}));
+$('#subs').onclick  = () => act(() => post('/api/remote/toggle', {what: 'sub'}));
+$('#audio').onclick = () => act(() => post('/api/remote/toggle', {what: 'audio'}));
+$('#delayback').onclick = () => act(() => post('/api/remote/delay', {delta: -100}));
+$('#delayfwd').onclick  = () => act(() => post('/api/remote/delay', {delta: 100}));
+$('#delayzero').onclick = () => act(() => post('/api/remote/delay', {value: 0}));
+$('#prevep').onclick = () => act(() => post('/api/remote/episode', {step: -1}), 'Going back…');
+$('#nextep').onclick = () => act(() => post('/api/remote/episode', {step: 1}), 'Next episode…');
+
+/* Its own flag rather than act()'s: a search and a download take seconds,
+   far longer than any other key here, and the window has to keep polling
+   and stay usable while it happens. */
+let fetching = false;
+$('#getsubs').onclick = async () => {
+  if(fetching) return;
+  fetching = true;
+  const btn = $('#getsubs');
+  btn.disabled = true;
+  btn.textContent = 'SEARCHING…';
+  note('Looking for a subtitle…');
+  try {
+    const r = await post('/api/remote/subtitles', {});
+    if(r.error){ note(r.error, true); btn.textContent = 'FETCH SUBS'; return; }
+    STATE = r;
+    const got = r.subtitles || {};
+    note(got.message || 'Loaded.');
+    btn.textContent = got.already ? 'SUBS LOADED' : 'GOT SUBS';
+    setTimeout(() => { $('#getsubs').textContent = 'FETCH SUBS'; }, 6000);
+  } catch(e) {
+    note('Subtitle fetch failed.', true);
+    btn.textContent = 'FETCH SUBS';
+  } finally {
+    fetching = false;
+    draw();
+    schedule();
+  }
+};
+$('#skip').onclick  = () => act(() => post('/api/remote/skip'), 'Skipping…');
+$('#stop').onclick  = () => act(() => post('/api/remote/stop'));
+
+/* Frameless, so minimise and close have to come from here. In a browser
+   popup pywebviewready never fires and the strip stays a plain label — the
+   popup has the browser's own controls. */
+addEventListener('pywebviewready', () => {
+  document.querySelector('#bar .wc').classList.remove('hidden');
+  document.querySelectorAll('#bar [data-win]').forEach(b => {
+    b.onclick = () => {
+      const bridge = window.pywebview && window.pywebview.api;
+      if(!bridge) return;
+      if(b.dataset.win === 'min') bridge.minimise(); else bridge.shut();
+    };
+  });
+});
+
+/* A remote you have to aim the mouse at is only half a remote. */
+addEventListener('keydown', e => {
+  if(editing) return;
+  /* Ctrl with the arrows nudges the audio delay, which is what mpv's own
+     Ctrl+- and Ctrl++ do — near enough to be worth matching. */
+  if(e.ctrlKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')){
+    e.preventDefault();
+    const b = $(e.key === 'ArrowLeft' ? '#delayback' : '#delayfwd');
+    if(!b.disabled) b.click();
+    return;
+  }
+  const hit = {ArrowUp:'#chup', ArrowDown:'#chdown', ArrowRight:'#volup',
+               ArrowLeft:'#voldown', ' ':'#pause', m:'#mute', M:'#mute',
+               s:'#subs', S:'#subs', a:'#audio', A:'#audio',
+               n:'#nextep', N:'#nextep', p:'#prevep', P:'#prevep'}[e.key];
+  if(!hit) return;
+  e.preventDefault();
+  const b = $(hit);
+  if(!b.disabled) b.click();
+});
+
+refresh();
+</script>
+</body>
+</html>
+"""
+
+
+if os.name == "nt":
+    EDGE_CHROME = [
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    ]
+else:
+    # Same idea on a Mac: Chromium-family browsers take --app= too, and the
+    # binary inside the bundle is what accepts it. Safari has no equivalent,
+    # so it isn't listed — the plain-browser fallback covers that case.
+    EDGE_CHROME = [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        os.path.expanduser(
+            "~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+    ]
+
+
+def open_app_window(url):
+    """Launch Edge or Chrome in app mode: no address bar, no tabs, its own
+    taskbar entry. Looks like a desktop app, needs nothing installed."""
+    import subprocess
+    for exe in EDGE_CHROME:
+        if os.path.exists(exe):
+            try:
+                subprocess.Popen([
+                    exe, "--app=" + url,
+                    "--window-size=1200,900",
+                    "--user-data-dir=" + os.path.join(HERE, "nextup_window"),
+                    "--no-first-run", "--no-default-browser-check",
+                ])
+                return os.path.basename(exe)
+            except Exception:
+                continue
+    return None
+
+
+def adopt_dismissed():
+    """Older versions kept hidden suggestions in a json file. Move them into
+    the database so everything you've told the app lives in one place."""
+    conn = db()
+    for key in load_json(DISMISS_PATH, []):
+        conn.execute("INSERT OR IGNORE INTO dismissed (key,at) VALUES (?,?)",
+                     (key, now_stamp()))
+    conn.commit()
+    DISMISSED.clear()
+    for row in conn.execute("SELECT key FROM dismissed"):
+        DISMISSED.add(row["key"])
+    conn.close()
+
+
+def port_in_use(port):
+    """Is anything already listening on this port?
+
+    Asked directly, by trying to connect, rather than by attempting the bind
+    and catching the failure. HTTPServer sets SO_REUSEADDR, and on Windows
+    that doesn't mean what it means everywhere else: instead of refusing,
+    the bind SUCCEEDS and quietly takes the port off the process that had
+    it. So a second copy of this app wouldn't error — it would hijack the
+    first one, and connections would land on whichever server won the race.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(1)
+        return probe.connect_ex(("127.0.0.1", port)) == 0
+
+
+def restore_resizing(title="Next Up"):
+    """Give a frameless window its resize edges back.
+
+    Dropping the native frame also drops WS_THICKFRAME, and with it the
+    ability to drag an edge — the window gets stuck at one size, which is a
+    poor trade for a tidier top bar. Putting that one style bit back leaves
+    the window looking exactly as frameless as before while Windows handles
+    resizing at the borders again. Windows only; nothing else needs it.
+    """
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        time.sleep(0.8)                      # let the window actually exist
+        hwnd = user32.FindWindowW(None, title)
+        if not hwnd:
+            return
+        GWL_STYLE, WS_THICKFRAME, WS_MAXIMIZEBOX = -16, 0x00040000, 0x00010000
+        style = user32.GetWindowLongW(hwnd, GWL_STYLE)
+        user32.SetWindowLongW(hwnd, GWL_STYLE,
+                              style | WS_THICKFRAME | WS_MAXIMIZEBOX)
+        # SWP_FRAMECHANGED, and no move or resize while we're at it.
+        user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0027)
+    except Exception:
+        pass        # a window that can't be resized still works
+
+
+def release_port(server):
+    """Stop listening, now.
+
+    Closing the window is not the end of the process: the player has to be
+    stopped, the books closed on what was playing, and the TMDB cache
+    written — and until this existed the port stayed bound through all of
+    it. Starting the app again in those seconds met "something else is
+    already using port 8770", which is a lie about what is happening.
+    Nothing after the window closes needs the server, so it goes first and
+    the rest happens with the port already free. Safe to call twice.
+    """
+    if getattr(server, "_nextup_released", False):
+        return
+    server._nextup_released = True
+    try:
+        server.shutdown()          # ends serve_forever
+    except Exception:
+        pass
+    try:
+        server.server_close()      # and releases the socket itself
+    except Exception:
+        pass
+
+
+# How long to wait for a port that is busy but not answering — almost
+# always the copy you just closed, finishing up.
+PORT_WAIT_SECONDS = 10
+
+
+def wait_for_port(port, seconds=PORT_WAIT_SECONDS):
+    """True once nothing holds the port; False if it is still held after
+    `seconds`."""
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if not port_in_use(port):
+            return True
+        time.sleep(0.25)
+    return not port_in_use(port)
+
+
+def already_running(url):
+    """Is whatever holds our port this same app, rather than something
+    unrelated that happens to have taken it?"""
+    try:
+        with urllib.request.urlopen(url + "/api/status", timeout=3) as resp:
+            return "version" in json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return False
+
+
+def startup_failure(message):
+    """Say why we're giving up, in a way that actually reaches somebody.
+
+    A packaged build runs with no console attached, so print() here reaches
+    nobody and the app simply never appears — indistinguishable from it
+    being broken. Windows has a message box available through ctypes with
+    nothing to install; elsewhere the console is the best there is.
+    """
+    print(message)
+    if os.name == "nt":
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(None, message, "Next Up", 0x10)
+        except Exception:
+            pass
+
+
+def main():
+    install_crash_log()
+    adopt_dismissed()
+    load_saved_recs()
+    print("Next Up  v%s" % APP_VERSION)
+    print("  Folders: %s" % (", ".join(CONFIG.get("media_folders") or []) or "none set yet"))
+    print("  TMDB   : %s" % ("key set" if CONFIG.get("tmdb_key") else "no key (limited suggestions)"))
+
+    url = "http://localhost:%s" % APP_PORT
+    if port_in_use(APP_PORT):
+        # Nearly always this app already open — someone double-clicked it a
+        # second time. Show them the copy that's already running, which is
+        # what they wanted anyway.
+        if already_running(url):
+            print("Already running — opening that window instead.")
+            webbrowser.open(url)
+            return
+        # Held, but not answering as this app. Nearly always the copy you
+        # just closed, still putting its things away — so wait for it
+        # rather than refusing.
+        print("Port %d is busy but not answering — waiting for it..." % APP_PORT)
+        if not wait_for_port(APP_PORT):
+            startup_failure(
+                "Next Up can't start: something else on this PC is still "
+                "using port %d.\n\nClose whatever that is and try again."
+                % APP_PORT)
+            return
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", APP_PORT), Handler)
+    except OSError as exc:
+        startup_failure("Next Up couldn't open port %d: %s" % (APP_PORT, exc))
+        return
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    adopt_orphan_mpv()
+    threading.Thread(target=playback_monitor, daemon=True).start()
+    threading.Thread(target=sync_loop, daemon=True, name="sync").start()
+    threading.Thread(target=refresh_watch_scores, daemon=True, name="watch scores").start()
+
+    mode = (WINDOW or "auto").lower()
+
+    # Best option: a real native window. Needs `pip install pywebview`.
+    if mode in ("auto", "window"):
+        try:
+            import webview
+            print("  Window : native (pywebview)")
+            print("  Stop   : close the window")
+            class WindowControls(object):
+                """What the title bar in the page needs from the window.
+
+                Deliberately not named minimize/maximize/close: pywebview
+                exposes these by name to javascript, and shadowing the words
+                the library itself uses invites confusion later.
+                """
+                def minimise(self):
+                    webview.windows[0].minimize()
+
+                def maximise(self):
+                    win = webview.windows[0]
+                    # Underscored for the same reason _window is below:
+                    # anything hung off a js_api object under a public name is
+                    # walked by pywebview when it builds the bridge. A bool is
+                    # harmless to walk, but the rule is easier to keep than to
+                    # remember the exception to.
+                    self._big = not getattr(self, "_big", False)
+                    win.maximize() if self._big else win.restore()
+
+                def shut(self):
+                    """Close the app, not merely its main window.
+
+                    The remote is a second pywebview window, and the GUI loop
+                    runs until every window is gone. Destroying only
+                    windows[0] with the remote still up left a process with
+                    no main window and no way to reach it — alive, invisible,
+                    and force-quit the only way out. Main window last, so the
+                    loop ends on the one the user actually closed.
+                    """
+                    main = webview.windows[0] if webview.windows else None
+                    for win in list(webview.windows):
+                        if win is main:
+                            continue
+                        try:
+                            win.destroy()
+                        except Exception:
+                            pass
+                    if main is not None:
+                        main.destroy()
+
+                def open_remote(self):
+                    """A second window for the remote, held above mpv.
+
+                    on_top is the whole point: mpv takes the foreground the
+                    moment it starts, and a remote you have to dig out from
+                    behind the thing it controls is no better than alt-tabbing
+                    back to the app.
+
+                    Creating a window from here is a documented path —
+                    create_window opens one immediately when it's called off
+                    the main thread and the GUI is already up, which is
+                    exactly the case for a call arriving from javascript. The
+                    backend drops a window from webview.windows as it closes,
+                    so anything still in that list is genuinely open.
+                    """
+                    for win in webview.windows:
+                        if win.title == REMOTE_TITLE:
+                            try:
+                                win.restore()   # already open — bring it back
+                                win.show()
+                                return True
+                            except Exception:
+                                break           # gone stale; make a new one
+
+                    class RemoteControls(object):
+                        """Its own, not the main window's: shut() here has to
+                        close the remote rather than the app behind it.
+
+                        The underscore on _window is not style, it is the
+                        whole bug fix — see the note under create_window
+                        below. pywebview skips attributes whose names begin
+                        with one, and this attribute MUST be skipped.
+                        """
+                        _window = None
+
+                        def minimise(self):
+                            if self._window:
+                                self._window.minimize()
+
+                        def shut(self):
+                            if self._window:
+                                self._window.destroy()
+
+                    controls = RemoteControls()
+                    # Frameless for the same reason the main window is: the
+                    # native bar is the one part of this nobody designed, and
+                    # on a window this small it's a fair slice of it. The page
+                    # draws its own strip instead.
+                    # js_api rather than expose(): the methods have to be
+                    # there when the page loads, and expose() lands whenever
+                    # it lands relative to that.
+                    #
+                    # Fixed size, and NOT given its resize edges back the way
+                    # the main window is. Doing that means reaching in from
+                    # another thread 0.8s after asking for the window and
+                    # rewriting its styles — a race against WebView2 still
+                    # setting the same window up, in the exact second someone
+                    # is reaching for the buttons on it. A remote is a fixed
+                    # object anyway; the edges weren't worth that.
+                    #
+                    # THE HANG LIVED HERE. Handing the window back to the
+                    # object that is also its js_api used to be written
+                    # `controls.window = ...`, and a public name is the one
+                    # thing it could not be.
+                    #
+                    # When the remote's page loads, pywebview builds the
+                    # javascript bridge by walking the js_api object with
+                    # dir() and getattr(), recursing into any attribute that
+                    # is a plain object — so it walked straight off this
+                    # attribute into the pywebview Window, and from there into
+                    # Window.gui, which is the WinForms backend module full of
+                    # .NET types. Reading those needs the GUI thread, and the
+                    # GUI thread is at that moment inside WebView2 setting
+                    # this very window up. Each waits for the other, the
+                    # window stops answering Windows' messages, and Windows
+                    # kills the process as an AppHang — no traceback, no
+                    # fault, nothing left to read. Exactly the disappearance
+                    # this file has been chasing.
+                    #
+                    # It only bit sometimes because it is a race: the walk
+                    # happens on page load, and if the page got there first
+                    # the attribute was still the class's None and the walk
+                    # stopped harmlessly.
+                    #
+                    # A leading underscore is the whole cure — pywebview skips
+                    # those names outright, so the Window is never entered.
+                    # Nothing that goes on a js_api object may reference a
+                    # pywebview window by a public name.
+                    controls._window = webview.create_window(
+                        REMOTE_TITLE, url + "/remote",
+                        width=330, height=730,
+                        on_top=True, resizable=False, text_select=False,
+                        frameless=True, easy_drag=False,
+                        background_color="#000000", js_api=controls)
+                    return True
+
+            # frameless: the native title bar is the one thing here we didn't
+            # design, and it makes the app look like a browser someone left
+            # open. The page draws its own instead (see #titlebar).
+            #
+            # easy_drag off, or the whole window moves whenever you drag to
+            # select text. Dragging is confined to the strip that asks for it,
+            # via pywebview's own pywebview-drag-region class.
+            #
+            # text_select defaults to False: pywebview turns selection off to
+            # make a window feel like a native app. This one is full of titles,
+            # years and cast names worth copying, so it goes back on.
+            main_window = webview.create_window(
+                "Next Up", url, width=1200, height=900,
+                min_size=(760, 600), text_select=True,
+                frameless=True, easy_drag=False,
+                background_color="#060509",
+                js_api=WindowControls())
+            # The window is on its way out: stop the player here rather than
+            # after the loop returns, because Cmd+Q and the Dock's Quit take
+            # the process down without the loop ever handing control back.
+            # shutdown_playback only does its work once, so both can fire.
+            # Kept so the AFK question can raise the window it's drawn in.
+            _APP_WINDOW[0] = main_window
+
+            def window_closing(*_a):
+                # The port goes FIRST: what follows can take seconds — a
+                # channel means asking mpv to quit and waiting for it — and
+                # none of it needs the server.
+                release_port(server)
+                shutdown_playback()
+            try:
+                main_window.events.closing += window_closing
+            except Exception:
+                pass          # older pywebview without the event
+            webview.start(restore_resizing)
+            release_port(server)
+            shutdown_playback()
+            cache_flush()
+            return
+        except ImportError:
+            if mode == "window":
+                print("  Window : pywebview isn't installed — run: pip install pywebview")
+
+    # Next best: Edge or Chrome with the browser chrome stripped off.
+    if mode in ("auto", "app"):
+        which = open_app_window(url)
+        if which:
+            print("  Window : %s in app mode" % which)
+            print("  Stop   : Ctrl+C here (closing the window leaves this running)")
+            hold(server)
+            return
+        print("  Window : no Edge or Chrome found, falling back to your browser")
+
+    print("  Open   : %s" % url)
+    print("  Stop   : Ctrl+C")
+    if OPEN_BROWSER:
+        opener = threading.Timer(1.0, lambda: webbrowser.open(url))
+        opener.daemon = True      # never the thread that keeps the app alive
+        opener.start()
+    hold(server)
+
+
+def hold(server):
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nstopped")
+    finally:
+        release_port(server)
+        cache_flush()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        # Last line of defence, for the packaged build especially: without
+        # this, any unhandled startup error means no window and no message.
+        traceback.print_exc()
+        startup_failure("Next Up couldn't start.\n\n%s"
+                        % traceback.format_exc().strip()[-700:])

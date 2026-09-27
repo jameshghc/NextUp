@@ -1,0 +1,29 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "nextup",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["nextup.py"],
+      "port": 8770
+    },
+    {
+      "name": "nextup-dev",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["tests\\devserve.py"],
+      "port": 8771
+    },
+    {
+      "name": "nextup-afk",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["tests\\afk_serve.py"],
+      "port": 8772
+    },
+    {
+      "name": "nextup-aside",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["tests\\aside_serve.py"],
+      "port": 8773
+    }
+  ]
+}
