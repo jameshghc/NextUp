@@ -39,8 +39,10 @@ Never redesign wholesale. The app has a deliberate look; improve within it.
 ## The design system
 
 **Palette** (all on `:root`, dark only — there is no light mode):
-`--ink #060509` the room · `--ink-2 #131017` / `--ink-3 #1d1826` / `--surface`
-/ `--surface-2` raised surfaces · `--paper #ece6dc` text · `--muted #8d859b`
+`--ink #060509` the room · cards and panels are `--surface #131017` and
+`--surface-2 #1b1622` (`--ink-2` / `--ink-3` are the older names, still used
+for inputs and chips) · `--edge` the faint hairline where one is needed at
+all · `--paper #ece6dc` text · `--muted #8d859b`
 secondary text · `--marigold #e0a33e` (+ `--marigold-2`) the accent — actions,
 progress, focus · `--rust #c2593c` errors and warnings · `--teal #4fa8a0`
 sparing secondary accent · `--line #272031`.
@@ -90,6 +92,11 @@ fragments.
   picture for exactly this reason.
 - A fixed height must be measured, not guessed: the Rate card's height came
   from drawing all 288 cards and taking the tallest.
+- **A borrowed class brings its media queries with it.** The docking station
+  reused the Library toolbar's `.searchrow` and `.libcount`, and so inherited
+  their rule hiding the count below 1340px — in a place where that count was
+  the only one. When a component borrows another area's class, check what
+  that class does at every width, and scope an override to the new area.
 
 ## How to look at it
 
@@ -98,16 +105,33 @@ library — you may read from it (`GET`), never click or `POST` there.
 
 - Start the sandboxed copy: `preview_start` with name **`nextup-dev`** (port
   8771). It runs `tests/devserve.py`, which points every file the app writes
-  at a temp copy. Clicking anything there is safe.
-- It opens on a **"Who's watching?" profile picker** — click the profile
-  first.
+  at a temp copy, and switches off the routes that reach real places outside
+  it: the Recycle Bin, sharing to OneDrive, copying to USB drives, and the
+  downloads folder (those buttons answer "Not in the sandbox"). Still real, on
+  purpose: **PLAY and TEST MPV open a real player on the user's screen**, and
+  **SCAN MY FOLDERS reads the real media drives** (E: stalls — avoid it). The
+  TMDB cache and artwork folder are shared with the real app; they're only
+  ever added to.
+- **To see a state without causing it, render it.** The page draws most
+  states from one function you can call with made-up data:
+  `syncRender({...})` (sharing), `drawAside({...})` (duplicate copies),
+  `sortNote(html, bad)` and `libNote(msg, bad)` (the notices),
+  `renderAsk({...})` (still watching?). Read the function for the shape.
+- It opens on a **"Who's watching?" profile picker**. Past it from JS:
+  `document.querySelector('.pickerface.active').click()` — needed again after
+  every restart.
 - `switchTo('library' | 'now' | 'rate' | 'channels' | 'settings')` in the page
   changes tabs.
-- **Screenshots often time out** when the Claude window isn't in front. Prefer
-  measurement: `javascript_tool` with `getBoundingClientRect`,
-  `getComputedStyle`, element counts, and `resize_window` to check **760, ~1000
-  and ~1500** px wide. Take a screenshot as proof once things are right, and
-  reset the window size to `desktop` when you're done.
+- **The docked queue** needs something queued; for layout checks, toggling
+  `document.body.classList.toggle('queue-docked', true)` at a window of 1100px
+  or more is a fair stand-in.
+- **Measure; treat screenshots as rough.** They often time out when the
+  Claude window isn't in front, come back at an odd scale, and the `zoom`
+  action isn't supported in this pane. Use `javascript_tool` with
+  `getBoundingClientRect`, `getComputedStyle` and element counts, and
+  `resize_window` to check **760, ~1000 and ~1500** px wide. Take a screenshot
+  as proof once things are right, and reset the window size to `desktop` when
+  you're done.
 - The server loads `nextup.py` once. **After editing, stop and restart the
   preview** or you're looking at the old page.
 - Other sandboxed servers: `nextup-afk` (the "are you still watching?" question
@@ -130,8 +154,10 @@ anything that says more than the app actually knows.
 - Code comments here record **why** — the reason, the trap avoided — not what
   the next line does. Match that voice and density.
 - Check every change in the running page at the three widths.
-- Run **`python tests/run_all.py`** before handing back (about a minute; it
-  includes a check that the page script still parses). All suites must pass.
+- Run **`python tests/run_all.py`** before handing back (about a minute). All
+  suites must pass. The one that guards your work most is **"page script
+  parses"**, a check inside the queue suite: a stray quote in the PAGE string
+  breaks every tab at once, and that check catches it.
 - **Don't** bump `APP_VERSION`, rebuild `NextUp.exe`, edit the README or notes,
   or commit to git. Hand back, and the main session does those together.
 

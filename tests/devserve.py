@@ -7,7 +7,13 @@ the real nextup_config.json — and since this server blanks sync_folder so a
 test can't write to OneDrive, clicking through the profile picker saved
 that blank over the user's real settings and switched their sharing off.
 Every path the app writes to is now redirected, and isolate() refuses to
-start if any of them still points into X:\\NextUp."""
+start if any of them still points into X:\\NextUp. The routes that reach
+real places outside the app — the Recycle Bin, the OneDrive sharing folder,
+USB drives, the downloads folder — are switched off too.
+
+Still shared with the real app, on purpose: the TMDB cache and the artwork
+folder (both only ever added to, and a sandbox without them would refetch
+everything), and mpv — PLAY and TEST MPV really do open a player."""
 import sys, os, shutil, tempfile, json
 sys.path.insert(0, r"X:\NextUp")
 os.chdir(r"X:\NextUp")
@@ -42,6 +48,31 @@ def isolate(n, sandbox):
         path = os.path.abspath(getattr(n, name))
         if path.lower().startswith(live.lower()):
             raise SystemExit("refusing to start: %s still points at %s" % (name, path))
+
+    # The app's own files are sandboxed above. These are the routes that
+    # reach REAL places OUTSIDE the app's folder, found by the first
+    # ui-designer run, which kept clear of them on its own. Closed here so
+    # nobody has to remember to: a test that needs one of them puts its own
+    # stand-in back after calling isolate(), as dupes_test does with the bin.
+    def refuse(what):
+        def closed(*_a, **_k):
+            raise n.AppError("Not in the sandbox: %s is switched off here." % what)
+        return closed
+    # The sandbox's library is a copy, but its paths point at the real media:
+    # MOVE TO BIN in the duplicates review would bin real films.
+    n.send_to_trash = refuse("the Recycle Bin")
+    # SHARE THROUGH ONEDRIVE would write test history into the real sharing
+    # folder, where the user's other computers would read it as theirs.
+    n.cloud_folders = lambda: []
+    n.sync_enable = refuse("sharing between devices")
+    # The docking station copies to real USB drives.
+    n.list_dock_drives = lambda: []
+    n.dock_copy_worker = refuse("copying to a drive")
+    # The copied config names the real downloads folder, where SORT THEM
+    # moves real files. Tests that exercise the sorter set their own.
+    n.CONFIG["downloads_folder"] = ""
+    with open(n.CONFIG_PATH, "w", encoding="utf-8") as fh:
+        json.dump(n.CONFIG, fh)
 
 
 if __name__ == "__main__":
