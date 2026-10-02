@@ -89,7 +89,7 @@ DISMISS_PATH = os.path.join(HERE, "nextup_dismissed.json")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.43"
+APP_VERSION = "0.1.44"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -2723,6 +2723,17 @@ def scan_local_library(progress=None):
         for table, paths in doomed.items():
             for path in paths:
                 conn.execute("DELETE FROM %s WHERE path=?" % table, (path,))
+        # A show is only ever its episodes. When the last of them goes —
+        # moved under another show's folder, a release folder like "Futurama
+        # S05" merged into Futurama by the sorter — the row stayed behind as
+        # a blank tile with nothing to play. Anything you've marked on it
+        # (a score, the watchlist, a favourite, time watched) keeps it,
+        # since that is yours and the files may well come back.
+        conn.execute(
+            "DELETE FROM shows WHERE NOT EXISTS"
+            " (SELECT 1 FROM episodes e WHERE e.show_id=shows.id)"
+            " AND COALESCE(userrating,0)=0 AND watchlisted_at IS NULL"
+            " AND favourited_at IS NULL AND COALESCE(watch_seconds,0)=0")
     conn.commit()
 
     enriched = enrich_local(conn, progress)
@@ -5835,6 +5846,9 @@ SORTER_NOT_ITEMS = {"MOVIES", "TV", "Applications", "Incomplete - Delete",
 # video; this app is what asks.
 SORTER_ASIDE_DIR = "_DUPLICATES"
 SORTER_ASIDE_LOG = "PENDING.jsonl"
+# The script's own list, not VIDEO_EXT: a loose .mov it won't pick up
+# shouldn't be shown as waiting for it.
+SORTER_VIDEO_EXT = {".mkv", ".mp4", ".avi"}
 SORT = {"running": False, "step": "", "report": [], "renamed": [],
         "error": None, "finished_at": 0}
 _SORT_LOCK = threading.Lock()
@@ -5875,16 +5889,24 @@ def sorter_python():
 
 
 def sorter_waiting():
-    """What's sitting in the downloads folder waiting to be sorted. Names
-    only, from one listing — nothing is opened and no file is touched."""
+    """What's sitting in the downloads folder waiting to be sorted: release
+    folders, and videos that arrived loose with no folder of their own.
+    Names only, from one listing — nothing is opened and no file is touched."""
     root = downloads_root()
     if not root:
         return []
+
+    def waiting(name):
+        if name in SORTER_NOT_ITEMS or name.startswith("."):
+            return False
+        path = os.path.join(root, name)
+        if os.path.isdir(path):
+            return True
+        return (os.path.splitext(name)[1].lower() in SORTER_VIDEO_EXT
+                and "sample" not in name.lower() and os.path.isfile(path))
+
     try:
-        return sorted(name for name in os.listdir(root)
-                      if name not in SORTER_NOT_ITEMS
-                      and not name.startswith(".")
-                      and os.path.isdir(os.path.join(root, name)))
+        return sorted(name for name in os.listdir(root) if waiting(name))
     except OSError:
         return []
 

@@ -16,6 +16,55 @@ at the top.
 
 ---
 
+## 2026-10-02 — v0.1.44, loose downloads, and the blank TV tiles
+
+### The sorter only ever looked at folders
+
+Asked whether the built-in sorter only looks at folders: it did, twice over.
+The user's `process_new_movies.py` took its items from the Torrents root with
+`p.is_dir()`, and the app's own "waiting" list did the same, so a torrent
+that arrived as a single file — two South Park episodes and a film, that
+morning — was neither sorted nor shown. Nothing said so.
+
+The script (backed up first; it isn't under git) now treats a loose
+`.mkv`/`.mp4`/`.avi` in the root as an item. The dry run reports it like any
+other. The real run gives it a folder of its own named for the file,
+carries along any subtitle that starts with the same name, and then hands
+that folder to the existing path unchanged. That was the smaller change by
+far: every step after the check (junk stripping, extras, duplicates, the
+spreadsheet) assumes a folder, and wrapping the file once is cheaper and
+safer than teaching each step about files. Samples on their own aren't items.
+The five-minute "still being written" rule applies to a loose file by its
+own modified time. `sorter_waiting()` lists loose videos too, using the
+script's three extensions rather than the app's longer `VIDEO_EXT`, so it
+never shows a `.mov` as waiting for a script that won't touch it. The
+routine's rulebook (`process-new-movies.md`) used to tell it to ignore loose
+files; it now says a loose video is a new item.
+
+`sorter_test.py` adds a loose film with its subtitle and a loose episode of a
+show arriving in the same run as its season folder (20 checks). The real
+folder's dry run then routed both South Park episodes to the existing show.
+
+### Blank TV tiles
+
+Seven shows in the TV grid had nothing in them: six with no poster, titled
+like the release folders they came from ("Futurama S05", "South Park Season
+13 S13 + Extras", "Rick and Morty S04 -KONTRAST"), and BoJack Horseman, which
+had a poster but no files left on the drive. Every one had zero episodes. The
+scan deletes the row of a file that has gone, but a show row was never
+deleted. So when the sorter merged a release folder into the real show, the
+episodes moved across and the old show stayed behind as a blank tile.
+
+The scan now drops a show with no episodes, in the same step as the files
+and behind the same guard against an unplugged drive. Anything you've put
+on it keeps it: a score, the watchlist, a favourite, or watch time, because
+that's yours and the files may come back. A rescan of a copy of the real
+library removed exactly those seven and changed no episode or film. They go
+from the live app on its next library scan. Test: `empty_shows_test.py`
+(5 checks).
+
+---
+
 ## 2026-09-28 — v0.1.43, the first design pass, on Settings
 
 The first job for the new `ui-designer` agent (`.claude/agents/`). It wasn't

@@ -46,6 +46,10 @@ for ep in (1, 2, 3):
     fake_video(os.path.join(SAND, "Futurama.S05.1080p.WEBRip.x265-FAKE",
                             "Futurama.S05E%02d.1080p.WEBRip.x265-FAKE.mkv" % ep))
 fake_video(os.path.join(SAND, "Something.Still.Downloading.2024.mkv.part"))
+# and two that arrived loose, with no folder: a film with its subtitle, an episode
+fake_video(os.path.join(SAND, "Loose.Film.2021.1080p.WEBRip.x265-FAKE.mkv"))
+open(os.path.join(SAND, "Loose.Film.2021.1080p.WEBRip.x265-FAKE.en.srt"), "w").write("1\n")
+fake_video(os.path.join(SAND, "Futurama.S05E04.1080p.WEBRip.x265-FAKE.mkv"))
 os.utime(SAND, None)
 # the script ignores anything touched in the last 5 minutes
 old = time.time() - 3600
@@ -60,13 +64,18 @@ print("sandbox:", SAND)
 # --- what the button does first: look, change nothing ------------------------
 state_before = os.path.isfile(os.path.join(SAND, ".process_new_movies_state.json"))
 prev = n.sorter_preview()
-check("preview finds both ready items", len(prev["items"]) == 2,
+check("preview finds all four ready items, loose ones included", len(prev["items"]) == 4,
       [i["name"] + " -> " + i["dest"] for i in prev["items"]])
 check("and routes them correctly",
       any("MOVIES/The Testing Film (2019)" in i["dest"] for i in prev["items"])
-      and any("TV/Futurama" in i["dest"] for i in prev["items"]),
+      and any("MOVIES/Loose Film (2021)" in i["dest"] for i in prev["items"])
+      and sum("TV/Futurama" in i["dest"] for i in prev["items"]) == 2,
       [i["dest"] for i in prev["items"]])
-check("preview moved nothing", os.path.isdir(os.path.join(SAND, "Futurama.S05.1080p.WEBRip.x265-FAKE")))
+check("loose videos listed as waiting, the part-file not",
+      "Loose.Film.2021.1080p.WEBRip.x265-FAKE.mkv" in prev["waiting"]
+      and not any(w.endswith(".part") for w in prev["waiting"]), prev["waiting"])
+check("preview moved nothing", os.path.isdir(os.path.join(SAND, "Futurama.S05.1080p.WEBRip.x265-FAKE"))
+      and os.path.isfile(os.path.join(SAND, "Loose.Film.2021.1080p.WEBRip.x265-FAKE.mkv")))
 check("preview left the grace-counter file as it found it",
       os.path.isfile(os.path.join(SAND, ".process_new_movies_state.json")) == state_before)
 
@@ -84,12 +93,22 @@ check("show folder created", shows == ["Futurama"], shows)
 eps = []
 for root, _d, files in os.walk(tv_root):
     eps += [f for f in files]
-check("three episodes moved", len(eps) == 3, eps)
+check("four episodes moved, the loose one too", len(eps) == 4, eps)
+loose = os.path.join(SAND, "MOVIES", "Loose Film (2021)")
+check("loose film moved and renamed",
+      os.path.isfile(os.path.join(loose, "Loose Film (2021).mkv")), loose.replace(SAND, "…"))
+check("its subtitle went with it",
+      os.path.isfile(os.path.join(loose, "Loose.Film.2021.1080p.WEBRip.x265-FAKE.en.srt")),
+      os.listdir(loose) if os.path.isdir(loose) else "no folder")
+check("no loose leftovers in the root",
+      not [f for f in os.listdir(SAND) if f.startswith(("Loose.", "Futurama."))],
+      [f for f in os.listdir(SAND) if f.startswith(("Loose.", "Futurama."))])
 check("episodes named from TMDB, not left as 'S05E01 - Futurama'",
       all(" - Futurama" in e and not e.startswith("S05E01 - ") for e in eps), sorted(eps))
 check("the app reported what it named", any("Futurama" in r for r in n.SORT["renamed"]), n.SORT["renamed"])
 wb2 = __import__("openpyxl").load_workbook(os.path.join(SAND, "MOVIES", "My Film Collection.xlsx"))
-check("film added to the spreadsheet", wb2.active["B3"].value == "The Testing Film", wb2.active["B3"].value)
+films = [wb2.active.cell(r, 2).value for r in (3, 4)]
+check("both films added to the spreadsheet", films == ["Loose Film", "The Testing Film"], films)
 check("part-file left alone", os.path.isfile(os.path.join(SAND, "Something.Still.Downloading.2024.mkv.part")))
 
 # --- nothing new: the honest answer -------------------------------------------

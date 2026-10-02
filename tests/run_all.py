@@ -19,6 +19,7 @@ SUITES = [
     ("port release, end to end", "port_e2e.py"),
     ("download sorter", "sorter_test.py"),
     ("sorter duplicates", "dupes_test.py"),
+    ("empty shows", "empty_shows_test.py"),
     ("sharing between computers", os.path.join("synctest", "driver.py")),
 ]
 SLOW = {"sharing between computers"}
