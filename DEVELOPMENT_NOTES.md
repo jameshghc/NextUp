@@ -16,6 +16,38 @@ at the top.
 
 ---
 
+## 2026-10-03 — v0.1.45, two rows for the Library
+
+The user found FILMS-to-DRIVES too cluttered: six sections on one line, read
+as one list of equals, when they're two kinds of thing. FILMS, TV SHOWS and
+FAVOURITES are your shelf, browsed the same way. HISTORY, RECOMMENDATIONS
+and DRIVES are places you go from it. Their ask: the shelves alone up top,
+the other three in a row of their own that's clearly separate and doesn't
+move as you flick between sections. YouTube, when it comes, joins the
+shelves beside Favourites.
+
+`LIB_SECTIONS` is now `LIB_SHELVES` and `LIB_PLACES`, both drawn by the one
+`drawLibNav()` with the same click handler, so nothing about how a section
+opens changed. The shelves stay in the masthead. The places are a
+`#libplaces` row, the first thing inside `#view-library`. That puts it in the
+same spot on all six sections (measured: same top on every one), and it
+leaves with the view instead of leaving a blank strip on Now and Rate. It is
+styled to read as a different kind of row: sentence case in the body face,
+an icon each, and a soft filled pill for the one you're on, with the
+marigold kept for the icon rather than an underline.
+
+One trap, caught in the screenshot: `#view-library` clips its overflow, and
+the first version pulled the row up 8px and left 10px to tighten it against
+the masthead and line the icons up with FILMS. That sliced the top and left
+edges off the selected pill. No negative margins now. The icons sit a
+pill's padding in from FILMS, which is the price of the pill.
+
+Checked at full width and at the 760px minimum: the shelves still share the
+masthead line, all three places fit one line, nothing scrolls sideways, and
+a sort set on Films survives a trip to History and back.
+
+---
+
 ## 2026-10-02 — v0.1.44, loose downloads, and the blank TV tiles
 
 ### The sorter only ever looked at folders

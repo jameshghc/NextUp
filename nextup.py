@@ -89,7 +89,7 @@ DISMISS_PATH = os.path.join(HERE, "nextup_dismissed.json")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.44"
+APP_VERSION = "0.1.45"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -13586,6 +13586,31 @@ body.queue-docked #toast{left:calc(50% - 150px)}
 #view-library.showing-recs .syncoffer,#view-library.showing-history .syncoffer,
 #view-library.showing-drives .syncoffer{display:none}
 
+/* -- library places ------------------------------------------------------- */
+/* History, Recommendations, Drives: the row under the shelves. Deliberately
+   not the shelves' look — sentence case in the body face, an icon, and a
+   soft filled pill for the one you're on instead of the marigold underline —
+   so the two rows read as two kinds of thing rather than one list wrapped. */
+/* No negative margins, either way: the view clips its overflow, and pulling
+   the row up (or left, to line the first icon up with FILMS) sliced the
+   selected pill's edge off. The icon sits a pill's padding in from FILMS
+   instead. flex:none because the view is a flex column that shrinks
+   children. */
+.libplaces{display:flex;gap:4px;align-items:center;flex-wrap:wrap;flex:none;
+  margin:0 0 10px}
+.libplace{
+  display:inline-flex;align-items:center;gap:7px;
+  background:none;border:0;border-radius:999px;cursor:pointer;
+  padding:5px 12px 5px 8px;color:var(--muted);
+  font-family:inherit;font-size:13px;letter-spacing:.01em;
+  transition:color .12s ease,background-color .12s ease;
+}
+.libplace svg{width:14px;height:14px;flex:none;opacity:.8}
+.libplace:hover{color:var(--paper);background:var(--surface)}
+.libplace[aria-selected="true"]{color:var(--paper);background:var(--surface-2)}
+.libplace[aria-selected="true"] svg{color:var(--marigold);opacity:1}
+.libplace:focus-visible{outline:2px solid var(--marigold);outline-offset:1px}
+
 /* -- settings ---------------------------------------------------------------- */
 /* Each card is its own size container, so the four-field rows are keyed on
    the card rather than the window: auto-fit left three fields and an orphan
@@ -13757,6 +13782,11 @@ body.queue-docked #toast{left:calc(50% - 150px)}
 
 <!-- ================= LIBRARY ================= -->
 <div id="view-library">
+  <!-- History, Recommendations and Drives: places you go from the Library,
+       not shelves of it. First in the view so they sit in the same spot on
+       every section, and go with the view rather than leaving a blank strip
+       on the other tabs. Drawn by drawLibNav() with the shelves above. -->
+  <nav class="libplaces" id="libplaces" aria-label="More in your library"></nav>
   <!-- Asked once, when a cloud folder is found and sharing isn't set up.
        Either answer puts it away for good; Settings has it after that. -->
   <div class="syncoffer hidden" id="syncoffer">
@@ -14682,8 +14712,19 @@ let searchTimer = null;
    dropdown: it's a place you go, not a filter you happen to apply. Picking it
    sets the shelf underneath, so the rest of the screen keeps working exactly
    as it does everywhere else. */
-const LIB_SECTIONS = [['film','Films'],['tv','TV shows'],['fav','Favourites'],
-                      ['history','History'],['recs','Recommendations'],['drives','Drives']];
+/* Two rows, two kinds of thing. The shelves are what you own, browsed the
+   same way, and share the masthead with the main tabs. The places are
+   somewhere else you go from the Library — what you've watched, what you
+   might, what's on a drive — and sit in a quieter row of their own at the
+   top of the page, the same spot whichever section is up, so flicking
+   between them never moves it. Six on one line read as one list of equals. */
+const LIB_SHELVES = [['film','Films'],['tv','TV shows'],['fav','Favourites']];
+const LIB_PLACES = [['history','History'],['recs','Recommendations'],['drives','Drives']];
+const LIB_PLACE_ICONS = {
+  history: '<circle cx="12" cy="12" r="9"></circle><polyline points="12 7 12 12 15.5 14"></polyline>',
+  recs: '<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"></path><path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z"></path>',
+  drives: '<path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"></path><line x1="22" y1="12" x2="2" y2="12"></line><line x1="6" y1="16" x2="6.01" y2="16"></line><line x1="10" y1="16" x2="10.01" y2="16"></line>',
+};
 /* The sections that aren't the shelf. They have no kind, no sort and no
    pager of their own, and listing them once here means the three or four
    places that have to know can ask rather than each keeping their own list
@@ -14716,9 +14757,18 @@ function applyLibSection(){
 
 function drawLibNav(){
   const nav = $('#libnav'); nav.innerHTML='';
-  LIB_SECTIONS.forEach(([id,label]) => {
-    const b = el('button','subtab');
+  const places = $('#libplaces'); places.innerHTML='';
+  LIB_SHELVES.concat(LIB_PLACES).forEach(([id,label]) => {
+    const place = id in LIB_PLACE_ICONS;
+    const b = el('button', place ? 'libplace' : 'subtab');
+    b.type = 'button';
     b.setAttribute('aria-selected', libSection===id);
+    if(place){
+      b.insertAdjacentHTML('beforeend',
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+        + 'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+        + LIB_PLACE_ICONS[id] + '</svg>');
+    }
     b.append(document.createTextNode(label));
     if(id==='fav' && favCount!=null) b.append(el('span','count', String(favCount)));
     b.onclick = () => {
@@ -14736,7 +14786,7 @@ function drawLibNav(){
       drawLibNav(); applyLibSection();
       if(!LIB_PANELS[id]){ loadLibrary(); paintResumeRow(); }
     };
-    nav.append(b);
+    (place ? places : nav).append(b);
   });
   $('#libsort').querySelector('option[value="runtime"]').disabled = (libKind==='tv');
 }
@@ -14904,7 +14954,7 @@ function paintResumeRow(){
 
 /* The heading is the way in to the full list. Goes through the same two
    calls the sub-nav buttons do rather than synthesising a click on one —
-   the button is drawn from LIB_SECTIONS and finding it by its label would
+   the button is drawn from LIB_PLACES and finding it by its label would
    break the day the label changes. */
 $('#resumehead').onclick = () => {
   libSection = 'history';
