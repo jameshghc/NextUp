@@ -43,8 +43,14 @@ def isolate(n, sandbox):
     n.PLAY_STATE_PATH = os.path.join(sandbox, "nextup_playing.json")
     n.WATCH_LATER = os.path.join(sandbox, "nextup_resume")
     n.ERROR_LOG = os.path.join(sandbox, "nextup_errors.log")
+    # The YouTube channels' video lists. Copied in when there is one, so
+    # the sandbox's channel page matches the real one without a fetch.
+    youtube = os.path.join(sandbox, "nextup_youtube.json")
+    if os.path.isfile(n.YOUTUBE_PATH):
+        shutil.copyfile(n.YOUTUBE_PATH, youtube)
+    n.YOUTUBE_PATH = youtube
     for name in ("DB_PATH", "CONFIG_PATH", "RECS_PATH", "PLAY_STATE_PATH",
-                 "WATCH_LATER", "ERROR_LOG"):
+                 "WATCH_LATER", "ERROR_LOG", "YOUTUBE_PATH"):
         path = os.path.abspath(getattr(n, name))
         if path.lower().startswith(live.lower()):
             raise SystemExit("refusing to start: %s still points at %s" % (name, path))

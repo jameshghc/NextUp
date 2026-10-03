@@ -9,6 +9,26 @@ summarised away and files don't.
 
 ---
 
+## Next up (parked 2026-10-03)
+
+- **Cold Ones channel needs yt-dlp updated before it plays.** Built and
+  tested in v0.1.47; the list loads, but YouTube refuses streams to the
+  installed yt-dlp (2026.07.04, over 90 days old): `winget upgrade
+  yt-dlp.yt-dlp`. Then tune in for real and check the seek lands mid-video.
+  Al Jazeera Live is probably refused the same way.
+- **A traditional TV-guide layout for Channels?** Asked, not yet answered.
+  Channels run nose to tail from a fixed epoch, so a grid of what's on next
+  across every channel is computable — the open question is the design.
+- **YouTube next moves:** history/docs creators feeding True Life and Back
+  in Time (capped share), and a YOUTUBE shelf beside Favourites.
+- **From the watch-data review:** make the Now tab's "rated 8+" bonus
+  relative to the user's own scale (217 of 316 rated films clear 8); set the
+  "still watching?" clock bands around their real hours (most viewing ends
+  3-7am); two films played since 22 Sep have no finished/stopped row —
+  check before trusting Watch Score for films.
+
+---
+
 ## Always: the Mac is behind
 
 **Do this whenever there's time.** The MacBook is on **v0.1.21**. Everything

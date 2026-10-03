@@ -20,6 +20,7 @@ SUITES = [
     ("download sorter", "sorter_test.py"),
     ("sorter duplicates", "dupes_test.py"),
     ("empty shows", "empty_shows_test.py"),
+    ("youtube channel", "youtube_test.py"),
     ("sharing between computers", os.path.join("synctest", "driver.py")),
 ]
 SLOW = {"sharing between computers"}
@@ -27,7 +28,7 @@ SLOW = {"sharing between computers"}
 # The files a test must never change. The media folders are checked by the
 # sorter suites themselves.
 GUARDED = ["nextup_config.json", "nextup_library.db", "nextup_recs.json",
-           "nextup_playing.json", "nextup_dismissed.json"]
+           "nextup_playing.json", "nextup_dismissed.json", "nextup_youtube.json"]
 
 
 def fingerprint():

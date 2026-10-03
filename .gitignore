@@ -26,6 +26,8 @@ nextup_cache.json
 nextup_art/
 # The last recommendations scan; a new scan makes another.
 nextup_recs.json
+# The YouTube channels' video lists; re-read from YouTube daily.
+nextup_youtube.json
 nextup_errors.log
 # The packaged app: built from nextup.py with PyInstaller, so the source is
 # the thing to keep. 15MB a version would bloat the history fast.

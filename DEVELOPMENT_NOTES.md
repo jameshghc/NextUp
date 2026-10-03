@@ -16,6 +16,43 @@ at the top.
 
 ---
 
+## 2026-10-03 — v0.1.47, Cold Ones #22, a channel from YouTube
+
+The user wanted Cold Ones on Next Up as a channel of their own, random
+videos on a loop. It's a new channel `type`, `youtube`, with a `source`
+(the creator's uploads page), and the schedule is exactly the other
+channels': a fixed list, sorted by id, shuffled by the channel's seed,
+looping from 2024. Only where the list comes from is new.
+
+`yt-dlp --flat-playlist -J` reads the whole uploads page in one request
+(173 videos, about 3 seconds, every one with its length). It is never run
+while a page waits. The Channels page builds every schedule on each load,
+so the list is read from `nextup_youtube.json`, and a stale or missing one
+is refreshed on its own thread: daily, with a ten-minute back-off after a
+failure, keeping the old list when a refresh fails. Shorts (under 2 min),
+premieres and live streams are left out. A " | Cold Ones" signature on a
+title is trimmed off, since the card already says Cold Ones.
+
+A block of kind `youtube` plays through `mpv_play` with the page address
+and `keep_open`, so it holds the window and hands on at the end like any
+channel. `_block_identity`, `channel_play_target` and `_play_display` each
+learned the kind. History gets the tune-ins. There's no watch record yet,
+since these aren't library items.
+
+**One trap, found in the first real run:** YouTube refused the stream (403)
+to the installed yt-dlp, which is 90+ days old. mpv goes straight to idle,
+which reads exactly like "the video ended", so the channel would have
+handed on to the next video, been refused, handed on again, and raced
+through all 173. A YouTube video that "ends" with no position past 5s now
+stops the channel, closes the window, and the card says yt-dlp needs
+updating until one plays. **The channel won't actually play until yt-dlp
+is upgraded.** That's parked in PLANNED.md.
+
+Test: `youtube_test.py` (25 checks, fake yt-dlp, mpv stubbed). The sandbox
+redirects `YOUTUBE_PATH`, and `run_all` guards it.
+
+---
+
 ## 2026-10-03 — v0.1.46, one line after all
 
 Seen in use, the second row cost ~50px of every Library screen for three

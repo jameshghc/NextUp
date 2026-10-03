@@ -86,10 +86,13 @@ else:
 CONFIG_PATH = os.path.join(HERE, "nextup_config.json")
 CACHE_PATH = os.path.join(HERE, "nextup_cache.json")
 DISMISS_PATH = os.path.join(HERE, "nextup_dismissed.json")
+# What the YouTube channels last read off each creator's uploads page: ids,
+# titles, lengths. Re-fetched daily, so it's a cache rather than data.
+YOUTUBE_PATH = os.path.join(HERE, "nextup_youtube.json")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.46"
+APP_VERSION = "0.1.47"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -3954,6 +3957,9 @@ def stop_current_playback():
 
 def _play_display(kind, item_id):
     """Title, a subtitle line, and a poster for whatever just started."""
+    if kind == "youtube":
+        title, who = youtube_video(item_id)
+        return title, who, youtube_thumb(item_id)
     LIB.load()
     if kind == "episode":
         ep = next((e for e in LIB.episodes if e.get("episodeid") == item_id), None)
@@ -4158,6 +4164,8 @@ def _monitor_tick():
     if position is None:
         return                          # no control channel, or still loading
     afk_watch_mpv(position)
+    if playing == "youtube" and position > 5:
+        YT_PLAY_FAILED["at"] = 0        # one played, so the warning is stale
     duration = mpv_get("duration")
     with _PLAY_LOCK:
         if _PLAY_PROC[0] is proc:
@@ -4840,6 +4848,15 @@ def _finish_current(reason):
         position=current.get("position"), duration=current.get("duration"))
 
     if reason != "ended":
+        return
+    if current.get("type") == "youtube" and (current.get("position") or 0) < 5:
+        # "Ended" without ever having played. When YouTube refuses a stream —
+        # an out-of-date yt-dlp is the usual reason — mpv goes straight to
+        # idle, which reads exactly like the end of the video. Following on
+        # would refuse the next one the same way, and the next, through the
+        # whole channel at one every few seconds. Stop, and say why.
+        YT_PLAY_FAILED.update(at=time.time(), title=current.get("title") or "")
+        mpv_command("quit")
         return
     if not _would_follow(current, follow_on):
         # Held the window open but there's nothing to follow with. Don't
@@ -7745,7 +7762,8 @@ def describe_show_anchors(anchors):
 # What a channel would take from TMDB, for the ones a search can serve. The
 # personal channels (Favourites, Watchlist, Binge, the two people ones) are
 # left out on purpose: nothing a search returns is a thing you've marked.
-_CHANNEL_SKIP_TYPES = ("live", "director", "actor", "binge", "favourites", "watchlist")
+_CHANNEL_SKIP_TYPES = ("live", "director", "actor", "binge", "favourites", "watchlist",
+                       "youtube")
 # A day of telly. Under this a channel comes round again inside a day, and
 # anyone who leaves it on will notice.
 THIN_CHANNEL_HOURS = 24
@@ -9616,6 +9634,12 @@ CHANNELS = [
      "require_genres": ["Animation"], "genres": ["Comedy"],
      "exclude_genres": ["Family", "Kids"], "exclude_countries": ["Japan", "JP"],
      "titles": CARTOON_SWIM_TITLES, "episode_block_size": 3},
+    # Not your library at all: one creator's YouTube uploads, in a random
+    # order on a loop, like a station that only shows them. Asked for by
+    # name. The list comes from yt-dlp reading their uploads page (see
+    # youtube_videos) and plays through mpv the way Al Jazeera does.
+    {"id": "coldones", "name": "Cold Ones", "type": "youtube",
+     "source": "https://www.youtube.com/@ColdOnes/videos"},
 ]
 
 # Numbered from where they sit in the list rather than written into each
@@ -9870,14 +9894,189 @@ def _episode_group_blocks(shows, block_size):
     return blocks
 
 
+# --- YouTube channels -----------------------------------------------------------
+#
+# A channel whose programmes are one creator's uploads. Everything about the
+# schedule is the same as the others — a fixed list, shuffled by the channel's
+# seed, looping from 2024 — so the only new thing is where the list comes from.
+#
+# yt-dlp reads the uploads page (--flat-playlist: one request for the lot,
+# about three seconds for Cold Ones' 173, every one with its length). It is
+# never asked while a page waits: the Channels page builds every channel's
+# schedule on each load, and a network call in there would hold all of them
+# up. So the list is read from YOUTUBE_PATH, and a stale or missing one is
+# refreshed on a thread of its own, at most once a day — and after a failure,
+# not again for ten minutes, so being offline doesn't mean a yt-dlp run on
+# every refresh of the page.
+
+YOUTUBE_REFRESH_SECONDS = 24 * 3600
+YOUTUBE_RETRY_SECONDS = 600
+# Shorts and trailers aren't programmes, and a video with no length can't be
+# scheduled — that's an upcoming premiere or a live stream.
+YOUTUBE_MIN_SECONDS = 120
+_YT_LOCK = threading.Lock()
+_YT_FETCHING = set()
+# The last time a YouTube video was refused rather than played (see
+# _finish_current). Shown on the channel's card until one plays.
+YT_PLAY_FAILED = {"at": 0, "title": ""}
+YT_REFUSED_NOTE = ("YouTube refused the last video. That almost always means "
+                   "yt-dlp is out of date — update it with 'winget upgrade "
+                   "yt-dlp.yt-dlp' in PowerShell, then tune in again.")
+
+
+def youtube_url(video_id):
+    return "https://www.youtube.com/watch?v=%s" % video_id
+
+
+def youtube_thumb(video_id):
+    """YouTube's own still for the video. A fixed address per video, so it
+    needs no lookup and nothing stored."""
+    return "https://i.ytimg.com/vi/%s/hqdefault.jpg" % video_id
+
+
+def youtube_fetch(source):
+    """Every upload on a creator's page that can be scheduled, as
+    [{id, title, duration}]. Raises AppError with something you can act on."""
+    import subprocess
+    exe = find_ytdlp()
+    if not exe:
+        raise AppError("yt-dlp isn't installed, and it's what reads the "
+                       "channel's videos. Install it with 'winget install "
+                       "yt-dlp.yt-dlp' in PowerShell as administrator.")
+    try:
+        out = subprocess.run([exe, "--flat-playlist", "-J", "--no-warnings", source],
+                             capture_output=True, timeout=120,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except subprocess.TimeoutExpired:
+        raise AppError("YouTube took more than two minutes to answer.")
+    except OSError as exc:
+        raise AppError("Couldn't run yt-dlp: %s" % exc)
+    if out.returncode != 0:
+        why = (out.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+        raise AppError("yt-dlp couldn't read the channel: %s"
+                       % (why[-1] if why else "no reason given"))
+    try:
+        data = json.loads(out.stdout.decode("utf-8", "replace"))
+    except ValueError:
+        raise AppError("yt-dlp answered with something that wasn't a video list.")
+    videos = []
+    # "Twomad Goes to Bed | Cold Ones": on a card already headed Cold Ones,
+    # the creator signing their own title is the same words twice.
+    signed = re.compile(r"\s*[|\-–—]\s*%s\s*$" % re.escape(data.get("channel") or "\0"), re.I)
+    for entry in data.get("entries") or []:
+        vid, title = entry.get("id"), signed.sub("", (entry.get("title") or "").strip())
+        duration = entry.get("duration") or 0
+        if not vid or not title or duration < YOUTUBE_MIN_SECONDS:
+            continue
+        if entry.get("live_status") in ("is_live", "is_upcoming", "post_live"):
+            continue
+        videos.append({"id": vid, "title": title, "duration": int(duration)})
+    if not videos:
+        raise AppError("The channel page came back with no videos on it.")
+    return videos
+
+
+def _youtube_refresh(channel):
+    """Fetch one channel's list and save it. On a failure the list already
+    saved stays exactly as it was: yesterday's videos beat no channel."""
+    try:
+        try:
+            videos = youtube_fetch(channel["source"])
+            fresh = {"fetched_at": time.time(), "tried_at": time.time(),
+                     "videos": videos, "error": None}
+        except AppError as exc:
+            fresh = {"tried_at": time.time(), "error": str(exc)}
+        with _YT_LOCK:
+            cache = load_json(YOUTUBE_PATH, {}) or {}
+            entry = cache.get(channel["id"]) or {}
+            entry.update(fresh)
+            cache[channel["id"]] = entry
+            save_json(YOUTUBE_PATH, cache)
+    except Exception:
+        log_problem("youtube refresh %s" % channel.get("id"))
+    finally:
+        with _YT_LOCK:
+            _YT_FETCHING.discard(channel["id"])
+
+
+def youtube_entry(channel):
+    """What's saved for this channel, kicking off a refresh first if it's
+    due. Never waits for that refresh — see the note above."""
+    with _YT_LOCK:
+        entry = (load_json(YOUTUBE_PATH, {}) or {}).get(channel["id"]) or {}
+        now = time.time()
+        due = (now - (entry.get("fetched_at") or 0) > YOUTUBE_REFRESH_SECONDS
+               and now - (entry.get("tried_at") or 0) > YOUTUBE_RETRY_SECONDS)
+        if due and channel["id"] not in _YT_FETCHING:
+            _YT_FETCHING.add(channel["id"])
+            threading.Thread(target=_youtube_refresh, args=(channel,),
+                             daemon=True).start()
+        fetching = channel["id"] in _YT_FETCHING
+    return dict(entry, fetching=fetching)
+
+
+def youtube_status(channel):
+    """One line for a YouTube channel's card when there's nothing to show."""
+    entry = youtube_entry(channel)
+    if entry.get("fetching"):
+        return "Getting the video list from YouTube…"
+    if entry.get("error"):
+        return entry["error"]
+    return "No videos yet — this needs the internet once to read the channel."
+
+
+def youtube_video(video_id):
+    """(title, channel name) for a video any YouTube channel has listed, or
+    (None, None). For the playing bar and History, which only have the id."""
+    cache = load_json(YOUTUBE_PATH, {}) or {}
+    for ch in CHANNELS:
+        if ch.get("type") != "youtube":
+            continue
+        for v in (cache.get(ch["id"]) or {}).get("videos") or []:
+            if v["id"] == video_id:
+                return v["title"], re.sub(r"\s*#\d+$", "", ch["name"])
+    return None, None
+
+
+def _youtube_block(video, channel):
+    return {
+        "kind": "youtube", "id": video["id"], "title": video["title"],
+        "sub": "YouTube",
+        "art": youtube_thumb(video["id"]),
+        "duration": video["duration"],
+    }
+
+
+def youtube_play(video_id, start=0):
+    """Put a YouTube video on, in the channel's window. mpv opens the page
+    address itself through yt-dlp, the same as the live channel."""
+    if not find_ytdlp():
+        raise AppError(
+            "This channel streams from YouTube, which mpv can only open "
+            "with yt-dlp installed. Install it with "
+            "'winget install yt-dlp.yt-dlp' in PowerShell as administrator, "
+            "then try again.")
+    return mpv_play(youtube_url(video_id), start=start, keep_open=True)
+
+
 def channel_blocks(channel):
     """The channel's full rotation, dispatched by what kind of channel this
     is. Sorted by content (never database row order) before the shuffle, so
     the same library — and, for a channel rotating a person by the day, the
     same day — always produces the same order."""
-    LIB.load()
     ctype = channel.get("type", "genre")
 
+    if ctype == "youtube":
+        # Sorted by video id before the shuffle, for the same reason as
+        # everything else here: the page's own order changes every time they
+        # upload, and the schedule shouldn't.
+        videos = youtube_entry(channel).get("videos") or []
+        blocks = sorted((_youtube_block(v, channel) for v in videos),
+                        key=lambda b: b["id"])
+        channel_rng(channel).shuffle(blocks)
+        return blocks
+
+    LIB.load()
     if ctype in ("director", "actor"):
         field = "director" if ctype == "director" else "lead_cast"
         min_count = channel.get("min_count", 4)
@@ -10092,8 +10291,9 @@ def _block_identity(block):
     them ever collided. Nobody scanning the page cares that the episodes
     differ — it reads as the same programme three times over, and the whole
     point of twenty-one channels is twenty-one things to choose between."""
-    return ("movie", block["id"]) if block["kind"] == "movie" \
-        else ("show", block["showid"])
+    if block["kind"] in ("movie", "youtube"):
+        return (block["kind"], block["id"])
+    return ("show", block["showid"])
 
 
 def _next_unlike(blocks, index):
@@ -10176,8 +10376,8 @@ def resolve_all_channels_now():
 def channel_play_target(block, offset):
     """Which actual file to hand mpv, and how far into that one file —
     resolving a two-episode block down to the specific episode and second."""
-    if block["kind"] == "movie":
-        return "movie", block["id"], offset
+    if block["kind"] in ("movie", "youtube"):
+        return block["kind"], block["id"], offset
     remaining = offset
     conn = db()
     try:
@@ -10327,10 +10527,24 @@ def _tune_channel(channel, follow_on=False, after=None):
 
     pick = _channel_pick(channel, after)
     if not pick or not pick[0]:
+        if channel.get("type") == "youtube":
+            raise AppError("%s has no videos to show yet. %s"
+                           % (channel["name"], youtube_status(channel)))
         raise AppError(
             "Nothing matches %s yet — nothing in your library has both the "
             "right genre and a known runtime." % channel["name"])
     kind, item_id, seek = pick
+    if kind == "youtube":
+        # Not a library item: no file to check, no last_played to set, and
+        # nothing for History's watch list to record yet — the tune itself
+        # is still written down, like every other channel's.
+        proc = youtube_play(item_id, start=seek)
+        title, _who = youtube_video(item_id)
+        log_event("youtube", 0, title or item_id,
+                  ("next up on " if follow_on else "tuned in via ") + channel["name"])
+        note_now_playing(proc, kind, item_id, title or "YouTube",
+                         channel=channel["name"], channel_id=channel["id"])
+        return True
     path = require_media_file(LOCAL.path_for(kind, item_id))
     # keep_open: a channel holds its window between programmes. That's the
     # whole difference between a channel and a single click.
@@ -11001,6 +11215,12 @@ class Handler(BaseHTTPRequestHandler):
                         "id": ch["id"], "name": ch["name"],
                         "now": channel_summary(now) if now else None,
                     }
+                    if ch.get("type") == "youtube":
+                        entry["youtube"] = True
+                        if not now:
+                            entry["note"] = youtube_status(ch)
+                        elif YT_PLAY_FAILED["at"]:
+                            entry["problem"] = YT_REFUSED_NOTE
                     featured = channel_featured_person(ch, now)
                     if featured:
                         entry["featured"] = featured
@@ -17333,8 +17553,11 @@ function channelCard(ch, index){
   }
 
   if(!ch.now){
-    card.append(el('p','empty','Nothing in your library fits this yet.'));
-    card.title = 'Nothing in your library fits this channel yet — add more, '
+    /* A YouTube channel is empty for a different reason — it hasn't read
+       the creator's page yet, or couldn't — and the server says which. */
+    card.append(el('p','empty', esc(ch.note || 'Nothing in your library fits this yet.')));
+    card.title = ch.youtube ? 'Its videos come from YouTube, read once a day.'
+      : 'Nothing in your library fits this channel yet — add more, '
       + 'or wait for runtimes to fill in on your next scan.';
     card.disabled = true;
     wrap.append(card);
@@ -17378,6 +17601,12 @@ function channelCard(ch, index){
        ellipsis eats the episode codes before the title, which is the right
        way round. */
     upnext.title = upnext.textContent;
+    /* A YouTube channel whose last video was refused says so here, in the
+       same overlay a failed tune-in uses, until one plays. */
+    if(fresh.youtube){
+      problem.innerHTML = fresh.problem
+        ? '<div class="notice bad"><p>'+esc(fresh.problem)+'</p></div>' : '';
+    }
   };
   wrap._patch(ch);
   body.append(info);
