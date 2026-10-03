@@ -89,7 +89,7 @@ DISMISS_PATH = os.path.join(HERE, "nextup_dismissed.json")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.45"
+APP_VERSION = "0.1.46"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -13591,13 +13591,23 @@ body.queue-docked #toast{left:calc(50% - 150px)}
    not the shelves' look — sentence case in the body face, an icon, and a
    soft filled pill for the one you're on instead of the marigold underline —
    so the two rows read as two kinds of thing rather than one list wrapped. */
-/* No negative margins, either way: the view clips its overflow, and pulling
-   the row up (or left, to line the first icon up with FILMS) sliced the
-   selected pill's edge off. The icon sits a pill's padding in from FILMS
-   instead. flex:none because the view is a flex column that shrinks
-   children. */
-.libplaces{display:flex;gap:4px;align-items:center;flex-wrap:wrap;flex:none;
-  margin:0 0 10px}
+/* On the shelves' line, after a hairline divider: the row of its own it
+   started as cost ~50px of every Library screen for three buttons. The
+   divider and the different face keep it reading as a second tier. Hidden
+   off the Library without giving its width back, like the shelves, so the
+   main tabs never jump. */
+.libplaces{display:flex;gap:2px;align-items:center;flex-wrap:nowrap;flex:none;
+  margin:0;padding-left:12px;border-left:1px solid var(--line);min-width:0}
+header.mast .libplaces.offview{visibility:hidden}
+/* Shelves, places and the main tabs are ~980px of line with the words in;
+   measured, the line broke at a 901-915px header. Below 940 (some margin
+   for a wider font fallback) the places keep their icons and drop the
+   words — the shelves are what you reach for most, so they keep theirs. */
+@container (max-width:940px){
+  header.mast .libplace .lbl{display:none}
+  header.mast .libplace{padding:6px 8px;gap:0}
+  header.mast .libplaces{padding-left:6px}
+}
 .libplace{
   display:inline-flex;align-items:center;gap:7px;
   background:none;border:0;border-radius:999px;cursor:pointer;
@@ -13714,6 +13724,10 @@ body.queue-docked #toast{left:calc(50% - 150px)}
   <!-- The Library's own sections share the tabs' line instead of taking one
        of their own under it. Only shown while the Library is. -->
   <div class="subnav offview" id="libnav"></div>
+  <!-- History, Recommendations and Drives: places you go from the Library,
+       not shelves of it. On the shelves' line, past a divider, in their own
+       quieter look. Drawn by drawLibNav() with the shelves. -->
+  <nav class="libplaces offview" id="libplaces" aria-label="More in your library"></nav>
   <nav class="tabs" role="tablist">
     <button class="tab" role="tab" aria-selected="false" data-view="now" title="Find something to watch">Now</button>
     <button class="tab" role="tab" aria-selected="true" data-view="library" title="view your collection">Library</button>
@@ -13782,11 +13796,6 @@ body.queue-docked #toast{left:calc(50% - 150px)}
 
 <!-- ================= LIBRARY ================= -->
 <div id="view-library">
-  <!-- History, Recommendations and Drives: places you go from the Library,
-       not shelves of it. First in the view so they sit in the same spot on
-       every section, and go with the view rather than leaving a blank strip
-       on the other tabs. Drawn by drawLibNav() with the shelves above. -->
-  <nav class="libplaces" id="libplaces" aria-label="More in your library"></nav>
   <!-- Asked once, when a cloud folder is found and sharing isn't set up.
        Either answer puts it away for good; Settings has it after that. -->
   <div class="syncoffer hidden" id="syncoffer">
@@ -14191,6 +14200,7 @@ function switchTo(view){
   document.querySelectorAll('.tab').forEach(x => x.setAttribute('aria-selected', x.dataset.view===view));
   ['now','library','rate','channels','settings'].forEach(v => $('#view-'+v).classList.toggle('hidden', v!==view));
   $('#libnav').classList.toggle('offview', view!=='library');
+  $('#libplaces').classList.toggle('offview', view!=='library');
   if(view==='now' && staleNow){ staleNow = false; loadTonight(); }
   if(view==='library'){
     drawLibNav(); applyLibSection(); libScanTick();
@@ -14768,8 +14778,11 @@ function drawLibNav(){
         '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
         + 'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
         + LIB_PLACE_ICONS[id] + '</svg>');
-    }
-    b.append(document.createTextNode(label));
+      /* The words go on narrow windows (see .libplace .lbl), so the name
+         lives in the tooltip and aria-label too. */
+      b.title = label; b.setAttribute('aria-label', label);
+      b.append(el('span','lbl', label));
+    } else b.append(document.createTextNode(label));
     if(id==='fav' && favCount!=null) b.append(el('span','count', String(favCount)));
     b.onclick = () => {
       libSection = id; libOffset = 0;

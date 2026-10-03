@@ -16,6 +16,24 @@ at the top.
 
 ---
 
+## 2026-10-03 — v0.1.46, one line after all
+
+Seen in use, the second row cost ~50px of every Library screen for three
+buttons, and the user asked for it back up on the shelves' line, keeping the
+new look and keeping it clearly a separate tier. `#libplaces` now lives in
+the masthead after `#libnav`, behind a hairline `--line` divider, and hides
+off the Library the same way the shelves do (`visibility`, so the main tabs
+never jump).
+
+Shelves, places and main tabs come to ~980px with every word in. Measured by
+narrowing the header in 4px steps: the line broke at 901-915px. Below a
+940px header (about a 990px window) the places drop their words and keep the
+icons, with the name in the tooltip and aria-label. The shelves keep their
+words because they're what you reach for most. After that, no width from
+1072 down to the 760px window minimum breaks the line.
+
+---
+
 ## 2026-10-03 — v0.1.45, two rows for the Library
 
 The user found FILMS-to-DRIVES too cluttered: six sections on one line, read
