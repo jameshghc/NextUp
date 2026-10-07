@@ -133,5 +133,43 @@ st, _h, body = call("GET", "/phone/file?key=e999002s1e2", token)
 check("missing file is 404", st == 404 and b"isn't on the drive" in body, (st, body))
 check("snapshot needs the token", call("GET", "/phone/snapshot")[0] == 401)
 
+# --- Task 4: sync exchange -------------------------------------------------------------
+n.CONFIG["sync_folder"] = ""
+n.log_event("movie", film_id, "Phone Test Film", "rated", value=8)
+st, h, body = call("GET", "/phone/sync", token)
+lines = [json.loads(l) for l in body.decode("utf-8").splitlines() if l.strip()] if st == 200 else []
+check("PC events go to the phone", any(l.get("tmdb") == "999001" and l.get("event") == "rated"
+                                       for l in lines), (st, len(lines)))
+mac = {"v": 1, "uid": "macuid1", "utc": time.time() - 50, "device_id": "mac0000000000000",
+       "device": "MacBook", "kind": "movie", "tmdb": "999001", "event": "watchlisted"}
+conn = n.db()
+conn.execute("INSERT OR IGNORE INTO sync_inbox (uid,device_id,device,utc,payload,applied)"
+             " VALUES (?,?,?,?,?,1)", (mac["uid"], mac["device_id"], "MacBook", mac["utc"],
+                                        json.dumps(mac)))
+conn.commit(); conn.close()
+body = call("GET", "/phone/sync", token)[2].decode("utf-8")
+check("Mac events are relayed", '"macuid1"' in body)
+
+def phone_line(uid, device_id, value):
+    return json.dumps({"v": 1, "uid": uid, "utc": time.time() + 1, "device_id": device_id,
+                       "device": "S24", "kind": "movie", "tmdb": "999001", "season": None,
+                       "episode": None, "show": None, "title": "Phone Test Film",
+                       "event": "rated", "value": value, "seconds": None,
+                       "position": None, "total": None}) + "\n"
+
+st, _h, body = call("POST", "/phone/sync", token, raw=phone_line("phoneuid1", PHONE, 9).encode())
+conn = n.db()
+rating = conn.execute("SELECT userrating FROM movies WHERE id=?", (film_id,)).fetchone()[0]
+conn.close()
+check("phone events land on the PC", st == 200 and json.loads(body).get("kept") == 1 and rating == 9,
+      (st, body, rating))
+raw = (phone_line("spoof1", n.sync_device_id(), 2) + phone_line("spoof2", "mac0000000000000", 2)).encode()
+st, _h, body = call("POST", "/phone/sync", token, raw=raw)
+check("foreign device lines dropped", st == 200 and json.loads(body).get("kept") == 0, body)
+st = call("POST", "/phone/sync", token, raw=b"x", headers={"Content-Length": str(21 * 1024 * 1024)})[0]
+check("oversized upload refused", st == 413, st)
+check("cloud folder untouched when sharing is off",
+      os.path.isfile(os.path.join(n.PHONE_SYNC_DIR, "device-%s.jsonl" % PHONE)))
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

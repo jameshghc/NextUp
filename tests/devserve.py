@@ -49,8 +49,12 @@ def isolate(n, sandbox):
     if os.path.isfile(n.YOUTUBE_PATH):
         shutil.copyfile(n.YOUTUBE_PATH, youtube)
     n.YOUTUBE_PATH = youtube
+    # A paired phone's history, when cloud sharing is off. Starts empty: a
+    # test that wants a phone pairs one.
+    n.PHONE_SYNC_DIR = os.path.join(sandbox, "nextup_phone_sync")
+    shutil.rmtree(n.PHONE_SYNC_DIR, ignore_errors=True)
     for name in ("DB_PATH", "CONFIG_PATH", "RECS_PATH", "PLAY_STATE_PATH",
-                 "WATCH_LATER", "ERROR_LOG", "YOUTUBE_PATH"):
+                 "WATCH_LATER", "ERROR_LOG", "YOUTUBE_PATH", "PHONE_SYNC_DIR"):
         path = os.path.abspath(getattr(n, name))
         if path.lower().startswith(live.lower()):
             raise SystemExit("refusing to start: %s still points at %s" % (name, path))

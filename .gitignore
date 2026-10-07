@@ -13,6 +13,8 @@ nextup_library.db-shm
 nextup_playing.json
 nextup_resume/
 nextup_dismissed.json
+# A paired phone's history, when cloud sharing is off.
+nextup_phone_sync/
 # The tests' scratch space: the sharing test's two pretend computers hold
 # copies of the library AND the config, passwords included.
 tests/_work/

@@ -92,6 +92,9 @@ DISMISS_PATH = os.path.join(HERE, "nextup_dismissed.json")
 # What the YouTube channels last read off each creator's uploads page: ids,
 # titles, lengths. Re-fetched daily, so it's a cache rather than data.
 YOUTUBE_PATH = os.path.join(HERE, "nextup_youtube.json")
+# Where a paired phone's history lands when cloud sharing is off — the same
+# one-file-per-device shape as the sharing folder, kept on this machine.
+PHONE_SYNC_DIR = os.path.join(HERE, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
@@ -11168,6 +11171,82 @@ def phone_path_for_key(key):
     return row["path"] if row else None
 
 
+PHONE_SYNC_MAX_BYTES = 20 * 1024 * 1024
+
+
+def phone_events_for(device_id):
+    """Everything the phone should know, as sharing-file lines: this PC's
+    own history, the seeds that describe what was true before there was
+    history, and what every OTHER device has told this one — the phone
+    can't read the cloud folder, so the Mac reaches it through here.
+
+    Built fresh each time and never marks anything shared: `shared` belongs
+    to the cloud folder, and the phone de-duplicates by uid anyway."""
+    me, name = sync_device_id(), snapshot_device_name()
+    conn = db()
+    try:
+        lines = _sync_seed_events(conn, me, name)
+        for r in conn.execute(
+                "SELECT * FROM history WHERE origin IS NULL AND uid IS NOT NULL"
+                " AND tmdb_id IS NOT NULL ORDER BY at ASC, id ASC"):
+            if r["kind"] not in SYNC_KINDS:
+                continue
+            row = dict(r)
+            if row["utc"] is None:
+                row["utc"] = stamp_seconds(row["at"]) or 0.0
+            lines.append(_sync_event_from_row(row, me, name))
+        for r in conn.execute("SELECT device_id,payload FROM sync_inbox ORDER BY utc ASC"):
+            if r["device_id"] != device_id:
+                try:
+                    lines.append(json.loads(r["payload"]))
+                except ValueError:
+                    pass
+    finally:
+        conn.close()
+    return "".join(json.dumps(x, ensure_ascii=False) + "\n" for x in lines)
+
+
+def phone_receive(device, text):
+    """Take the phone's whole sharing file and file it as that phone's.
+
+    Only lines in the phone's own name are kept. A phone speaks for itself:
+    a line claiming to be from this PC or the Mac would otherwise be
+    believed by every machine downstream, and nothing here could tell.
+
+    With cloud sharing on, the file goes straight into the shared folder —
+    this PC is only the courier, and the Mac reads it there like any other
+    device's. With it off, it's kept here and taken in on the spot."""
+    kept = []
+    for line in (text or "").splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(ev, dict) and ev.get("device_id") == device["id"]:
+            kept.append(json.dumps(ev, ensure_ascii=False))
+    folder = sync_dir(create=True) if (CONFIG.get("sync_folder") or "").strip() else None
+    local = folder is None
+    if local:
+        folder = PHONE_SYNC_DIR
+        os.makedirs(folder, exist_ok=True)
+    own = os.path.join(folder, "device-%s.jsonl" % device["id"])
+    with _SYNC_LOCK:
+        tmp = own + ".tmp"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("".join(x + "\n" for x in kept))
+        os.replace(tmp, own)
+        if local:
+            conn = db()
+            try:
+                if sync_import(conn, folder):
+                    sync_apply(conn)
+            finally:
+                conn.close()
+    if not local:
+        _SYNC_WAKE.set()
+    return len(kept)
+
+
 class PhoneHandler(BaseHTTPRequestHandler):
     """Everything a phone can ask for, and nothing else.
 
@@ -11274,6 +11353,14 @@ class PhoneHandler(BaseHTTPRequestHandler):
                                        "version": APP_VERSION})
             if route == "/phone/snapshot":
                 return self.send_json(phone_snapshot())
+            if route == "/phone/sync":
+                body = phone_events_for(device["id"]).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if route == "/phone/file":
                 return self.send_media((query.get("key") or [""])[0])
             if route.startswith("/phone/art/"):
@@ -11319,6 +11406,15 @@ class PhoneHandler(BaseHTTPRequestHandler):
             device = self.gate()
             if not device:
                 return
+            if route == "/phone/sync":
+                raw = self.read_raw(PHONE_SYNC_MAX_BYTES)
+                if raw is None:
+                    # Unread, so the connection can't be reused: say so.
+                    self.close_connection = True
+                    return self.send_json({"error": "that's far more history "
+                                                    "than a phone has"}, 413)
+                kept = phone_receive(device, raw.decode("utf-8", "replace"))
+                return self.send_json({"ok": True, "kept": kept})
             return self.send_json({"error": "no such thing"}, 404)
         except (ConnectionError, OSError):
             pass
