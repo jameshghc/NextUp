@@ -158,8 +158,11 @@ checked before the first snapshot.
 
 ### Your phone as a way in
 
-Three different projects wearing one name. The fork matters, so it needs a
-decision before any work:
+**Decided 2026-10-07:** a real Android app (BeeWare APK) for the user's
+S24 Ultra, Mac-style with its own library stored on the phone, paired with
+the PC over home Wi-Fi for the snapshot, sync and downloads. Design:
+`docs/superpowers/specs/2026-10-07-android-app-design.md`. The options
+below were the fork before that decision:
 
 - **A phone-shaped page served over Wi-Fi, playing on the PC.** The cheap
   one. `/remote` already exists and already carries a viewport meta; this
