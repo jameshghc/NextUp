@@ -67,8 +67,11 @@ routes move files to the Recycle Bin. Before anything else:
   sorter, the docking station, mpv control and library scans.
 - **Phone routes, and nothing else on the LAN listener:**
   - `GET  /phone/snapshot`: `build_library_snapshot()`, plus for each item
-    a file reference (size, and a stable key: tmdb id, or show tmdb id +
-    season + episode) so the phone can ask for the file.
+    a file reference (a stable key: tmdb id, or show tmdb id + season +
+    episode, and the extension) so the phone can ask for the file. No sizes:
+    stat-ing ~3,000 files on E: is the drive-stall risk the app already
+    guards against. The phone reads the size from the download's
+    Content-Length before committing space.
   - `GET  /phone/file?key=…`: streams the file, honouring `Range` so an
     interrupted download resumes. Only files the library knows can be
     asked for, so no path ever comes from the phone.
