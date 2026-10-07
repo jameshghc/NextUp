@@ -58,7 +58,7 @@ routes move files to the Recycle Bin. Before anything else:
 - **LAN listener, off by default.** A second listener on the PC's
   home-network address, turned on from Settings ("Let a phone connect"),
   on its own port (8790). The existing `127.0.0.1` server is unchanged.
-- **Pairing.** Settings shows a 4-digit code that's valid for a few
+- **Pairing.** Settings shows a 4-digit code that's valid for five
   minutes. The phone sends it and gets back a long random token. The PC
   stores the token against the device's name, and Settings lists paired
   phones with FORGET.
