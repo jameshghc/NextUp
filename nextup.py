@@ -98,7 +98,7 @@ PHONE_SYNC_DIR = os.path.join(HERE, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.47"
+APP_VERSION = "0.1.48"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -11035,6 +11035,10 @@ def remote_step_channel(step):
 # like any other, and one copied off this machine shouldn't let anything in.
 
 PHONE_PORT = 8790
+# Every interface, because which one is the home Wi-Fi isn't knowable in
+# advance. The private-address check in PhoneHandler is what narrows it.
+PHONE_HOST = "0.0.0.0"
+PHONE_LINK_ERROR = [None]
 PHONE_CODE_SECONDS = 300
 PHONE_CODE_TRIES = 5
 PHONE_PAIRING = {"code": None, "expires": 0, "tries": 0}
@@ -11460,6 +11464,59 @@ def _phone_answer_calls(sock, stop, http_port):
             continue
 
 
+def phone_addresses():
+    """This PC's addresses on the home network, for Settings to show — the
+    fallback when a phone can't find it by calling out."""
+    found = []
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            addr = ipaddress.ip_address(ip)
+            if addr.is_private and not addr.is_loopback and ip not in found:
+                found.append(ip)
+    except (OSError, ValueError):
+        pass
+    return found
+
+
+def phone_link_state():
+    """What Settings draws. Never a token, never a hash."""
+    cfg = phone_cfg()
+    live = PHONE_PAIRING["code"] and time.time() < PHONE_PAIRING["expires"]
+    return {
+        "enabled": bool(cfg["enabled"]),
+        "listening": _PHONE_SERVER[0] is not None,
+        "error": PHONE_LINK_ERROR[0],
+        "port": PHONE_PORT,
+        "addresses": phone_addresses(),
+        "pairing": ({"code": PHONE_PAIRING["code"],
+                     "left": int(PHONE_PAIRING["expires"] - time.time())} if live else None),
+        "devices": [{"id": d.get("id"), "name": d.get("name"),
+                     "paired_at": d.get("paired_at"), "last_seen": d.get("last_seen")}
+                    for d in cfg["devices"]],
+    }
+
+
+def phone_link_set(on):
+    """Turn the link on or off, and remember it. A port that won't open is
+    reported rather than raised: it mustn't stop Settings, or the app."""
+    cfg = phone_cfg()
+    cfg["enabled"] = bool(on)
+    save_json(CONFIG_PATH, CONFIG)
+    PHONE_LINK_ERROR[0] = None
+    if on:
+        try:
+            phone_link_start(PHONE_PORT, PHONE_HOST)
+        except OSError as exc:
+            PHONE_LINK_ERROR[0] = ("Couldn't open port %d for the phone: %s"
+                                   % (PHONE_PORT, exc))
+            log_problem("phone link start")
+    else:
+        phone_link_stop()
+        PHONE_PAIRING.update(code=None)
+    return phone_link_state()
+
+
 def phone_link_start(port=None, host="0.0.0.0", udp_port=None):
     """Start listening for the phone, and answering its call. Ports default
     to PHONE_PORT as it is now, not as it was when this was defined — the
@@ -11661,6 +11718,9 @@ class Handler(BaseHTTPRequestHandler):
 
             if route == "/api/sync/status":
                 return self.send_json(sync_state())
+
+            if route == "/api/phone":
+                return self.send_json(phone_link_state())
 
             if route == "/api/export":
                 return self.send_json(build_export(), filename="nextup-export.json",
@@ -11919,6 +11979,20 @@ class Handler(BaseHTTPRequestHandler):
         seen_you()
         data = self.read_body()
         try:
+            if route == "/api/phone/enable":
+                return self.send_json(phone_link_set(bool(data.get("on"))))
+
+            if route == "/api/phone/pair":
+                if not phone_cfg()["enabled"]:
+                    raise AppError("Turn on \"Let a phone connect\" first.")
+                phone_pair_start()
+                return self.send_json(dict(phone_link_state(),
+                                           code=PHONE_PAIRING["code"]))
+
+            if route == "/api/phone/forget":
+                phone_forget(str(data.get("id") or ""))
+                return self.send_json(phone_link_state())
+
             if route == "/api/scan":
                 if SCAN["running"]:
                     return self.send_json({"ok": True, "already": True})
@@ -14366,6 +14440,13 @@ header.mast .libplaces.offview{visibility:hidden}
 #sortaside summary:hover{color:var(--paper)}
 /* Dragged sideways, the box ran out of its card. */
 #c_folders{resize:vertical}
+/* The pairing code: read off a screen across the room, typed into a phone,
+   so it's the biggest thing on the card while it lasts. */
+.phonecode{margin:14px 0 6px;padding:14px 18px;border-radius:var(--r-card);
+  background:var(--surface-2);display:inline-block}
+.phonecodedigits{font-family:var(--mono);font-size:44px;letter-spacing:.3em;
+  color:var(--marigold);line-height:1.1;margin-right:-.3em}
+#phone_body .toprow .iconbtn{margin-left:auto}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
 </head>
@@ -14772,6 +14853,15 @@ header.mast .libplaces.offview{visibility:hidden}
     <div id="sync_body"><p class="empty">Checking…</p></div>
   </div>
 
+  <!-- ================= YOUR PHONE =================
+       The Android copy reaches this one over the home Wi-Fi: its library
+       list, downloads, and history both ways. Off until turned on here. -->
+  <div class="settings" id="phonesettings">
+    <h3>Your phone</h3>
+    <p class="empty">Next Up on your phone gets this library's list, downloads films to watch anywhere, and swaps ratings and history with this PC whenever both are on the same Wi-Fi. The phone finds this PC by itself. Windows may ask whether Python can use private networks &mdash; say yes, or the phone can&rsquo;t reach it.</p>
+    <div id="phone_body"><p class="empty">Checking…</p></div>
+  </div>
+
   <!-- ================= DOCKING STATION =================
        One-way, additive-only: reads from the library's own drives and
        writes to whatever's plugged in. Never touches or deletes the
@@ -14917,7 +15007,7 @@ function switchTo(view){
   }
   if(view==='rate'){ staleRatings = false; loadRatings(); }
   if(view==='channels') loadChannels();
-  if(view==='settings'){ loadData(); dockOnOpen(); syncLoad(); sorterLoad(); }
+  if(view==='settings'){ loadData(); dockOnOpen(); syncLoad(); sorterLoad(); phoneLoad(); }
 }
 
 /* The shell is a fixed-height column and only the panel inside a tab
@@ -19456,6 +19546,84 @@ function syncRender(s){
   body.append(btns);
 }
 
+/* ---------- your phone ---------- */
+/* While a code is up it's polled every second for the countdown — and so
+   the card notices the moment a phone uses it, since a used code vanishes
+   and the phone appears in the list. Stops when the code goes or the card
+   is left. */
+let phoneTimer = null;
+
+async function phoneLoad(){
+  clearTimeout(phoneTimer);
+  let s;
+  try{ s = await api('/api/phone'); }catch(e){ return; }
+  if(s && !s.error) phoneRender(s);
+}
+
+function phoneRender(s){
+  const body = $('#phone_body'); body.innerHTML = '';
+  clearTimeout(phoneTimer);
+  const toggle = el('label','toggle');
+  const box = el('input'); box.type = 'checkbox'; box.checked = !!s.enabled;
+  toggle.append(box, document.createTextNode(' Let a phone connect over Wi-Fi'));
+  box.onchange = async () => {
+    box.disabled = true;
+    const r = await post('/api/phone/enable', {on: box.checked});
+    if(!r.error) phoneRender(r); else box.disabled = false;
+  };
+  body.append(toggle);
+  if(s.error) body.append(el('div','notice bad','<p>'+esc(s.error)+'</p>'));
+  if(!s.enabled) return;
+
+  if(s.addresses && s.addresses.length){
+    body.append(el('p','libline', 'This PC on your Wi-Fi: '
+      + s.addresses.map(a => '<code>' + esc(a) + ':' + s.port + '</code>').join(' or ')));
+  }
+  if(s.pairing){
+    const live = el('div','phonecode');
+    live.append(el('div','phonecodedigits', esc(s.pairing.code)));
+    const left = Math.max(0, s.pairing.left);
+    live.append(el('div','libline', 'Type this on the phone · '
+      + Math.floor(left/60) + ':' + pad(left % 60) + ' left'));
+    body.append(live);
+    if(currentView === 'settings') phoneTimer = setTimeout(phoneLoad, 1000);
+  } else {
+    const row = el('div','rowbtns');
+    const pair = el('button','play','PAIR A PHONE');
+    pair.onclick = async () => {
+      pair.disabled = true;
+      const r = await post('/api/phone/pair');
+      if(!r.error) phoneRender(r);
+      else { pair.disabled = false; body.append(el('div','notice bad','<p>'+esc(r.error)+'</p>')); }
+    };
+    row.append(pair);
+    body.append(row);
+  }
+
+  const list = el('div');
+  if(!s.devices.length){
+    list.append(el('p','empty','No phone paired yet.'));
+  }
+  s.devices.forEach(d => {
+    const row = el('div','toprow');
+    row.append(el('div','pos',''));
+    const t = el('div','t');
+    t.append(document.createTextNode(d.name || 'a phone'));
+    t.append(el('small',null, esc('paired ' + (d.paired_at || '').slice(0, 10)
+      + '  ·  last seen ' + (d.last_seen || 'never'))));
+    row.append(t);
+    const forget = el('button','iconbtn','FORGET');
+    forget.title = 'This phone stops being able to connect. It can pair again with a new code.';
+    forget.onclick = async () => {
+      const r = await post('/api/phone/forget', {id: d.id});
+      if(!r.error) phoneRender(r);
+    };
+    row.append(forget);
+    list.append(row);
+  });
+  body.append(list);
+}
+
 async function syncOffer(){
   let s;
   try{ s = await api('/api/sync/status'); }catch(e){ return; }
@@ -20220,6 +20388,8 @@ def main():
     threading.Thread(target=playback_monitor, daemon=True).start()
     threading.Thread(target=sync_loop, daemon=True, name="sync").start()
     threading.Thread(target=refresh_watch_scores, daemon=True, name="watch scores").start()
+    if phone_cfg()["enabled"]:
+        phone_link_set(True)            # a port that won't open is reported, not fatal
 
     mode = (WINDOW or "auto").lower()
 

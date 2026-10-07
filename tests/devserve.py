@@ -81,6 +81,13 @@ def isolate(n, sandbox):
     # The copied config names the real downloads folder, where SORT THEM
     # moves real files. Tests that exercise the sorter set their own.
     n.CONFIG["downloads_folder"] = ""
+    # The phone link opens a port on the home network. Off in the sandbox,
+    # with no paired phones copied in; a test that wants it turns it on.
+    n.CONFIG["phone_link"] = {"enabled": False, "devices": []}
+    # And if one does, on this machine only, beside the real app's 8790:
+    # every interface would mean a Windows Firewall prompt on the desktop.
+    n.PHONE_HOST = "127.0.0.1"
+    n.PHONE_PORT = 8791
     with open(n.CONFIG_PATH, "w", encoding="utf-8") as fh:
         json.dump(n.CONFIG, fh)
 

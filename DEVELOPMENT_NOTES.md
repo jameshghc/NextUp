@@ -16,6 +16,53 @@ at the top.
 
 ---
 
+## 2026-10-07 — v0.1.48, the phone link (PC side)
+
+The user got a Galaxy S24 Ultra and wants Next Up on it the way the Mac
+has it: a separate app with its own library, stored on the phone (1 TB),
+populated by this one. Design: `docs/superpowers/specs/2026-10-07-android-
+app-design.md`. Plan for this step: `docs/superpowers/plans/2026-10-07-
+phone-link-pc-side.md`. The cloud-folder sharing the Mac uses can't reach a
+phone, because OneDrive on Android keeps no real folder. So the phone talks
+to this PC directly, over home Wi-Fi. This version is that PC side. The app
+itself comes next.
+
+**What's there.** A second server on port 8790, off until "Let a phone
+connect" is ticked in Settings → Your phone. It's served by `PhoneHandler`,
+a class with *only* the phone's routes. The allow-list holds by
+construction: the bin, settings, the sorter, mpv and scans aren't refused
+there, they don't exist. Requests from outside the private address ranges
+get 403, so a forwarded router port wouldn't put a 4-digit code on the
+internet.
+
+- **Pairing:** PAIR A PHONE shows a code for 5 minutes, which dies after
+  5 wrong tries. It's swapped for a `secrets.token_urlsafe(32)` token, and
+  only the token's SHA-256 is kept in the config.
+- **`/phone/snapshot`:** the library snapshot with a file key on everything
+  (`m<tmdb>`, `e<tmdb>s<n>e<n>`). It has no sizes: stat-ing ~3,000 files on
+  E: is the stall the app learned to fear, and the download states its own
+  size. No path ever comes from the phone.
+- **`/phone/file`:** ranged, so a dropped download resumes. A bad range
+  gets 416 with `bytes */size`. A drive that doesn't answer within the 3 s
+  check gets 503 ("try again"), not 404: asleep isn't gone.
+- **`/phone/sync`:**
+  - GET is this PC's history, the seeds, and every *other* device's events
+    from the inbox, so the Mac reaches the phone through here.
+  - POST is the phone's whole file, keeping only lines in the phone's own
+    name.
+  - With cloud sharing on, it's saved straight into the shared folder and
+    the Mac reads it there, with the PC as courier. With it off, it goes in
+    `nextup_phone_sync/` and is taken in on the spot.
+  - It never touches `history.shared`, which belongs to the cloud folder.
+- **Discovery:** the same port number answers `NEXTUP?` over UDP, so the
+  phone needs no IP address typed in.
+
+The sandbox (`isolate`) forces the link off and, if a test turns it on,
+binds 127.0.0.1:8791 only. Every interface would raise a Windows Firewall
+prompt on the user's desktop. Test: `phone_link_test.py` (36 checks).
+
+---
+
 ## 2026-10-03 — v0.1.47, Cold Ones #22, a channel from YouTube
 
 The user wanted Cold Ones on Next Up as a channel of their own, random

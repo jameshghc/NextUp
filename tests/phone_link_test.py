@@ -192,5 +192,65 @@ check("ignores anything else", shout(b"hello", 0.5) is None)
 n.phone_link_stop()
 check("silent once stopped", shout(b"NEXTUP?", 0.5) is None)
 
+# --- Task 6: Settings, through the desktop routes ---------------------------------------
+import subprocess, threading
+from http.server import ThreadingHTTPServer
+n.PHONE_PORT = PORT
+n.PHONE_HOST = "127.0.0.1"          # never every interface from a test: that's a firewall prompt
+desk = ThreadingHTTPServer(("127.0.0.1", 8798), n.Handler)
+threading.Thread(target=desk.serve_forever, daemon=True).start()
+def desk_call(method, path, body=None):
+    req = urllib.request.Request("http://127.0.0.1:8798" + path, method=method,
+                                 data=json.dumps(body).encode() if body is not None else None)
+    def parse(b):
+        try:
+            return json.loads(b or b"{}")
+        except ValueError:
+            return {}           # an HTML error page: the route isn't there
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, parse(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, parse(e.read())
+
+def hello_status(tok=None):
+    """The phone port's answer, or 0 when nothing is listening."""
+    try:
+        return call("GET", "/phone/hello", tok)[0]
+    except urllib.error.URLError:
+        return 0
+
+st, state = desk_call("POST", "/api/phone/enable", {"on": True})
+up = hello_status()
+check("enable starts the listener, and remembers", st == 200 and up == 401 and state.get("enabled")
+      and n.phone_cfg()["enabled"], (st, up, state.get("enabled")))
+st, pair = desk_call("POST", "/api/phone/pair")
+code = pair.get("code") or ""
+try:
+    st2, _h, body = call("POST", "/phone/pair", body={"code": code, "device_id": PHONE, "name": "S24 Ultra"})
+except urllib.error.URLError:
+    st2, body = 0, b"{}"
+token = json.loads(body).get("token") if st2 == 200 else ""
+state = desk_call("GET", "/api/phone")[1]
+state.setdefault("devices", [])
+check("a code from Settings pairs a phone, listed by name",
+      re.fullmatch(r"\d{4}", code) and token and [d["name"] for d in state["devices"]] == ["S24 Ultra"],
+      (code, st2, state.get("devices")))
+check("state hides secrets", token not in json.dumps(state) and "token_sha" not in json.dumps(state)
+      and state.get("port") == PORT, state)
+desk_call("POST", "/api/phone/forget", {"id": PHONE})
+check("forget from Settings locks it out", token and hello_status(token) == 401)
+desk_call("POST", "/api/phone/enable", {"on": False})
+check("turning it off closes the port, and remembers",
+      hello_status() == 0 and not n.phone_cfg()["enabled"])
+desk.shutdown()
+
+js = "\n;\n".join(re.findall(r"<script>(.*?)</script>", n.PAGE, re.S))
+open(os.path.join(WORK, "page.js"), "w", encoding="utf-8").write(js)
+r = subprocess.run(["node", "-e", "new Function(require('fs').readFileSync(process.argv[1],'utf8'));console.log('ok')",
+                    os.path.join(WORK, "page.js")], capture_output=True, text=True)
+check("page script parses", r.stdout.strip() == "ok", r.stderr[:300])
+check("the page has the phone card", 'id="phone_body"' in n.PAGE)
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
