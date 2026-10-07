@@ -48,5 +48,48 @@ check("bad device id refused", raises(n.phone_pair_finish, code, "../x", "S24 Ul
 n.phone_forget(PHONE)
 check("forget revokes", n.phone_device_for_token(token) is None)
 
+# --- Task 2: the listener and its gate -------------------------------------------
+import urllib.request, urllib.error
+PORT = 8799
+BASE = "http://127.0.0.1:%d" % PORT
+
+def call(method, path, token=None, body=None, headers=None, raw=None):
+    """(status, headers, bytes), errors returned rather than raised."""
+    data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
+    req = urllib.request.Request(BASE + path, data=data, method=method)
+    if token:
+        req.add_header("Authorization", "Bearer " + token)
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, r.headers, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers, e.read()
+
+n.phone_link_start(PORT, "127.0.0.1")
+code = n.phone_pair_start()["code"]
+st, _h, body = call("POST", "/phone/pair", body={"code": code, "device_id": PHONE, "name": "S24 Ultra"})
+token = json.loads(body).get("token") if st == 200 else None
+check("pairing over the wire", st == 200 and token, (st, body[:120]))
+st0 = call("GET", "/phone/hello")[0]
+st1, _h, body = call("GET", "/phone/hello", token)
+check("hello needs the token", st0 == 401 and st1 == 200
+      and json.loads(body).get("version") == n.APP_VERSION, (st0, st1, body[:120]))
+desk = [call("GET", p, token)[0] for p in ("/", "/api/status", "/api/library/status")] + \
+       [call("POST", p, token, body={})[0] for p in ("/api/sorter/aside", "/api/play")]
+check("desktop routes don't exist here, token or not", desk == [404] * 5, desk)
+code = n.phone_pair_start()["code"]
+wrong = "%04d" % ((int(code) + 1) % 10000)
+st = call("POST", "/phone/pair", body={"code": wrong, "device_id": PHONE, "name": "S24"})[0]
+check("wrong code over the wire is 403", st == 403, st)
+n.phone_link_stop()
+try:
+    call("GET", "/phone/hello", token); closed = False
+except urllib.error.URLError as exc:
+    closed = isinstance(exc.reason, ConnectionRefusedError) or "refused" in str(exc).lower()
+check("stop closes the port", closed)
+n.phone_link_start(PORT, "127.0.0.1")      # back up for what follows
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

@@ -11103,6 +11103,129 @@ def phone_forget(device_id):
     save_json(CONFIG_PATH, CONFIG)
 
 
+class PhoneHandler(BaseHTTPRequestHandler):
+    """Everything a phone can ask for, and nothing else.
+
+    A class of its own rather than Handler with a list of what's allowed:
+    an allow-list is one forgotten entry away from letting the bin through,
+    and a route this class doesn't have can't be reached however the
+    request is dressed up."""
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def send_json(self, obj, status=200):
+        body = json.dumps(obj).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def read_raw(self, limit):
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > limit:
+            return None
+        return self.rfile.read(length) if length else b""
+
+    def from_home(self):
+        """Loopback or the home network. A port forwarded on the router
+        would make this reachable from anywhere, which is not a thing a
+        pairing code was ever meant to stand up to."""
+        try:
+            ip = ipaddress.ip_address(self.client_address[0])
+        except ValueError:
+            return False
+        return ip.is_private or ip.is_loopback
+
+    def gate(self):
+        if not self.from_home():
+            self.send_json({"error": "only from the home network"}, 403)
+            return None
+        auth = self.headers.get("Authorization") or ""
+        device = phone_device_for_token(auth[7:] if auth.startswith("Bearer ") else "")
+        if not device:
+            self.send_json({"error": "not paired"}, 401)
+            return None
+        return device
+
+    def do_GET(self):
+        try:
+            device = self.gate()
+            if not device:
+                return
+            parsed = urllib.parse.urlparse(self.path)
+            route, query = parsed.path, urllib.parse.parse_qs(parsed.query)
+            if route == "/phone/hello":
+                return self.send_json({"ok": True, "pc": snapshot_device_name(),
+                                       "version": APP_VERSION})
+            return self.send_json({"error": "no such thing"}, 404)
+        except (ConnectionError, OSError):
+            pass                            # the phone went away mid-reply
+        except Exception as exc:
+            log_problem("phone GET %s" % self.path)
+            try:
+                self.send_json({"error": str(exc)}, 500)
+            except Exception:
+                pass
+
+    def do_POST(self):
+        try:
+            route = urllib.parse.urlparse(self.path).path
+            if route == "/phone/pair":
+                # The one way in without a token — it's how a token is got.
+                if not self.from_home():
+                    return self.send_json({"error": "only from the home network"}, 403)
+                try:
+                    data = json.loads((self.read_raw(4096) or b"{}").decode("utf-8"))
+                    token = phone_pair_finish(str(data.get("code") or ""),
+                                              str(data.get("device_id") or ""),
+                                              str(data.get("name") or ""))
+                except (ValueError, AttributeError):
+                    return self.send_json({"error": "that wasn't a pairing request"}, 400)
+                except AppError as exc:
+                    return self.send_json({"error": str(exc)}, 403)
+                return self.send_json({"token": token, "pc": snapshot_device_name()})
+            device = self.gate()
+            if not device:
+                return
+            return self.send_json({"error": "no such thing"}, 404)
+        except (ConnectionError, OSError):
+            pass
+        except Exception as exc:
+            log_problem("phone POST %s" % self.path)
+            try:
+                self.send_json({"error": str(exc)}, 500)
+            except Exception:
+                pass
+
+
+_PHONE_SERVER = [None]
+_PHONE_LOCK = threading.Lock()
+
+
+def phone_link_start(port=None, host="0.0.0.0"):
+    """Start listening for the phone. Port None means PHONE_PORT as it is
+    now, not as it was when this was defined — the tests move it."""
+    with _PHONE_LOCK:
+        if _PHONE_SERVER[0]:
+            return
+        server = ThreadingHTTPServer((host, port or PHONE_PORT), PhoneHandler)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True,
+                         name="phone link").start()
+        _PHONE_SERVER[0] = server
+
+
+def phone_link_stop():
+    with _PHONE_LOCK:
+        server, _PHONE_SERVER[0] = _PHONE_SERVER[0], None
+    if server:
+        server.shutdown()
+        server.server_close()
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
