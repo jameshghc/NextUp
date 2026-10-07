@@ -245,6 +245,75 @@ check("turning it off closes the port, and remembers",
       hello_status() == 0 and not n.phone_cfg()["enabled"])
 desk.shutdown()
 
+# --- final review fixes -------------------------------------------------------------------
+import http.client
+n.phone_link_start(PORT, "127.0.0.1")
+code = n.phone_pair_start()["code"]
+token = n.phone_pair_finish(code, PHONE, "S24 Ultra")
+
+# 1: a filename outside Latin-1 still downloads, named properly
+odd = os.path.join(WORK, "Don’t Look Up – 2021.mkv")
+open(odd, "wb").write(b"x" * 1000)
+conn = n.db()
+conn.execute("INSERT INTO movies (path,title,year,tmdb_id) VALUES (?,?,?,?)",
+             (odd, "Don't Look Up", 2021, "999003"))
+conn.commit(); conn.close()
+try:
+    st, h, body = call("GET", "/phone/file?key=m999003", token)
+    disp = h.get("Content-Disposition") or ""
+except Exception as exc:              # the bug: an error body inside a promised film
+    st, body, disp = repr(exc)[:80], b"", ""
+check("a curly-quoted filename downloads whole", st == 200 and body == b"x" * 1000
+      and "filename*=UTF-8''" in disp, (st, len(body), disp))
+
+# 2: a phone can't take another device's name — but a forgotten phone can come back
+check("a forgotten phone can pair again", token)
+code = n.phone_pair_start()["code"]
+why = raises(n.phone_pair_finish, code, n.sync_device_id(), "evil")
+check("can't pair as this PC", isinstance(why, str) and "already" in why, why)
+code = n.phone_pair_start()["code"]
+conn = n.db()
+conn.execute("INSERT OR IGNORE INTO sync_devices (device_id,name,events,last_utc,file_mtime)"
+             " VALUES ('cafe000000000000','MacBook',1,0,0)")
+conn.commit(); conn.close()
+why = raises(n.phone_pair_finish, code, "cafe000000000000", "evil")
+check("can't pair as a device already sharing (the Mac)", isinstance(why, str) and "already" in why, why)
+
+# 3: a failure writing the sync file is answered, not dropped
+real_receive = n.phone_receive
+def locked(device, text):
+    raise PermissionError(13, "The process cannot access the file because it is being used")
+n.phone_receive = locked
+try:
+    st, _h, body = call("POST", "/phone/sync", token, raw=b"\n")
+    answered = (st, json.loads(body).get("error"))
+except Exception as exc:
+    answered = (0, repr(exc))
+n.phone_receive = real_receive
+check("a locked sync file gets a 503 with a reason", answered[0] == 503 and answered[1], answered)
+
+# 4: a phone file with a line inserted part way still gets read in full
+later = phone_line("ins_b", PHONE, 7)
+call("POST", "/phone/sync", token, raw=later.encode())
+call("POST", "/phone/sync", token, raw=(phone_line("ins_a", PHONE, 6) + later).encode())
+conn = n.db()
+got = conn.execute("SELECT COUNT(*) FROM history WHERE uid='ins_a'").fetchone()[0]
+conn.close()
+check("an event inserted earlier in the phone's file isn't skipped", got == 1, got)
+
+# 5: turning it off ends connections already open, not just new ones
+c = http.client.HTTPConnection("127.0.0.1", PORT, timeout=5)
+c.request("GET", "/phone/hello", headers={"Authorization": "Bearer " + token})
+first = c.getresponse(); first.read()
+n.phone_link_stop()
+try:
+    c.request("GET", "/phone/hello", headers={"Authorization": "Bearer " + token})
+    second = c.getresponse().status
+except Exception:
+    second = None
+c.close()
+check("off means off, even mid-connection", first.status == 200 and second is None, (first.status, second))
+
 js = "\n;\n".join(re.findall(r"<script>(.*?)</script>", n.PAGE, re.S))
 open(os.path.join(WORK, "page.js"), "w", encoding="utf-8").write(js)
 r = subprocess.run(["node", "-e", "new Function(require('fs').readFileSync(process.argv[1],'utf8'));console.log('ok')",

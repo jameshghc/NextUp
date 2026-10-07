@@ -123,6 +123,13 @@ and the later UTC time wins. Only the transport is new:
   way.
 - That works whether or not OneDrive sharing is on at the PC. When it is,
   the phone's events reach the Mac through the PC as well.
+- **Import rule (from the v0.1.48 review):** the PC's `GET /phone/sync`
+  body is rebuilt fresh each time and is *not* append-only. Seeds come
+  first, and relayed events are ordered by time, so new lines can land
+  anywhere. The phone must import it **from offset 0 every time** (clear
+  its `sync_files` row first). uids make re-reading harmless, but resuming
+  from the old offset would skip events. The phone's own file must stay
+  append-only, because in cloud mode the Mac reads it by offset.
 - **When it runs:** on opening the app, when it returns to the
   foreground, and every five minutes while open on home Wi-Fi.
 - **Rules that must still hold** (from v0.1.22): applying an event never

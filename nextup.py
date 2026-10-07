@@ -11074,6 +11074,12 @@ def phone_pair_finish(code, device_id, name):
         raise AppError("That code has run out. Press PAIR A PHONE for a new one.")
     if not _PHONE_ID_RE.match(device_id or ""):
         raise AppError("That doesn't look like a Next Up phone.")
+    if phone_id_taken(device_id):
+        # A phone's history is filed under its id, and in the shared folder
+        # that file REPLACES whatever is there. Pairing as the Mac's id would
+        # quietly overwrite the Mac's history for everyone reading it.
+        raise AppError("Another device already uses that id. Reinstalling "
+                       "Next Up on the phone gives it a new one.")
     if not hmac.compare_digest(str(code or ""), live):
         PHONE_PAIRING["tries"] += 1
         if PHONE_PAIRING["tries"] >= PHONE_CODE_TRIES:
@@ -11086,11 +11092,35 @@ def phone_pair_finish(code, device_id, name):
     token = secrets.token_urlsafe(32)
     cfg = phone_cfg()
     cfg["devices"] = [d for d in cfg["devices"] if d.get("id") != device_id]
+    known = cfg.setdefault("known_ids", [])
+    if device_id not in known:
+        known.append(device_id)
     cfg["devices"].append({"id": device_id, "name": (name or "Phone")[:40],
                            "token_sha": _token_sha(token),
                            "paired_at": now_stamp(), "last_seen": now_stamp()})
     save_json(CONFIG_PATH, CONFIG)
     return token
+
+
+def phone_id_taken(device_id):
+    """Is this id already some other device's — this PC, or a computer that
+    shares through the cloud folder? A phone re-pairing under its own id is
+    fine; that's just pairing again."""
+    # A phone that was paired before, even one since forgotten, is pairing
+    # again: its own past history in the inbox is no reason to refuse it.
+    cfg = phone_cfg()
+    if device_id in cfg.get("known_ids", []) or             any(d.get("id") == device_id for d in cfg["devices"]):
+        return False
+    if device_id == sync_device_id():
+        return True
+    conn = db()
+    try:
+        return bool(conn.execute(
+            "SELECT 1 FROM sync_devices WHERE device_id=? UNION"
+            " SELECT 1 FROM sync_inbox WHERE device_id=? LIMIT 1",
+            (device_id, device_id)).fetchone())
+    finally:
+        conn.close()
 
 
 def phone_device_for_token(token):
@@ -11108,6 +11138,7 @@ def phone_forget(device_id):
     cfg = phone_cfg()
     cfg["devices"] = [d for d in cfg["devices"] if d.get("id") != device_id]
     save_json(CONFIG_PATH, CONFIG)
+    _phone_cut(device_id)       # including a download it's in the middle of
 
 
 def phone_file_key(kind, tmdb, season=None, episode=None):
@@ -11185,7 +11216,13 @@ def phone_events_for(device_id):
     can't read the cloud folder, so the Mac reaches it through here.
 
     Built fresh each time and never marks anything shared: `shared` belongs
-    to the cloud folder, and the phone de-duplicates by uid anyway."""
+    to the cloud folder.
+
+    NOT append-only — seeds come first and the relayed events are ordered
+    by time, so a line can appear anywhere. The phone must read the whole
+    of it every time (from offset 0), never resume from where it stopped:
+    uids make re-reading harmless, but resuming would skip whatever moved
+    in ahead of the old end."""
     me, name = sync_device_id(), snapshot_device_name()
     conn = db()
     try:
@@ -11242,6 +11279,12 @@ def phone_receive(device, text):
         if local:
             conn = db()
             try:
+                # From the top every time. sync_import carries on from where
+                # it last stopped, which assumes a file only ever grows at the
+                # end; this one arrives whole and could differ anywhere, and
+                # uids already make reading a line twice harmless.
+                conn.execute("DELETE FROM sync_files WHERE name=?",
+                             (os.path.basename(own),))
                 if sync_import(conn, folder):
                     sync_apply(conn)
             finally:
@@ -11262,6 +11305,44 @@ class PhoneHandler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         pass
+
+    # Every open connection, and whose it is, so that turning the link off
+    # or forgetting a phone ends a download already under way. Stopping
+    # the server only stops it ACCEPTING; a kept-alive connection would
+    # otherwise go on being served, two gigabytes of film included.
+    def setup(self):
+        super().setup()
+        self.replied = False
+        with _PHONE_LOCK:
+            _PHONE_CONNS[self.connection] = None
+
+    def finish(self):
+        with _PHONE_LOCK:
+            _PHONE_CONNS.pop(self.connection, None)
+        try:
+            super().finish()
+        except OSError:
+            pass
+
+    def send_response(self, code, message=None):
+        self.replied = True
+        super().send_response(code, message)
+
+    def failed(self, exc, method):
+        """Something went wrong that isn't the phone hanging up. Logged, and
+        answered with the reason if nothing has been sent yet — once a reply
+        has started there is no honest way to change it, so the connection
+        is closed instead and the phone sees the transfer fail. An OSError
+        (OneDrive holding the file, a full disk) is worth trying again."""
+        self.close_connection = True
+        log_problem("phone %s %s" % (method, self.path))
+        if self.replied:
+            return
+        try:
+            self.send_json({"error": str(exc) or exc.__class__.__name__},
+                           503 if isinstance(exc, OSError) else 500)
+        except Exception:
+            pass
 
     def send_json(self, obj, status=200):
         body = json.dumps(obj).encode("utf-8")
@@ -11309,8 +11390,15 @@ class PhoneHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(end - start + 1))
         self.send_header("Accept-Ranges", "bytes")
-        self.send_header("Content-Disposition",
-                         'attachment; filename="%s"' % os.path.basename(path).replace('"', ""))
+        # Headers are Latin-1. "Don’t Look Up – 2021" has two characters
+        # that aren't, and sending them raised half way through the reply —
+        # after a 200 had promised a film — so the phone got an error message
+        # where the film's first bytes should be. A plain fallback, and the
+        # real name the standard way (RFC 5987) beside it.
+        name = os.path.basename(path)
+        plain = name.encode("ascii", "replace").decode("ascii").replace("?", "_").replace('"', "")
+        self.send_header("Content-Disposition", "attachment; filename=\"%s\"; "
+                         "filename*=UTF-8''%s" % (plain, urllib.parse.quote(name, safe="")))
         if status == 206:
             self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
         self.end_headers()
@@ -11343,6 +11431,9 @@ class PhoneHandler(BaseHTTPRequestHandler):
         if not device:
             self.send_json({"error": "not paired"}, 401)
             return None
+        with _PHONE_LOCK:
+            if self.connection in _PHONE_CONNS:
+                _PHONE_CONNS[self.connection] = device["id"]
         return device
 
     def do_GET(self):
@@ -11381,14 +11472,10 @@ class PhoneHandler(BaseHTTPRequestHandler):
                 self.wfile.write(pic)
                 return
             return self.send_json({"error": "no such thing"}, 404)
-        except (ConnectionError, OSError):
-            pass                            # the phone went away mid-reply
+        except ConnectionError:
+            self.close_connection = True    # the phone went away mid-reply
         except Exception as exc:
-            log_problem("phone GET %s" % self.path)
-            try:
-                self.send_json({"error": str(exc)}, 500)
-            except Exception:
-                pass
+            self.failed(exc, "GET")
 
     def do_POST(self):
         try:
@@ -11420,17 +11507,14 @@ class PhoneHandler(BaseHTTPRequestHandler):
                 kept = phone_receive(device, raw.decode("utf-8", "replace"))
                 return self.send_json({"ok": True, "kept": kept})
             return self.send_json({"error": "no such thing"}, 404)
-        except (ConnectionError, OSError):
-            pass
+        except ConnectionError:
+            self.close_connection = True
         except Exception as exc:
-            log_problem("phone POST %s" % self.path)
-            try:
-                self.send_json({"error": str(exc)}, 500)
-            except Exception:
-                pass
+            self.failed(exc, "POST")
 
 
 _PHONE_SERVER = [None]
+_PHONE_CONNS = {}               # open socket -> the phone it belongs to, once known
 _PHONE_UDP = {"sock": None, "stop": None}
 _PHONE_LOCK = threading.Lock()
 
@@ -11544,7 +11628,22 @@ def phone_link_start(port=None, host="0.0.0.0", udp_port=None):
         _PHONE_UDP.update(sock=sock, stop=stop)
 
 
+def _phone_cut(device_id=None):
+    """End open connections: every one, or just one phone's. A shut socket
+    makes the handler's next read or write fail, which it takes as the
+    phone having gone."""
+    with _PHONE_LOCK:
+        doomed = [c for c, who in _PHONE_CONNS.items()
+                  if device_id is None or who == device_id]
+    for c in doomed:
+        try:
+            c.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+
 def phone_link_stop():
+    _phone_cut()
     with _PHONE_LOCK:
         server, _PHONE_SERVER[0] = _PHONE_SERVER[0], None
         sock, stop = _PHONE_UDP["sock"], _PHONE_UDP["stop"]

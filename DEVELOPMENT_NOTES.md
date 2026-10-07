@@ -57,9 +57,35 @@ internet.
 - **Discovery:** the same port number answers `NEXTUP?` over UDP, so the
   phone needs no IP address typed in.
 
+**The final review** (a fresh reviewer over the whole branch) found five
+things worth fixing before shipping, each now with a test that failed
+first:
+
+- **Downloads of files named outside Latin-1 broke.** A name like "Don’t
+  Look Up – 2021.mkv" raised while sending headers, after a 200 had
+  already promised a film, so the phone received an error message as the
+  film's opening bytes. The name now goes RFC 5987 style
+  (`filename*=UTF-8''…`).
+- **A phone could pair under the Mac's id or this PC's.** In cloud mode its
+  upload would then *replace* that device's history file. Ids already in
+  use are refused. A phone paired before (`known_ids`, kept after FORGET)
+  can always come back.
+- **`except OSError: pass` hid real failures.** OneDrive holding the file
+  meant a silently dropped connection. Now only a hang-up is quiet.
+  Anything else is logged and answered: 503 for an OSError, 500 otherwise,
+  or the connection is closed if a reply had already begun.
+- **The sync body isn't append-only, but sync_import resumes by offset.**
+  On the PC side the phone's file is now read from the top every time. The
+  phone side must do the same with the PC's; that rule is written into the
+  spec.
+- **Turning the link off didn't end connections already open.**
+  `server.shutdown()` only stops new ones, so a kept-alive connection went
+  on serving, a film download included. Open connections are tracked and
+  shut on stop, and on FORGET for that phone.
+
 The sandbox (`isolate`) forces the link off and, if a test turns it on,
 binds 127.0.0.1:8791 only. Every interface would raise a Windows Firewall
-prompt on the user's desktop. Test: `phone_link_test.py` (36 checks).
+prompt on the user's desktop. Test: `phone_link_test.py` (43 checks).
 
 ---
 
