@@ -91,5 +91,47 @@ except urllib.error.URLError as exc:
 check("stop closes the port", closed)
 n.phone_link_start(PORT, "127.0.0.1")      # back up for what follows
 
+# --- Task 3: snapshot and downloads ------------------------------------------------
+film_path = os.path.join(WORK, "phone_film.mkv")
+ep_path = os.path.join(WORK, "phone_ep.mkv")
+data = bytes(range(256)) * (3 * 4096)               # 3 MiB, every byte position distinct mod 256
+open(film_path, "wb").write(data)
+open(ep_path, "wb").write(bytes(range(256)) * 4096)  # 1 MiB
+conn = n.db()
+cur = conn.execute("INSERT INTO movies (path,title,year,tmdb_id) VALUES (?,?,?,?)",
+                   (film_path, "Phone Test Film", 2020, "999001"))
+film_id = cur.lastrowid
+cur = conn.execute("INSERT INTO shows (name,title,tmdb_id) VALUES (?,?,?)",
+                   ("phone test show", "Phone Test Show", "999002"))
+conn.execute("INSERT INTO episodes (path,show_id,season,episode) VALUES (?,?,?,?)",
+             (ep_path, cur.lastrowid, 1, 2))
+conn.commit(); conn.close()
+
+st, _h, body = call("GET", "/phone/snapshot", token)
+snap = json.loads(body) if st == 200 else {}
+fm = next((m for m in snap.get("movies") or [] if m.get("tmdb_id") == "999001"), {})
+ep = next((e for e in snap.get("episodes") or [] if e.get("show_tmdb_id") == "999002"), {})
+check("snapshot has keys", fm.get("key") == "m999001" and fm.get("ext") == ".mkv"
+      and ep.get("key") == "e999002s1e2", (st, fm.get("key"), fm.get("ext"), ep.get("key")))
+st, h, body = call("GET", "/phone/file?key=m999001", token)
+check("whole file", st == 200 and body == data and int(h["Content-Length"]) == len(data)
+      and h.get("Accept-Ranges") == "bytes", (st, len(body)))
+st, h, body = call("GET", "/phone/file?key=m999001", token, headers={"Range": "bytes=1048576-"})
+check("resume from the middle", st == 206 and body == data[1048576:]
+      and h.get("Content-Range") == "bytes 1048576-3145727/3145728", (st, h.get("Content-Range")))
+st, h, body = call("GET", "/phone/file?key=m999001", token, headers={"Range": "bytes=10-19"})
+check("a slice", st == 206 and body == data[10:20], (st, len(body)))
+bad = []
+for rng in ("bytes=999999999-", "bytes=abc", "bytes=5-2"):
+    st, h, _b = call("GET", "/phone/file?key=m999001", token, headers={"Range": rng})
+    bad.append((st, h.get("Content-Range")))
+check("bad ranges are 416", bad == [(416, "bytes */3145728")] * 3, bad)
+st = call("GET", "/phone/file?key=m1", token)[0]
+check("unknown key is 404", st == 404, st)
+os.remove(ep_path)
+st, _h, body = call("GET", "/phone/file?key=e999002s1e2", token)
+check("missing file is 404", st == 404 and b"isn't on the drive" in body, (st, body))
+check("snapshot needs the token", call("GET", "/phone/snapshot")[0] == 401)
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

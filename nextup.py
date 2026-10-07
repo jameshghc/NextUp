@@ -11103,6 +11103,71 @@ def phone_forget(device_id):
     save_json(CONFIG_PATH, CONFIG)
 
 
+def phone_file_key(kind, tmdb, season=None, episode=None):
+    """How the phone names a file it wants. Never a path: what's on this
+    PC's drives, and where, is not the phone's business, and a path from
+    a request is how a server ends up handing out files it shouldn't."""
+    if kind == "movie":
+        return "m%s" % tmdb
+    return "e%ss%de%d" % (tmdb, int(season), int(episode))
+
+
+def phone_snapshot():
+    """The library snapshot, with a key and an extension on everything that
+    has a file. No sizes: stat-ing three thousand files on a drive that
+    spins down is the stall this app already learned to fear, and the
+    download says its own size before a byte of it arrives."""
+    snap = build_library_snapshot()
+    conn = db()
+    try:
+        film_ext = dict((r["tmdb_id"], os.path.splitext(r["path"] or "")[1].lower())
+                        for r in conn.execute(
+                            "SELECT tmdb_id,path FROM movies WHERE tmdb_id IS NOT NULL"
+                            " AND tmdb_id <> '' ORDER BY id DESC"))
+        ep_ext = dict(((r["t"], r["season"], r["episode"]),
+                       os.path.splitext(r["path"] or "")[1].lower())
+                      for r in conn.execute(
+                          "SELECT s.tmdb_id t, e.season, e.episode, e.path FROM episodes e"
+                          " JOIN shows s ON s.id=e.show_id WHERE s.tmdb_id IS NOT NULL"
+                          " ORDER BY e.id DESC"))
+    finally:
+        conn.close()
+    for m in snap["movies"]:
+        if m["tmdb_id"] in film_ext:
+            m["key"] = phone_file_key("movie", m["tmdb_id"])
+            m["ext"] = film_ext[m["tmdb_id"]]
+    for e in snap["episodes"]:
+        found = (e["show_tmdb_id"], e["season"], e["episode"])
+        if found in ep_ext and e["season"] is not None and e["episode"] is not None:
+            e["key"] = phone_file_key("episode", *found)
+            e["ext"] = ep_ext[found]
+    return snap
+
+
+_PHONE_KEY_RE = re.compile(r"^(?:m(\w+)|e(\w+?)s(\d+)e(\d+))$")
+
+
+def phone_path_for_key(key):
+    """The file a key names, from the database alone. With two copies of
+    one film, the first one added."""
+    m = _PHONE_KEY_RE.match(key or "")
+    if not m:
+        return None
+    conn = db()
+    try:
+        if m.group(1):
+            row = conn.execute("SELECT path FROM movies WHERE tmdb_id=? ORDER BY id LIMIT 1",
+                               (m.group(1),)).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT e.path FROM episodes e JOIN shows s ON s.id=e.show_id"
+                " WHERE s.tmdb_id=? AND e.season=? AND e.episode=? ORDER BY e.id LIMIT 1",
+                (m.group(2), int(m.group(3)), int(m.group(4)))).fetchone()
+    finally:
+        conn.close()
+    return row["path"] if row else None
+
+
 class PhoneHandler(BaseHTTPRequestHandler):
     """Everything a phone can ask for, and nothing else.
 
@@ -11128,6 +11193,53 @@ class PhoneHandler(BaseHTTPRequestHandler):
         if length > limit:
             return None
         return self.rfile.read(length) if length else b""
+
+    def send_media(self, key):
+        """A library file, whole or from a byte onwards. Ranges are what let
+        a download that dropped half way pick up where it stopped instead of
+        starting a two-gigabyte film again."""
+        path = phone_path_for_key(key)
+        if not path:
+            return self.send_json({"error": "not in the library"}, 404)
+        there = media_file_check(path)
+        if there is None:
+            return self.send_json({"error": "the drive isn't answering — try again "
+                                            "in a minute"}, 503)
+        if not there:
+            return self.send_json({"error": "the file isn't on the drive"}, 404)
+        size = os.path.getsize(path)
+        start, end, status = 0, size - 1, 200
+        wanted = self.headers.get("Range")
+        if wanted:
+            m = re.fullmatch(r"bytes=(\d+)-(\d*)", wanted.strip())
+            if m:
+                start = int(m.group(1))
+                end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+            if not m or start >= size or end < start:
+                self.send_response(416)
+                self.send_header("Content-Range", "bytes */%d" % size)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            status = 206
+        self.send_response(status)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(end - start + 1))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Disposition",
+                         'attachment; filename="%s"' % os.path.basename(path).replace('"', ""))
+        if status == 206:
+            self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
+        self.end_headers()
+        with open(path, "rb") as fh:
+            fh.seek(start)
+            left = end - start + 1
+            while left > 0:
+                chunk = fh.read(min(left, 1024 * 1024))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                left -= len(chunk)
 
     def from_home(self):
         """Loopback or the home network. A port forwarded on the router
@@ -11160,6 +11272,23 @@ class PhoneHandler(BaseHTTPRequestHandler):
             if route == "/phone/hello":
                 return self.send_json({"ok": True, "pc": snapshot_device_name(),
                                        "version": APP_VERSION})
+            if route == "/phone/snapshot":
+                return self.send_json(phone_snapshot())
+            if route == "/phone/file":
+                return self.send_media((query.get("key") or [""])[0])
+            if route.startswith("/phone/art/"):
+                name = art_filename("/" + route[len("/phone/art/"):])
+                path = os.path.join(ART_DIR, name) if name else None
+                if not path or not os.path.isfile(path):
+                    return self.send_json({"error": "no such picture"}, 404)
+                with open(path, "rb") as fh:
+                    pic = fh.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(pic)))
+                self.end_headers()
+                self.wfile.write(pic)
+                return
             return self.send_json({"error": "no such thing"}, 404)
         except (ConnectionError, OSError):
             pass                            # the phone went away mid-reply
