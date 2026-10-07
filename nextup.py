@@ -34,12 +34,15 @@ up and you've backed up your ratings, your progress and the lot.
 
 import glob
 import hashlib
+import hmac
+import ipaddress
 import json
 import math
 import os
 import queue
 import random
 import re
+import secrets
 import shutil
 import socket
 import struct
@@ -11013,6 +11016,92 @@ def remote_step_channel(step):
 # ===========================================================================
 # HTTP server
 # ===========================================================================
+
+# --- the phone link ---------------------------------------------------------------
+#
+# How the Android copy reaches this one: over the home Wi-Fi, to a second
+# server of its own on PHONE_PORT, which is off until you turn it on in
+# Settings. The desktop server on 127.0.0.1 doesn't change at all — it has
+# routes that bin files and rewrite settings, and none of that should ever be
+# a network request away from anything.
+#
+# A phone earns its way in once, with a four-digit code this PC shows for
+# five minutes and kills after five wrong guesses (ten thousand codes, five
+# goes: one chance in two thousand). The code is swapped for a long random
+# token, and only the token's hash is kept here — the config file is a file
+# like any other, and one copied off this machine shouldn't let anything in.
+
+PHONE_PORT = 8790
+PHONE_CODE_SECONDS = 300
+PHONE_CODE_TRIES = 5
+PHONE_PAIRING = {"code": None, "expires": 0, "tries": 0}
+_PHONE_ID_RE = re.compile(r"^[0-9a-f]{16}$")
+
+
+def phone_cfg():
+    cfg = CONFIG.get("phone_link")
+    if not isinstance(cfg, dict):
+        cfg = CONFIG["phone_link"] = {"enabled": False, "devices": []}
+    cfg.setdefault("enabled", False)
+    cfg.setdefault("devices", [])
+    return cfg
+
+
+def _token_sha(token):
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def phone_pair_start():
+    """A fresh code, replacing any still live. Pressing PAIR A PHONE again is
+    how you'd get a new one, so it starts the clock and the tries over."""
+    PHONE_PAIRING.update(code="%04d" % secrets.randbelow(10000),
+                         expires=time.time() + PHONE_CODE_SECONDS, tries=0)
+    return {"code": PHONE_PAIRING["code"], "expires": PHONE_PAIRING["expires"]}
+
+
+def phone_pair_finish(code, device_id, name):
+    """The token for a phone that knows the code, or AppError saying why not."""
+    live = PHONE_PAIRING["code"]
+    if not live or time.time() > PHONE_PAIRING["expires"]:
+        PHONE_PAIRING.update(code=None)
+        raise AppError("That code has run out. Press PAIR A PHONE for a new one.")
+    if not _PHONE_ID_RE.match(device_id or ""):
+        raise AppError("That doesn't look like a Next Up phone.")
+    if not hmac.compare_digest(str(code or ""), live):
+        PHONE_PAIRING["tries"] += 1
+        if PHONE_PAIRING["tries"] >= PHONE_CODE_TRIES:
+            # Five goes, then nothing: guessing is ten thousand codes, and
+            # this keeps it to five of them per press of the button.
+            PHONE_PAIRING.update(code=None)
+            raise AppError("Too many wrong codes. Press PAIR A PHONE for a new one.")
+        raise AppError("That's not the code on the PC.")
+    PHONE_PAIRING.update(code=None)           # one phone per code
+    token = secrets.token_urlsafe(32)
+    cfg = phone_cfg()
+    cfg["devices"] = [d for d in cfg["devices"] if d.get("id") != device_id]
+    cfg["devices"].append({"id": device_id, "name": (name or "Phone")[:40],
+                           "token_sha": _token_sha(token),
+                           "paired_at": now_stamp(), "last_seen": now_stamp()})
+    save_json(CONFIG_PATH, CONFIG)
+    return token
+
+
+def phone_device_for_token(token):
+    if not token:
+        return None
+    sha = _token_sha(token)
+    for d in phone_cfg()["devices"]:
+        if hmac.compare_digest(d.get("token_sha") or "", sha):
+            d["last_seen"] = now_stamp()
+            return d
+    return None
+
+
+def phone_forget(device_id):
+    cfg = phone_cfg()
+    cfg["devices"] = [d for d in cfg["devices"] if d.get("id") != device_id]
+    save_json(CONFIG_PATH, CONFIG)
+
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
