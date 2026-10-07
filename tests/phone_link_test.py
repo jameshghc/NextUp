@@ -171,5 +171,26 @@ check("oversized upload refused", st == 413, st)
 check("cloud folder untouched when sharing is off",
       os.path.isfile(os.path.join(n.PHONE_SYNC_DIR, "device-%s.jsonl" % PHONE)))
 
+# --- Task 5: being found -------------------------------------------------------------
+import socket
+def shout(msg, wait):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(wait)
+    try:
+        s.sendto(msg, ("127.0.0.1", PORT))
+        return s.recvfrom(4096)[0]
+    except (socket.timeout, ConnectionResetError):
+        return None
+    finally:
+        s.close()
+
+reply = shout(b"NEXTUP?", 2)
+info = json.loads(reply) if reply else {}
+check("answers the call", info.get("nextup") == 1 and info.get("port") == PORT
+      and info.get("version") == n.APP_VERSION, info)
+check("ignores anything else", shout(b"hello", 0.5) is None)
+n.phone_link_stop()
+check("silent once stopped", shout(b"NEXTUP?", 0.5) is None)
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

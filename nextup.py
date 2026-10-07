@@ -11427,25 +11427,75 @@ class PhoneHandler(BaseHTTPRequestHandler):
 
 
 _PHONE_SERVER = [None]
+_PHONE_UDP = {"sock": None, "stop": None}
 _PHONE_LOCK = threading.Lock()
 
 
-def phone_link_start(port=None, host="0.0.0.0"):
-    """Start listening for the phone. Port None means PHONE_PORT as it is
-    now, not as it was when this was defined — the tests move it."""
+def _phone_answer_calls(sock, stop, http_port):
+    """Answer "NEXTUP?" from anything on the home network with where to
+    find the link, so pairing never starts with typing an IP address.
+    Anything else, or from anywhere else, gets nothing at all."""
+    while not stop.is_set():
+        try:
+            data, sender = sock.recvfrom(512)
+        except socket.timeout:
+            continue
+        except OSError:
+            # Windows reports an earlier reply that couldn't be delivered as
+            # an error on the NEXT receive. Not ours to care about — unless
+            # the socket itself has been closed, which is how stopping ends this.
+            if stop.is_set():
+                return
+            continue
+        if data != b"NEXTUP?":
+            continue
+        try:
+            ip = ipaddress.ip_address(sender[0])
+            if not (ip.is_private or ip.is_loopback):
+                continue
+            sock.sendto(json.dumps({"nextup": 1, "pc": snapshot_device_name(),
+                                    "port": http_port, "version": APP_VERSION}).encode(),
+                        sender)
+        except (OSError, ValueError):
+            continue
+
+
+def phone_link_start(port=None, host="0.0.0.0", udp_port=None):
+    """Start listening for the phone, and answering its call. Ports default
+    to PHONE_PORT as it is now, not as it was when this was defined — the
+    tests move it — and the call is answered on the same number as the
+    link itself, UDP rather than TCP."""
     with _PHONE_LOCK:
         if _PHONE_SERVER[0]:
             return
-        server = ThreadingHTTPServer((host, port or PHONE_PORT), PhoneHandler)
+        port = port or PHONE_PORT
+        server = ThreadingHTTPServer((host, port), PhoneHandler)
         server.daemon_threads = True
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(1.0)
+            sock.bind((host, udp_port or port))
+        except OSError:
+            server.server_close()
+            raise
         threading.Thread(target=server.serve_forever, daemon=True,
                          name="phone link").start()
+        stop = threading.Event()
+        threading.Thread(target=_phone_answer_calls, args=(sock, stop, port),
+                         daemon=True, name="phone link call").start()
         _PHONE_SERVER[0] = server
+        _PHONE_UDP.update(sock=sock, stop=stop)
 
 
 def phone_link_stop():
     with _PHONE_LOCK:
         server, _PHONE_SERVER[0] = _PHONE_SERVER[0], None
+        sock, stop = _PHONE_UDP["sock"], _PHONE_UDP["stop"]
+        _PHONE_UDP.update(sock=None, stop=None)
+    if stop:
+        stop.set()
+    if sock:
+        sock.close()
     if server:
         server.shutdown()
         server.server_close()
