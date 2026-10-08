@@ -139,6 +139,12 @@ plan = post("/api/dock/plan", {"items": selection, "dest": DEST})
 check("the plan prices only what isn't there yet, against the phone's free space",
       plan.get("count") == 3 and plan.get("already") == 1 and plan.get("free", 0) > 80e9
       and plan.get("fits"), plan)
+sizes = plan.get("items") or {}
+check("the plan sizes each ticked item, so the tray can show it",
+      sizes.get("movie:%d" % film_id, {}).get("bytes") == 300000
+      and sizes.get("tvshow:%d" % show_id, {}).get("bytes") == 410000
+      and sizes.get("movie:%d" % have_id, {}).get("already") == 1
+      and sizes.get("movie:%d" % have_id, {}).get("bytes") == 0, sizes)
 check("the Drives view says the phone's free space", (cat.get("free") or 0) > 80e9, cat.get("free"))
 
 # --- the copy -------------------------------------------------------------------------------
@@ -177,6 +183,8 @@ check("the Settings docking station is gone", "<h3>Docking station</h3>" not in 
       and 'id="dock_drive"' not in page)
 check("Drives holds the library view, the copy tray and the mode switch",
       all(x in drives_html for x in ('id="drv_mode"', 'id="drv_lib"', 'id="seltray"', 'id="tray_add"')))
+check("the tray lists what's ticked, with sizes", 'id="tray_list"' in drives_html
+      and "function trayQuote" in page)
 
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

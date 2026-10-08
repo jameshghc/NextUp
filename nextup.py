@@ -108,7 +108,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.52"
+APP_VERSION = "0.1.53"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -12833,7 +12833,19 @@ class Handler(BaseHTTPRequestHandler):
                 present_keys = set(id(i) for i in present)
                 to_copy = [i for i in sized if id(i) not in present_keys]
                 total_bytes = sum(i["size"] for i in to_copy)
+                # Per poster, for the tray's list of what's ticked: what
+                # each one adds to the copy, and how many of its files are
+                # on the drive already.
+                per_key = {}
+                for i in sized:
+                    row = per_key.setdefault(i["key"], {"bytes": 0, "files": 0, "already": 0})
+                    row["files"] += 1
+                    if id(i) in present_keys:
+                        row["already"] += 1
+                    else:
+                        row["bytes"] += i["size"]
                 return self.send_json({
+                    "items": per_key,
                     "count": len(to_copy), "bytes": total_bytes,
                     "already": len(present),
                     "already_bytes": sum(i["size"] for i in present),
@@ -13837,11 +13849,18 @@ section:first-child{margin-top:0}
   background-color:var(--surface);background-image:var(--sheen);box-shadow:var(--shadow-card);
 }
 .seltray .selcount{font-family:var(--display);font-weight:700;font-size:14px;flex:none}
+.seltray .selcount.over{color:var(--rust)}
 .seltray .seldrive{flex:none}
 .seltray .seldrive select{min-width:220px;padding:7px 10px}
 .seltray .play{padding:8px 18px;font-size:13px}
 .seltray .selstatus{flex-basis:100%;font-family:var(--mono);font-size:11px;color:var(--muted);letter-spacing:.04em}
 .seltray .selstatus:empty{display:none}
+.seltray .sellist{flex-basis:100%;display:flex;flex-wrap:wrap;gap:6px}
+.seltray .sellist:empty{display:none}
+.seltray .sellist span{font-family:var(--mono);font-size:11px;letter-spacing:.04em;padding:4px 9px;border-radius:999px;background:var(--bg);color:var(--text);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.seltray .sellist span b{font-weight:400;color:var(--muted);margin-left:6px}
+.seltray .sellist span.there b{color:var(--teal)}
+.seltray .sellist span.gone b{color:var(--rust)}
 .seltray .selstatus .progress{margin-top:8px}
 .seltray .selstatus.bad{color:var(--rust)}
 .seltray .selstatus.good{color:var(--teal)}
@@ -15222,6 +15241,7 @@ header.mast .libplaces.offview{visibility:hidden}
       <button class="play" id="tray_add" disabled>COPY TO DRIVE</button>
       <button class="iconbtn hidden" id="tray_cancel">CANCEL</button>
       <button class="iconbtn" id="tray_clear">CLEAR</button>
+      <div class="sellist" id="tray_list"></div>
       <div class="selstatus" id="tray_status"></div>
     </div>
   </div>
@@ -16084,7 +16104,7 @@ function driveOnOpen(){
 /* Whichever view is up, read again for the drive now picked. */
 function drvRefresh(fresh){
   if(drvMode === 'drive'){ drvLoad(fresh); return; }
-  trayResetConfirm(); trayUpdate();
+  trayResetConfirm(); trayQuote();
   if(drvLibSeq === 0 || fresh) drvLibLoad(); else trayPresence();
 }
 
@@ -16979,7 +16999,40 @@ function toggleTicked(item, tileEl){
   if(dockSelected.has(key)) dockSelected.delete(key);
   else dockSelected.set(key, {kind:item.kind, id:item.id, title:item.title});
   if(tileEl) tileEl.classList.toggle('picked', dockSelected.has(key));
-  trayUpdate();
+  trayResetConfirm(); trayUpdate(); trayQuote();
+}
+
+/* What's ticked, each with its size, and the total against the drive's
+   free space — asked again a moment after the ticking stops, since every
+   source file is stat'd to answer and a sleeping drive can take a while. */
+let quoteSeq = 0, quoteTimer = null, lastQuote = null;
+function trayQuote(){
+  clearTimeout(quoteTimer);
+  const seq = ++quoteSeq;
+  const dest = $('#drv_pick').value;
+  const vals = [...dockSelected.values()];
+  if(!vals.length || !dest){ lastQuote = null; trayList(); trayUpdate(); return; }
+  trayList();
+  quoteTimer = setTimeout(async () => {
+    const plan = await post('/api/dock/plan', {items: vals.map(v => ({kind:v.kind, id:v.id})), dest});
+    if(seq !== quoteSeq) return;           // ticked again since; that answer is coming
+    lastQuote = plan && !plan.error ? plan : null;
+    trayList(); trayUpdate();
+  }, 350);
+}
+
+function trayList(){
+  const box = $('#tray_list');
+  const sizes = (lastQuote && lastQuote.items) || {};
+  box.innerHTML = [...dockSelected.entries()].map(([key, v]) => {
+    const row = sizes[key];
+    let size, cls = '';
+    if(!lastQuote) size = '…';
+    else if(!row){ size = 'not found'; cls = 'gone'; }
+    else if(!row.bytes && row.already){ size = 'on drive'; cls = 'there'; }
+    else size = dockGB(row.bytes) + (row.already ? ' · ' + row.already + ' on drive' : '');
+    return '<span class="' + cls + '" title="' + esc(v.title || '') + '">' + esc(v.title || key) + '<b>' + esc(size) + '</b></span>';
+  }).join('');
 }
 
 function paintTicks(){
@@ -17048,7 +17101,7 @@ function clearDriveMark(t){
 
 $('#tray_clear').onclick = () => {
   dockSelected.clear();
-  paintTicks(); trayUpdate(); trayResetConfirm();
+  paintTicks(); trayUpdate(); trayResetConfirm(); trayQuote();
 };
 
 function trayUpdate(){
@@ -17059,9 +17112,15 @@ function trayUpdate(){
   if(films) parts.push(films + (films === 1 ? ' film' : ' films'));
   if(shows) parts.push(shows + (shows === 1 ? ' show' : ' shows'));
   const there = vals.filter(v => { const p = lastPresence[v.kind + ':' + v.id]; return p && p.have >= p.of; }).length;
+  let price = '';
+  if(vals.length && lastQuote){
+    price = ' · ' + dockGB(lastQuote.bytes) + ' to copy';
+    if(lastQuote.free != null) price += lastQuote.fits ? ' of ' + dockGB(lastQuote.free) + ' free' : ' — only ' + dockGB(lastQuote.free) + ' free';
+  }
   $('#tray_count').textContent = vals.length
-    ? vals.length + ' ticked · ' + parts.join(', ') + (there ? ' · ' + there + ' already on drive' : '')
+    ? vals.length + ' ticked · ' + parts.join(', ') + (there ? ' · ' + there + ' already on drive' : '') + price
     : 'Nothing ticked yet';
+  $('#tray_count').classList.toggle('over', !!(vals.length && lastQuote && !lastQuote.fits));
   $('#tray_add').disabled = !(vals.length && $('#drv_pick').value) || trayPhase === 'running';
 }
 
@@ -17146,6 +17205,7 @@ async function trayPoll(){
              goes on — the other way round, "Done" vanished at once. */
           dockSelected.clear();
           document.querySelectorAll('#drv_lib .tile.picked').forEach(t => t.classList.remove('picked'));
+          trayQuote();
           if(ticking()) await trayPresence();
           trayNote(esc((s.step === 'Cancelled' ? 'Cancelled — ' : 'Done — ') + (bits.join(', ') || 'nothing copied.'))
                    + (s.errors.length ? '<br>' + esc(s.errors.slice(0, 3).join('; ')) : ''),

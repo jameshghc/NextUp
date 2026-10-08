@@ -16,6 +16,22 @@ at the top.
 
 ---
 
+## 2026-10-08 — v0.1.53, sizes in the copy tray
+
+The user asked for sizes as you tick. The tray now lists every ticked film
+or show with what it adds to the copy ("on drive" when it's there already,
+"3.4 GB · 2 on drive" for a show partly there), and the count line carries
+the total against the drive's free space, red when it won't fit.
+
+- `/api/dock/plan` returns `items`: per poster key, `bytes` still to copy,
+  `files`, and `already` on the drive.
+- `trayQuote()` asks it 350 ms after the ticking stops (every source file
+  is stat'd, and a sleeping drive can be slow), with a sequence guard so a
+  late answer can't overwrite a newer one. Ticking, CLEAR, a drive change
+  and a finished copy all re-ask.
+- Ticking while CONFIRM — COPY x GB was showing now puts the button back
+  to COPY TO DRIVE: the price it showed was for a different selection.
+
 ## 2026-10-08 — v0.1.52, one place to fill a drive: Library › Drives
 
 The user's call: the docking station lives in Drives, and you fill a drive
