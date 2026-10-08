@@ -108,7 +108,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.49"
+APP_VERSION = "0.1.50"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -14741,6 +14741,26 @@ header.mast .libplaces.offview{visibility:hidden}
 .phonecodedigits{font-family:var(--mono);font-size:44px;letter-spacing:.3em;
   color:var(--marigold);line-height:1.1;margin-right:-.3em}
 #phone_body .toprow .iconbtn{margin-left:auto}
+/* -- the phone ------------------------------------------------------------------ */
+/* The Android app's page is ~384px wide; the desktop window never goes below
+   760, so nothing under 600 is ever the desktop. Everything here is the
+   phone, and only the phone. */
+@media (max-width:600px){
+  /* The main tabs first, the Library's own rows under them: wrapped, the
+     masthead put Films / TV above Now / Library, the wrong way up. */
+  header.mast .tabs{order:-1;margin-left:0;width:100%;justify-content:space-between}
+  /* A film's page, one column. The desktop's poster-beside-text grid left
+     the words a 73px strip, one per line; cast and similar sat in 157px
+     side columns. Poster above, words full width, panels stacked. */
+  .sheet{padding:12px 8px}
+  .sheetstack{grid-template-columns:minmax(0,1fr);gap:12px}
+  .sheetpanel,.sheetbody{padding:18px}
+  .sheetpanel.main,.sheetbody{grid-template-columns:minmax(0,1fr);gap:14px}
+  .sheetpanel.main img,.sheetbody img{width:150px}
+  .sheetpanel h2,.sheetbody h2{font-size:28px}
+  .castgrid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}
+  .simgrid{grid-template-columns:repeat(auto-fill,minmax(96px,1fr))}
+}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
 </head>

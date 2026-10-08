@@ -16,6 +16,59 @@ at the top.
 
 ---
 
+## 2026-10-08 — v0.1.50, the phone on the cable, and a first phone layout
+
+Asked for in one go on the S21, the test phone:
+
+- **Film & TV.** The library folder is `Movies/Film & TV` (`Films/`,
+  `TV/`), the user's own, which already held films. The old default is
+  swapped over where it was the only folder.
+- **Dark bars.** The status bar, navigation bar and launch screen use
+  `#060509` with light icons. That's the pyproject colours, plus a run-time
+  call for the navigation bar, which Briefcase's theme doesn't reach.
+- **The phone on the cable** (Settings › Your phone › On the cable). The
+  desktop app sees a phone plugged in with USB debugging allowed, by its
+  own name, with its free space. **SEND MY LIBRARY** goes through an adb
+  tunnel to the phone app's own server. It sets the TMDB key (the user
+  chose this, so the phone can identify its own files and they match the
+  catalogue rather than appearing twice), imports the catalogue (the phone
+  fetches posters as it goes), then has the phone scan. It **never sends a
+  video file**: the user's explicit condition, and tested.
+  - Sent for real: 567 films, 78 shows, 2,409 episodes, 645 posters.
+    Everything not on the phone shows greyed, "ON DESKTOP-O2K6QB8".
+- **The Show list** is Show all / Part way through / Watchlist / On this
+  device.
+  - Not rated yet, Rated and Favourites are gone. The Favourites section
+    is now the only way to favourites, and the list narrows it: shelves
+    combine, as in `favourite+here`.
+  - "Not on this device" was tried and dropped, at the user's word: nobody
+    wants to see only what isn't there.
+- **A stale-grid bug, old.** Two Library loads in flight could draw in
+  either order, so switching Favourites → Films quickly showed favourites
+  under FILMS, 4 times out of 4. Loads are now numbered, and only the
+  latest draws.
+- **The phone layout, first pass.** A `max-width:600px` block at the end of
+  the main stylesheet; the desktop window never goes under 760, so it's
+  phone-only.
+  - The main tabs move above the Library's rows.
+  - A film or show page goes to one column. It had been the desktop grid,
+    which left the text a 73 px strip, one word per line. Now the text is
+    317 px wide, with cast and similar stacked underneath.
+  - The desktop is unchanged, measured: 180 + 662 px columns, side panels
+    451 + 451.
+
+Also in this batch:
+
+- **A clean-up mistake.** `check_storage.py`'s clean-up never ran, twice:
+  `adb shell` joins its arguments for the phone's shell, which read the `&`
+  in "Film & TV" as "background" and the brackets as syntax. It left two
+  51 MB dummies on the phone, now removed, and the paths are now quoted.
+- **mpv on the phone stays a separate install.** It's the mpv app, handed
+  each film by intent in step 5. Building libmpv in is possible, but
+  that's native builds, ~50 MB, and our own player controls.
+
+---
+
 ## 2026-10-08 — v0.1.49, Next Up runs on Android (the shell)
 
 Step 3 of the Android plan (`docs/superpowers/plans/2026-10-08-android-
