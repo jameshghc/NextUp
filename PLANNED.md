@@ -9,20 +9,27 @@ summarised away and files don't.
 
 ---
 
-## Android app: where it stands (parked 2026-10-08)
+## Android app: where it stands (2026-10-08)
 
-- **Done:** step 1, the PC side of the phone link (v0.1.48, merged). Step 2,
-  the toolchain in `X:\DevTools`: Briefcase venv, JDK 17, Android SDK
-  (licences accepted by the user), Python 3.14 building fine. The full chain
-  is proven on the test phone, a Galaxy S21 Ultra on Android 15 with USB
-  debugging on.
-- **Next:** step 3, ready to go:
-  `docs/superpowers/plans/2026-10-08-android-shell.md` (three tasks, about
-  an hour, mostly build waits). Needs the S21 plugged in and unlocked, and
-  the user's tap on the video-permission prompt in task 3. Execute it
-  Native, the same way as step 1.
-- The throwaway probe app is still installed on the S21
-  (`app.nextup.nextupprobe`). Task 3 removes it.
+- **Done:** step 1 (PC phone link, v0.1.48), step 2 (toolchain in
+  `X:\DevTools`), step 3 (v0.1.49): Next Up runs on the test phone, a
+  Galaxy S21 Ultra (Android 15), as `app.nextup.mobile`. Data lives in the
+  app's private folder, films in `Movies/Next Up/` (video permission
+  allowed by the user). Build with `python androiduild.py`. Check with
+  `android\check_device.py`, `check_page.py` and `check_storage.py`.
+- **Next, spec step 4:** pairing with the PC from the phone, the snapshot,
+  downloads, and sync. Then **step 5**, playback through mpv-android,
+  which replaces the desktop Play/mpv wording. Then **step 6**, the phone
+  layout pass: hide the docking station, sorter and remote; bottom nav;
+  the "U0_a429"/"localhost" names; scan after the permission is granted;
+  external links; Back button; `allowBackup`.
+- **Deferred minors from the step 3 review:**
+  - `check_storage` hard-codes port 8770;
+  - no Android ≤12 storage permission;
+  - `first_run_library` re-adds the folder if emptied;
+  - the APK version is duplicated from `APP_VERSION`;
+  - `check_page.js` needs Node 22+;
+  - snapshot import looks in `HERE`.
 
 ## Next up (parked 2026-10-03)
 
