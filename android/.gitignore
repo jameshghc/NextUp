@@ -1,0 +1,9 @@
+# Briefcase's output and logs.
+build/
+logs/
+# Copied in by build.py from the repo root — the originals are the source.
+src/nextup.py
+src/nextup_fonts/
+src/nextup_logo.png
+# What check_device.py saved from the phone.
+check/

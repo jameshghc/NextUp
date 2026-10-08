@@ -1,0 +1,38 @@
+# The Android app. Built with Briefcase from the toolchain in X:\DevTools —
+# see build.py, which also copies nextup.py and its assets in beside it.
+[tool.briefcase]
+project_name = "Next Up"
+bundle = "app.nextup"
+version = "0.1.49"
+url = "https://nextup.app/"
+license = "Proprietary"
+author = "jambo"
+author_email = "jcarstairs@live.co.uk"
+
+[tool.briefcase.app.mobile]
+formal_name = "Next Up"
+description = "Your films and TV, on the phone."
+long_description = """Next Up, with a library of what's on the phone."""
+# The app's own code, then Next Up itself and what it serves, all side by
+# side: nextup.py finds its fonts and logo beside its own file.
+sources = [
+    "src/mobile",
+    "src/nextup.py",
+    "src/nextup_fonts",
+    "src/nextup_logo.png",
+]
+requires = []
+
+[tool.briefcase.app.mobile.android]
+requires = [
+    "toga-android~=0.5.0",
+]
+# No title bar: the page has its own header.
+base_theme = "Theme.MaterialComponents.NoActionBar"
+build_gradle_dependencies = [
+    "com.google.android.material:material:1.13.0",
+    "androidx.webkit:webkit:1.15.0",
+]
+build_gradle_extra_content = """
+chaquopy.defaultConfig.staticProxy("toga_android.widgets.internal.webview")
+"""
