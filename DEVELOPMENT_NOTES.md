@@ -16,6 +16,23 @@ at the top.
 
 ---
 
+## 2026-10-09 — v0.1.55 (cont.), a film finished on the phone counts as watched
+
+Reading mpv-android's own source (MPVActivity.kt) for the audio-delay
+question turned up a mistake in v0.1.54: it sends no `end_by` at all. Back
+press gives `position` and `duration` (ms); a file that runs out closes
+through its shutdown path with RESULT_OK, action
+`is.xyz.mpv.MPVActivity.result`, and no time extras. `player_report` now
+reads that as the end. `android_play_finished` ignores an "end" within
+MIN_WATCH_SECONDS of opening, since a file mpv can't play closes the same
+way.
+
+Also learned, for the audio delay: mpv-android reads `decode_mode`, `subs`,
+`subs.enable`, `position`, `title` and `filepath` — no audio delay. It does
+turn a content:// into the real path, so `use-filedir-conf` was a thought,
+but it holds only READ_MEDIA_* permissions and a .conf isn't media: scoped
+storage won't let it read one. Delay on the phone needs a player of our own.
+
 ## 2026-10-09 — v0.1.55, audio delay remembered per film and episode
 
 The user fixes a lot of downloads by -100ms on the remote, every time.

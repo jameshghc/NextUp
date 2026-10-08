@@ -20932,7 +20932,10 @@ def android_play_finished(position=None, duration=None, completed=False):
     ran_for = time.time() - (sitting.get("started_at") or time.time())
     if completed:
         # mpv reports no position when the file runs out: the end is the
-        # position.
+        # position. It closes the same way when it couldn't play the file at
+        # all, though, so a close that soon after opening is not a watch.
+        if ran_for < MIN_WATCH_SECONDS:
+            return
         try:
             _record_play("movies" if kind == "movie" else "episodes", kind, item_id,
                          seconds=ran_for, position=duration, total=duration)

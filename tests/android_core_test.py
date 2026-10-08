@@ -73,6 +73,13 @@ n.android_play_finished(position=1500, duration=6000, completed=False)
 out["after_stop"] = row()
 post("/api/play", {"type": "movie", "id": fid})
 out["handed_after_stop"] = handed[-1]
+# mpv closing at the end straight after opening — a file it couldn't play
+# closes the same way — isn't a film watched.
+n._ANDROID_SITTING["started_at"] = n.time.time()
+n.android_play_finished(position=None, duration=None, completed=True)
+out["closed_at_once"] = row()
+post("/api/play", {"type": "movie", "id": fid})
+n._ANDROID_SITTING["started_at"] = n.time.time() - 3600
 n.android_play_finished(position=None, duration=None, completed=True)
 out["after_end"] = row()
 n.android_play_finished(position=10, duration=6000, completed=False)
@@ -142,6 +149,8 @@ check("stopping in mpv part way saves where you got to", out.get("after_stop") =
       or out.get("after_stop") == [1500, 0], out.get("after_stop"))
 check("and the next PLAY starts there", (out.get("handed_after_stop") or [0, 0])[1] == 1500,
       out.get("handed_after_stop"))
+check("closing at the end seconds after opening doesn't count as watched",
+      out.get("closed_at_once") == [1500, 0], out.get("closed_at_once"))
 check("seeing it to the end counts it watched, and clears the resume point",
       out.get("after_end") == [0, 1], out.get("after_end"))
 check("a report from mpv with nothing playing changes nothing", out.get("stray_finish") == [0, 1],

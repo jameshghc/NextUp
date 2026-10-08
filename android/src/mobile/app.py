@@ -48,8 +48,9 @@ OLD_DEFAULT = "/storage/emulated/0/Movies/Next Up"
 # they don't frame the page in Android's default teal and white.
 INK = "#060509"
 VIDEO_PERMISSION = "android.permission.READ_MEDIA_VIDEO"
-# mpv for Android, from the Play Store.
+# mpv for Android, from the Play Store, and what it calls its answer.
 MPV_PACKAGE = "is.xyz.mpv"
+MPV_RESULT = "is.xyz.mpv.MPVActivity.result"
 
 
 def first_run_library(nextup):
@@ -136,7 +137,7 @@ def open_in_player(app, nextup, path, start):
 
     def closed(code, data):
         try:
-            nextup.android_play_finished(**player_report(data))
+            nextup.android_play_finished(**player_report(code, data))
         except Exception:
             traceback.print_exc()
 
@@ -163,20 +164,21 @@ def open_in_player(app, nextup, path, start):
         raise failed[0]
 
 
-def player_report(data):
-    """What mpv hands back as it closes (the MX Player convention): where it
-    stopped and the file's length, in milliseconds, when you leave part
-    way; "playback_completion" when it ran to the end. Another player may
-    hand back nothing at all, which records nothing."""
+def player_report(code, data):
+    """What mpv hands back as it closes: where it stopped and the file's
+    length, in milliseconds, when you back out part way. When the file runs
+    to the end it closes with a plain OK and no position — that's the end.
+    Another player, or a cancelled one, hands back nothing usable, which
+    records nothing."""
+    RESULT_OK = -1
     extras = data.getExtras() if data is not None else None
-    if extras is None:
-        return {}
-    if extras.getString("end_by") == "playback_completion":
+    position = extras.getInt("position", -1) if extras is not None else -1
+    duration = extras.getInt("duration", -1) if extras is not None else -1
+    if position >= 0 and duration > 0:
+        return {"position": position / 1000.0, "duration": duration / 1000.0}
+    if code == RESULT_OK and data is not None and data.getAction() == MPV_RESULT:
         return {"completed": True}
-    position, duration = extras.getInt("position", -1), extras.getInt("duration", -1)
-    if position < 0 or duration <= 0:
-        return {}
-    return {"position": position / 1000.0, "duration": duration / 1000.0}
+    return {}
 
 
 def media_uri(activity, path):
