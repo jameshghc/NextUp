@@ -20,8 +20,10 @@ at the top.
 
 From the user on the S21 and S24U.
 
-- **Full screen** (app.py `full_screen`): status and navigation bars hidden
-  (a swipe in shows them for a moment), and `layoutInDisplayCutoutMode =
+- **Full screen** (app.py `full_screen`): the status bar hidden (a swipe
+  down shows it for a moment) — the navigation bar too at first, but the
+  user wanted Samsung's back/home/recents kept, so it stays, and only
+  statusBars + displayCutout are zeroed below — and `layoutInDisplayCutoutMode =
   SHORT_EDGES`. That alone left a 75px strip at the camera end in
   landscape: Briefcase's MainActivity gives the page MARGINS for system
   bars + display cutout, from a listener on the page view — which toga

@@ -88,10 +88,10 @@ def dark_bars(app):
 
 
 def full_screen(app):
-    """The whole screen for Next Up: the clock-and-notifications bar and the
-    navigation bar hidden while it's open (a swipe in from the edge shows
-    them for a moment, as in a game or a video app), and the page allowed
-    beside the camera instead of a grey strip there in landscape."""
+    """More of the screen for Next Up: the clock-and-notifications bar
+    hidden while it's open (a swipe down from the top shows it for a
+    moment), and the page allowed beside the camera instead of a grey strip
+    there in landscape. The navigation bar stays — the user wants it."""
     try:
         from java import jclass
         WindowCompat = jclass("androidx.core.view.WindowCompat")
@@ -105,7 +105,7 @@ def full_screen(app):
         window.setAttributes(attrs)
         bars = Controller(window, window.getDecorView())
         bars.setSystemBarsBehavior(Controller.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE)
-        bars.hide(Types.systemBars())
+        bars.hide(Types.statusBars())
         no_margins(app)
     except Exception:
         traceback.print_exc()
@@ -114,11 +114,12 @@ def full_screen(app):
 def no_margins(app):
     """Briefcase's launcher keeps the page clear of the bars AND the camera
     cutout by giving it margins, which in landscape left a strip down the
-    camera end even with the bars hidden. Its handler sits on the page
-    itself, which the app replaces after this runs — so the answer is given
-    one level up instead: the container the page sits in passes on no bars
-    and no cutout, and the launcher's own handler then sets no margins. A
-    bar swiped in for a moment floats over the page."""
+    camera end even with the status bar hidden. Its handler sits on the
+    page itself, which the app replaces after this runs — so the answer is
+    given one level up instead: the container the page sits in passes on no
+    status bar and no cutout, and the launcher's own handler then keeps
+    only the navigation bar's margin. A status bar swiped in for a moment
+    floats over the page."""
     from java import jclass, dynamic_proxy
     Listener = jclass("androidx.core.view.OnApplyWindowInsetsListener")
     ViewCompat = jclass("androidx.core.view.ViewCompat")
@@ -126,7 +127,7 @@ def no_margins(app):
     Types = jclass("androidx.core.view.WindowInsetsCompat$Type")
     Insets = jclass("androidx.core.graphics.Insets")
     content = app._impl.native.findViewById(jclass("android.R$id").content)
-    edges = Types.systemBars() | Types.displayCutout()
+    edges = Types.statusBars() | Types.displayCutout()
 
     class Edge(dynamic_proxy(Listener)):
         def onApplyWindowInsets(self, view, insets):
