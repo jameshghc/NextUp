@@ -15,7 +15,7 @@ summarised away and files don't.
   `X:\DevTools`), step 3 (v0.1.49): Next Up runs on the test phone, a
   Galaxy S21 Ultra (Android 15), as `app.nextup.mobile`. Data lives in the
   app's private folder, films in `Movies/Next Up/` (video permission
-  allowed by the user). Build with `python androiduild.py`. Check with
+  allowed by the user). Build with `python android\build.py`. Check with
   `android\check_device.py`, `check_page.py` and `check_storage.py`.
 - **Next, spec step 4:** pairing with the PC from the phone, the snapshot,
   downloads, and sync. Then **step 5**, playback through mpv-android,
