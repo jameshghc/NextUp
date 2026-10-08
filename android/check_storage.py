@@ -28,7 +28,11 @@ def main():
     dummy = os.path.join(tempfile.gettempdir(), "nextup_check_film.mkv")
     with open(dummy, "wb") as fh:
         fh.truncate(51 * 1024 * 1024)
-    adb("shell", "mkdir", "-p", PHONE_DIR)
+    # One quoted string: adb hands "shell" its words joined by spaces, to the
+    # phone's own shell, and that shell then reads the "&" in "Film & TV" as
+    # "run in the background" and the brackets as syntax. Unquoted, the
+    # dummy was never removed — twice, before this was noticed.
+    adb("shell", "mkdir -p '%s'" % PHONE_DIR)
     adb("push", dummy, PHONE_FILE)
     adb("forward", "tcp:%d" % LOCAL_PORT, "tcp:%d" % APP_PORT)
     try:
@@ -50,7 +54,7 @@ def main():
         print("FAIL  the scan found nothing")
         return 1
     finally:
-        adb("shell", "rm", "-rf", PHONE_DIR)
+        adb("shell", "rm -rf '%s'" % PHONE_DIR)
         adb("forward", "--remove", "tcp:%d" % LOCAL_PORT)
         os.remove(dummy)
 

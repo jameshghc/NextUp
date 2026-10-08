@@ -11667,6 +11667,165 @@ def phone_link_stop():
         server.server_close()
 
 
+# --- the phone over USB ----------------------------------------------------------------
+#
+# The plugged-in way to the phone, beside the Wi-Fi link above: when the
+# phone is on the cable with USB debugging allowed, this app can see it and
+# hand the Next Up on it the whole catalogue. It goes through adb, the
+# Android tool that came with the build kit, and a tunnel adb makes from a
+# port here to the phone app's own server — so it's the phone app that does
+# the importing, by its own routes, exactly as if it had asked.
+#
+# SEND MY LIBRARY sends the catalogue and the TMDB key, and nothing else. It
+# never sends a video: copying films is something you choose film by film,
+# and a button that might start pushing two terabytes at a phone is not one
+# anybody should be able to press by accident.
+
+USB_PHONE_PACKAGE = "app.nextup.mobile"
+USB_PHONE_PORTS = range(8770, 8776)     # where the phone app may be serving
+USB_SEND = {"running": False, "step": "", "result": None, "error": None}
+_USB_LOCK = threading.Lock()
+
+
+def usb_adb_path():
+    """Where adb is: set by hand, on PATH, in a normal Android SDK, or in the
+    build kit this project's Android app is made with."""
+    found = (CONFIG.get("adb_path") or "").strip() or shutil.which("adb")
+    if found and os.path.isfile(found):
+        return found
+    local = os.environ.get("LOCALAPPDATA") or ""
+    for path in (os.path.join(local, "Android", "Sdk", "platform-tools", "adb.exe"),
+                 r"X:\DevTools\briefcase-data\tools\android_sdk\platform-tools\adb.exe"):
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def usb_adb(*args, timeout=15):
+    """Run adb and return what it printed. Never raises for adb's sake: a
+    phone pulled out mid-question is an answer, not a crash."""
+    import subprocess
+    exe = usb_adb_path()
+    if not exe:
+        return ""
+    try:
+        out = subprocess.run([exe] + list(args), capture_output=True, timeout=timeout,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return out.stdout.decode("utf-8", "replace")
+
+
+def usb_phone_state():
+    """What's on the cable, in words a person would use."""
+    if not usb_adb_path():
+        return {"found": False, "why": "The Android tool adb isn't set up on this PC, "
+                                       "so a phone on the cable can't be seen."}
+    rows = [l.split() for l in usb_adb("devices", "-l").splitlines()[1:] if l.strip()]
+    ready = [r for r in rows if len(r) > 1 and r[1] == "device"]
+    if not ready:
+        if any(len(r) > 1 and r[1] == "unauthorized" for r in rows):
+            return {"found": False, "why": "The phone is plugged in but hasn't allowed this "
+                                           "PC yet — tap Allow on its USB debugging prompt."}
+        return {"found": False, "why": "No phone plugged in, or USB debugging is off."}
+    serial = ready[0][0]
+
+    def ask(*a):
+        return usb_adb("-s", serial, *a).strip()
+
+    name = ask("shell", "settings", "get", "global", "device_name") \
+        or ask("shell", "getprop", "ro.product.model")
+    free_gb = None
+    lines = ask("shell", "df", "-k", "/storage/emulated").splitlines()
+    try:
+        free_gb = round(int(lines[-1].split()[3]) / 1024 / 1024, 1)
+    except (IndexError, ValueError):
+        pass
+    installed = ("package:" + USB_PHONE_PACKAGE) in ask(
+        "shell", "pm", "list", "packages", "--user", "0", USB_PHONE_PACKAGE).split()
+    return {"found": True, "serial": serial, "name": name, "free_gb": free_gb,
+            "app_installed": installed,
+            "app_running": bool(ask("shell", "pidof", USB_PHONE_PACKAGE))}
+
+
+def _usb_phone_call(local, method, path, body=None, timeout=30):
+    req = urllib.request.Request(
+        "http://127.0.0.1:%d%s" % (local, path), method=method,
+        data=json.dumps(body).encode("utf-8") if body is not None else None,
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read() or b"{}")
+
+
+def usb_send_library(step=None):
+    """Give the phone app the catalogue — every film and show, rated or not —
+    and the TMDB key, then have it scan its own folder. What it has itself
+    then shows in full; everything else greyed out, as on the PC's side.
+
+    step: called with a few words as it goes, for the page to show."""
+    say = step or (lambda words: None)
+    state = usb_phone_state()
+    if not state["found"]:
+        raise AppError(state["why"])
+    if not state["app_installed"]:
+        raise AppError("Next Up isn't installed on the phone yet.")
+    if not state["app_running"]:
+        raise AppError("Open Next Up on the phone first, then press this again.")
+    serial = state["serial"]
+    local = None
+    try:
+        say("Finding Next Up on the phone")
+        for port in USB_PHONE_PORTS:
+            tunnel = usb_adb("-s", serial, "forward", "tcp:0", "tcp:%d" % port).strip()
+            if not tunnel.isdigit():
+                continue
+            try:
+                if _usb_phone_call(int(tunnel), "GET", "/api/status", timeout=5).get("version"):
+                    local = int(tunnel)
+                    break
+            except Exception:
+                pass
+            usb_adb("-s", serial, "forward", "--remove", "tcp:" + tunnel)
+        if not local:
+            raise AppError("Next Up is open on the phone but isn't answering. "
+                           "Close it, open it again, and retry.")
+        if CONFIG.get("tmdb_key"):
+            say("Giving it the TMDB key")
+            _usb_phone_call(local, "POST", "/api/config", {"tmdb_key": CONFIG["tmdb_key"]})
+        say("Sending the catalogue — the phone fetches the posters as it goes")
+        # Minutes, not seconds: the phone downloads every poster before it
+        # answers, over whatever its Wi-Fi is doing.
+        reply = _usb_phone_call(local, "POST", "/api/library/snapshot/import",
+                                {"snapshot": build_library_snapshot()}, timeout=1200)
+        say("Having the phone look at its own films")
+        _usb_phone_call(local, "POST", "/api/library/scan", {})
+        return reply.get("imported") or {}
+    finally:
+        if local:
+            usb_adb("-s", serial, "forward", "--remove", "tcp:%d" % local)
+
+
+def usb_send_worker():
+    try:
+        USB_SEND["result"] = usb_send_library(
+            step=lambda words: USB_SEND.update(step=words))
+    except AppError as exc:
+        USB_SEND["error"] = str(exc)
+    except Exception as exc:
+        USB_SEND["error"] = "Sending stopped: %s" % exc
+        log_problem("usb send library")
+    finally:
+        USB_SEND.update(running=False, step="")
+
+
+def usb_send_start():
+    with _USB_LOCK:
+        if USB_SEND["running"]:
+            return
+        USB_SEND.update(running=True, step="Starting", result=None, error=None)
+    threading.Thread(target=usb_send_worker, daemon=True, name="usb send").start()
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -11830,6 +11989,9 @@ class Handler(BaseHTTPRequestHandler):
 
             if route == "/api/phone":
                 return self.send_json(phone_link_state())
+
+            if route == "/api/usbphone":
+                return self.send_json(dict(usb_phone_state(), send=dict(USB_SEND)))
 
             if route == "/api/export":
                 return self.send_json(build_export(), filename="nextup-export.json",
@@ -12088,6 +12250,10 @@ class Handler(BaseHTTPRequestHandler):
         seen_you()
         data = self.read_body()
         try:
+            if route == "/api/usbphone/send":
+                usb_send_start()
+                return self.send_json({"ok": True})
+
             if route == "/api/phone/enable":
                 return self.send_json(phone_link_set(bool(data.get("on"))))
 
@@ -14979,6 +15145,11 @@ header.mast .libplaces.offview{visibility:hidden}
     <h3>Your phone</h3>
     <p class="empty">Next Up on your phone gets this library's list, downloads films to watch anywhere, and swaps ratings and history with this PC whenever both are on the same Wi-Fi. The phone finds this PC by itself. Windows may ask whether Python can use private networks &mdash; say yes, or the phone can&rsquo;t reach it.</p>
     <div id="phone_body"><p class="empty">Checking…</p></div>
+    <!-- Plugged in. Sends the catalogue and the TMDB key, never a video —
+         films are copied one by one, by choice. -->
+    <h3 style="margin-top:22px">On the cable</h3>
+    <p class="empty">With the phone plugged in, USB debugging allowed and Next Up open on it, this sends the phone your whole library list: everything shows there, greyed out unless the phone has the film itself. It sends the list and your TMDB key &mdash; never any video files.</p>
+    <div id="usbphone_body"><p class="empty">Looking for a phone…</p></div>
   </div>
 
   <!-- ================= DOCKING STATION =================
@@ -15126,7 +15297,7 @@ function switchTo(view){
   }
   if(view==='rate'){ staleRatings = false; loadRatings(); }
   if(view==='channels') loadChannels();
-  if(view==='settings'){ loadData(); dockOnOpen(); syncLoad(); sorterLoad(); phoneLoad(); }
+  if(view==='settings'){ loadData(); dockOnOpen(); syncLoad(); sorterLoad(); phoneLoad(); usbPhoneLoad(); }
 }
 
 /* The shell is a fixed-height column and only the panel inside a tab
@@ -19741,6 +19912,57 @@ function phoneRender(s){
     list.append(row);
   });
   body.append(list);
+}
+
+/* ---------- the phone on the cable ---------- */
+/* Asked when Settings opens and on REFRESH, not polled: adb takes a moment
+   to answer and nothing about a phone being plugged in is urgent. While a
+   send is running it's polled each second for the progress line. */
+let usbTimer = null;
+
+async function usbPhoneLoad(){
+  clearTimeout(usbTimer);
+  let s;
+  try{ s = await api('/api/usbphone'); }catch(e){ return; }
+  if(s && !s.error) usbPhoneRender(s);
+}
+
+function usbPhoneRender(s){
+  const body = $('#usbphone_body'); body.innerHTML = '';
+  const send = s.send || {};
+  const row = el('div','rowbtns');
+  if(!s.found){
+    body.append(el('p','libline', esc(s.why || 'No phone found.')));
+  } else {
+    body.append(el('p','libline', esc(s.name || 'A phone')
+      + (s.free_gb != null ? '  ·  ' + esc(String(s.free_gb)) + ' GB free' : '')
+      + (!s.app_installed ? '  ·  Next Up not installed'
+         : !s.app_running ? '  ·  open Next Up on it to send' : '  ·  Next Up open')));
+    const go = el('button','play','SEND MY LIBRARY');
+    go.title = 'The list of everything, and your TMDB key. No video files.';
+    go.disabled = !!send.running || !s.app_running;
+    go.onclick = async () => {
+      go.disabled = true;
+      const r = await post('/api/usbphone/send');
+      if(!r.error) usbPhoneLoad();
+    };
+    row.append(go);
+  }
+  const again = el('button','iconbtn','REFRESH');
+  again.onclick = usbPhoneLoad;
+  row.append(again);
+  body.append(row);
+  if(send.running){
+    body.append(el('p','libline', esc(send.step || 'Sending…')));
+    if(currentView === 'settings') usbTimer = setTimeout(usbPhoneLoad, 1000);
+  } else if(send.error){
+    body.append(el('div','notice bad','<p>'+esc(send.error)+'</p>'));
+  } else if(send.result){
+    const r = send.result;
+    body.append(el('p','libline', 'Sent: ' + (r.movies||0) + ' films, ' + (r.shows||0)
+      + ' shows, ' + (r.episodes||0) + ' episodes' + (r.art ? ', ' + r.art + ' posters' : '')
+      + '. The phone is scanning its own films now.'));
+  }
 }
 
 async function syncOffer(){
