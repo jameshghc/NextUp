@@ -86,15 +86,25 @@ if getattr(sys, "frozen", False):
     HERE = os.path.dirname(os.path.abspath(sys.executable))
 else:
     HERE = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(HERE, "nextup_config.json")
-CACHE_PATH = os.path.join(HERE, "nextup_cache.json")
-DISMISS_PATH = os.path.join(HERE, "nextup_dismissed.json")
+# Where everything this app WRITES lives — the library, settings, art, the
+# resume points. Beside the code on the desktop, as it always has been. The
+# Android app points it somewhere else before importing this file: there the
+# code folder is replaced wholesale on every update, and a library kept next
+# to it would go with it.
+DATA = os.environ.get("NEXTUP_HOME") or HERE
+# "android" inside the phone app, where mpv, the docking station, the sorter
+# and the desktop window don't exist. Settable for the tests on this PC.
+PLATFORM = os.environ.get("NEXTUP_PLATFORM") or (
+    "android" if sys.platform == "android" else sys.platform)
+CONFIG_PATH = os.path.join(DATA, "nextup_config.json")
+CACHE_PATH = os.path.join(DATA, "nextup_cache.json")
+DISMISS_PATH = os.path.join(DATA, "nextup_dismissed.json")
 # What the YouTube channels last read off each creator's uploads page: ids,
 # titles, lengths. Re-fetched daily, so it's a cache rather than data.
-YOUTUBE_PATH = os.path.join(HERE, "nextup_youtube.json")
+YOUTUBE_PATH = os.path.join(DATA, "nextup_youtube.json")
 # Where a paired phone's history lands when cloud sharing is off — the same
 # one-file-per-device shape as the sharing folder, kept on this machine.
-PHONE_SYNC_DIR = os.path.join(HERE, "nextup_phone_sync")
+PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
@@ -1436,7 +1446,7 @@ def build_rating_queue():
 
 import sqlite3
 
-DB_PATH = os.path.join(HERE, "nextup_library.db")
+DB_PATH = os.path.join(DATA, "nextup_library.db")
 
 VIDEO_EXT = {".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".mpg", ".mpeg",
              ".m2ts", ".ts", ".divx", ".flv", ".webm", ".iso"}
@@ -1911,7 +1921,7 @@ def now_stamp():
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
-ERROR_LOG = os.path.join(HERE, "nextup_errors.log")
+ERROR_LOG = os.path.join(DATA, "nextup_errors.log")
 
 
 def log_problem(where):
@@ -3028,7 +3038,7 @@ def backfill_show_details(conn, progress=None):
     return done
 
 
-ART_DIR = os.path.join(HERE, "nextup_art")
+ART_DIR = os.path.join(DATA, "nextup_art")
 # Tight on purpose: this name arrives from a URL and gets joined onto a path.
 _ART_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:jpg|jpeg|png|webp)$", re.I)
 
@@ -3359,7 +3369,7 @@ LIB = LOCAL
 
 # --- playback via mpv -----------------------------------------------------
 
-WATCH_LATER = os.path.join(HERE, "nextup_resume")
+WATCH_LATER = os.path.join(DATA, "nextup_resume")
 
 # Shipped alongside the app first, so a self-contained install doesn't
 # depend on what else happens to be on the machine — but split by platform.
@@ -3518,7 +3528,7 @@ else:
     IPC_PATH = os.path.join(tempfile.gettempdir(), "nextup-mpv.sock")
 
 # What was playing, kept on disk so a restart can pick the thread back up.
-PLAY_STATE_PATH = os.path.join(HERE, "nextup_playing.json")
+PLAY_STATE_PATH = os.path.join(DATA, "nextup_playing.json")
 _ADOPTED = [False]      # talking to an mpv a previous run started
 
 _IPC_SEQ = [0]      # mpv matches each reply to a request by this
@@ -5809,7 +5819,7 @@ def reason_pitch(item, kind):
 # work that costs a few hundred TMDB lookups to rebuild — and with it the
 # list of episodes you're missing, which barely changes week to week and is
 # the least disposable part of it.
-RECS_PATH = os.path.join(HERE, "nextup_recs.json")
+RECS_PATH = os.path.join(DATA, "nextup_recs.json")
 
 SCAN = {
     "running": False,
@@ -20450,6 +20460,37 @@ def startup_failure(message):
             pass
 
 
+def serve_in_thread(port=None, host="127.0.0.1", tries=20):
+    """Start the app's server and its background work, and return the port.
+
+    Shared by the desktop start-up and the Android app, which has no
+    window of its own to open and wants the page on whatever port is free:
+    a phone that killed and restarted the app a moment ago may still be
+    holding the last one. The desktop asks for exactly one port.
+
+    No player on Android — there's no mpv to watch there — so the playback
+    monitor and the adoption of a left-over player are desktop only."""
+    port = port or APP_PORT
+    server, last = None, None
+    for candidate in range(port, port + max(1, tries)):
+        try:
+            server = ThreadingHTTPServer((host, candidate), Handler)
+            break
+        except OSError as exc:
+            last = exc
+    if server is None:
+        raise last
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True, name="server").start()
+    if PLATFORM != "android":
+        adopt_orphan_mpv()
+        threading.Thread(target=playback_monitor, daemon=True,
+                         name="playback monitor").start()
+    threading.Thread(target=sync_loop, daemon=True, name="sync").start()
+    threading.Thread(target=refresh_watch_scores, daemon=True, name="watch scores").start()
+    return server.server_address[1]
+
+
 def main():
     install_crash_log()
     adopt_dismissed()
@@ -20478,15 +20519,12 @@ def main():
                 % APP_PORT)
             return
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", APP_PORT), Handler)
+        # One port only, here: the desktop's address is fixed, and the
+        # already-running check above has dealt with anything else on it.
+        serve_in_thread(APP_PORT, tries=1)
     except OSError as exc:
         startup_failure("Next Up couldn't open port %d: %s" % (APP_PORT, exc))
         return
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    adopt_orphan_mpv()
-    threading.Thread(target=playback_monitor, daemon=True).start()
-    threading.Thread(target=sync_loop, daemon=True, name="sync").start()
-    threading.Thread(target=refresh_watch_scores, daemon=True, name="watch scores").start()
     if phone_cfg()["enabled"]:
         phone_link_set(True)            # a port that won't open is reported, not fatal
 

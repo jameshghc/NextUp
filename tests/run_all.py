@@ -22,6 +22,7 @@ SUITES = [
     ("empty shows", "empty_shows_test.py"),
     ("youtube channel", "youtube_test.py"),
     ("phone link", "phone_link_test.py"),
+    ("android core", "android_core_test.py"),
     ("sharing between computers", os.path.join("synctest", "driver.py")),
 ]
 SLOW = {"sharing between computers"}
