@@ -38,11 +38,30 @@ def run(*args):
         sys.exit("failed (%d): %s" % (code, " ".join(args)))
 
 
+def project_stale():
+    """Briefcase writes the manifest — permissions included — only when it
+    creates the Android project, and quick builds never revisit it. So a
+    changed pyproject.toml means starting the project again, or a new
+    permission silently never reaches the phone."""
+    stamp = os.path.join(HERE, "build", "mobile", "android", ".pyproject-stamp")
+    current = os.path.getmtime(os.path.join(HERE, "pyproject.toml"))
+    try:
+        with open(stamp) as fh:
+            return float(fh.read()) != current, stamp, current
+    except (OSError, ValueError):
+        return True, stamp, current
+
+
 def main():
     copy_sources()
+    stale, stamp, current = project_stale()
+    if stale:
+        shutil.rmtree(os.path.join(HERE, "build", "mobile", "android"), ignore_errors=True)
     if not os.path.isdir(os.path.join(HERE, "build", "mobile", "android")):
         run(BRIEFCASE, "create", "android", "--no-input")
         run(BRIEFCASE, "build", "android", "--no-input")
+        with open(stamp, "w") as fh:
+            fh.write(repr(current))
     else:
         run(BRIEFCASE, "build", "android", "--update", "--update-resources", "--no-input")
     if "--no-install" not in sys.argv:

@@ -16,6 +16,57 @@ at the top.
 
 ---
 
+## 2026-10-08 — v0.1.49, Next Up runs on Android (the shell)
+
+Step 3 of the Android plan (`docs/superpowers/plans/2026-10-08-android-
+shell.md`). On the test phone (Galaxy S21 Ultra, Android 15), the APK starts
+Next Up's own server inside the app and shows the page full-screen. All five
+tabs and every Library section open with no page errors, and the app sees
+films in `Movies/Next Up/`.
+
+**`nextup.py` learned three things, none of which changes the desktop:**
+
+- **`DATA`**, where everything it writes lives. It's `NEXTUP_HOME` if set,
+  otherwise `HERE` as before. The app points it at its private data folder
+  before importing, because Android replaces the code folder on every
+  update and a library kept beside it would go too.
+- **`PLATFORM`**, which is `"android"` there (Python reports
+  `sys.platform == "android"`).
+- **`serve_in_thread()`:** the start-up `main()` did inline. It tries the
+  following ports if one is taken, because a phone that killed and
+  restarted the app may still hold the last one. The desktop asks for
+  exactly one.
+
+**The app** (`android/`, id `app.nextup.mobile`; "mobile" because a package
+named `nextup` collides with `nextup.py`) is a Toga `WebView` on
+`127.0.0.1`. A failed start-up shows the traceback on screen rather than a
+white page.
+
+- `build.py` copies `nextup.py` and its assets in, then builds and
+  installs. Briefcase only writes the manifest when it *creates* the
+  project, so a changed `pyproject.toml` now recreates it. Without that,
+  the new video permission silently never reached the phone.
+- `check_device.py` launches the app and reads the log.
+- `check_page.py` attaches Chrome's debugging protocol to the WebView over
+  adb, clicks through everything, and fails on any page error. The WebView
+  sends nothing to logcat, so a quiet log proved nothing. `--selftest`
+  throws one on purpose to prove the check can fail.
+- `check_storage.py` pushes a 51 MB dummy film and asks the app's own scan
+  to find it.
+
+**Unknowns settled:**
+
+- **Python 3.14 builds fine** (Chaquopy).
+- **The page works in the WebView unchanged**, at 384 px wide.
+- **`READ_MEDIA_VIDEO` plus plain file paths reads `Movies/Next Up/`** on
+  One UI / Android 15. The user tapped Allow on Android's own prompt. No
+  fallback folder needed.
+
+**Seen on a fresh install, for the polish step:** the profile is named
+after Android's user ("U0_a429") and the device "localhost".
+
+---
+
 ## 2026-10-07 — v0.1.48, the phone link (PC side)
 
 The user got a Galaxy S24 Ultra and wants Next Up on it the way the Mac
