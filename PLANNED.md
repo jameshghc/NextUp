@@ -9,6 +9,21 @@ summarised away and files don't.
 
 ---
 
+## Android app: where it stands (parked 2026-10-08)
+
+- **Done:** step 1, the PC side of the phone link (v0.1.48, merged). Step 2,
+  the toolchain in `X:\DevTools`: Briefcase venv, JDK 17, Android SDK
+  (licences accepted by the user), Python 3.14 building fine. The full chain
+  is proven on the test phone, a Galaxy S21 Ultra on Android 15 with USB
+  debugging on.
+- **Next:** step 3, ready to go:
+  `docs/superpowers/plans/2026-10-08-android-shell.md` (three tasks, about
+  an hour, mostly build waits). Needs the S21 plugged in and unlocked, and
+  the user's tap on the video-permission prompt in task 3. Execute it
+  Native, the same way as step 1.
+- The throwaway probe app is still installed on the S21
+  (`app.nextup.nextupprobe`). Task 3 removes it.
+
 ## Next up (parked 2026-10-03)
 
 - **Cold Ones channel needs yt-dlp updated before it plays.** Built and
