@@ -16,6 +16,25 @@ at the top.
 
 ---
 
+## 2026-10-09 — v0.1.55, audio delay remembered per film and episode
+
+The user fixes a lot of downloads by -100ms on the remote, every time.
+Now it's set once per file and put back whenever that file plays.
+
+- `audio_delay` (ms) on movies and episodes, via LATER_COLUMNS.
+- `note_audio_delay()` saves what mpv is using for the item playing. Called
+  by the remote's delay route at once, and by the monitor each tick once
+  the file has settled, so mpv's own Ctrl+/Ctrl- count too. Writes only on
+  a change, and only when mpv's `path` is the item's own file: while one
+  file replaces another the app still has the old one down as playing.
+- Put back on every load: `--audio-delay` for a new player, and the
+  `audio-delay` per-file option on loadfile (set_property in the old-mpv
+  fallback). Always sent, 0 when nothing is saved. That also fixes a delay
+  set for one episode following you into every file after it in the same
+  window, which it did before — audio-delay is global in mpv.
+- Not on the phone: mpv-android takes no audio delay in what it's handed.
+- tests/audio_delay_test.py (10), in run_all.
+
 ## 2026-10-09 — v0.1.54, the phone remembers where you got to, and has your ratings
 
 Two things the user found on the S24U, and a way to see the phone's

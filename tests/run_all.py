@@ -14,6 +14,7 @@ LIVE = os.path.dirname(HERE)
 
 SUITES = [
     ("queue", "queue_test.py"),
+    ("audio delay per file", "audio_delay_test.py"),
     ("are you still watching", "afk_test.py"),
     ("port release", "port_test.py"),
     ("port release, end to end", "port_e2e.py"),

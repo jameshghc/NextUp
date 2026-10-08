@@ -108,7 +108,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.54"
+APP_VERSION = "0.1.55"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -1810,6 +1810,9 @@ LATER_COLUMNS = [
     ("episodes", "rated_at", "TEXT"),
     ("episodes", "last_played", "TEXT"),
     ("episodes", "plot", "TEXT"),
+    # Audio delay set for this file, in ms — put back whenever it plays.
+    ("movies", "audio_delay", "INTEGER"),
+    ("episodes", "audio_delay", "INTEGER"),
     ("episodes", "still", "TEXT"),
     ("movies", "watchlisted_at", "TEXT"),
     ("shows", "watchlisted_at", "TEXT"),
@@ -3760,6 +3763,56 @@ def mpv_get(name, default=None):
     return default if value is None else value
 
 
+def saved_audio_delay(path):
+    """The audio delay last set for this file, in ms, or 0."""
+    conn = db()
+    try:
+        for table in ("movies", "episodes"):
+            row = conn.execute("SELECT audio_delay FROM %s WHERE path=? AND audio_delay IS NOT NULL"
+                               % table, (path,)).fetchone()
+            if row:
+                return int(row[0] or 0)
+    finally:
+        conn.close()
+    return 0
+
+
+_DELAY_SEEN = [None]
+
+
+def note_audio_delay():
+    """Save the audio delay mpv is using, for the film or episode it's
+    playing — set from the remote or from mpv's own keys, it's kept, and
+    put back every time that file plays. Downloads tend to be out by the
+    same amount every time, so it never needs setting twice.
+
+    Only when the file mpv has open IS that item's file: for a moment while
+    one file replaces another, the app still has the old one down as
+    playing, and the new file's delay mustn't be written onto it."""
+    with _PLAY_LOCK:
+        kind, item_id = NOW_PLAYING.get("type"), NOW_PLAYING.get("id")
+    if kind not in ("movie", "episode") or not item_id:
+        return
+    delay = mpv_get("audio-delay")
+    path = mpv_get("path")
+    if delay is None or not path:
+        return
+    ms = int(round(float(delay) * 1000))
+    if _DELAY_SEEN[0] == (kind, item_id, ms):
+        return                      # unchanged since last looked: no write
+    mine = LOCAL.path_for(kind, item_id)
+    if not mine or os.path.normcase(os.path.abspath(mine)) != os.path.normcase(os.path.abspath(path)):
+        return
+    table = "movies" if kind == "movie" else "episodes"
+    conn = db()
+    try:
+        conn.execute("UPDATE %s SET audio_delay=? WHERE id=?" % table, (ms, item_id))
+        conn.commit()
+    finally:
+        conn.close()
+    _DELAY_SEEN[0] = (kind, item_id, ms)
+
+
 def _mpv_load(path, start, keep_open):
     """Put a file into the window that's already open. True if it landed.
 
@@ -3777,6 +3830,11 @@ def _mpv_load(path, start, keep_open):
     # deep would drop every following programme 25 minutes in as well —
     # inheriting the offset you happened to join at, forever.
     options = {"start": str(seek)}
+    # The same for audio delay, which is just as global: a delay set for one
+    # episode would otherwise follow you into every file after it. Each file
+    # gets its own saved one, or none.
+    delay = saved_audio_delay(path) / 1000.0
+    options["audio-delay"] = "%.3f" % delay
     if keep_open:
         # And on a channel, mpv's own resume must not get a vote either: what
         # plays is decided by the schedule, not by where you last left this
@@ -3793,6 +3851,7 @@ def _mpv_load(path, start, keep_open):
     reply = mpv_command("loadfile", path, "replace")
     if not (reply and reply.get("error") == "success"):
         return False
+    mpv_command("set_property", "audio-delay", round(delay, 3))
     if seek:
         for _ in range(25):         # wait for it to be far enough along to seek
             if mpv_get("duration"):
@@ -3863,6 +3922,7 @@ def mpv_play(path, start=0, keep_open=False):
     ]
     if MPV_CONFIG_DIR:
         args.append("--config-dir=" + MPV_CONFIG_DIR)
+    args.append("--audio-delay=%.3f" % (saved_audio_delay(path) / 1000.0))
     if keep_open:
         # Same reasoning as in _mpv_load: on a channel the schedule decides
         # where to come in, not a half-watched position saved earlier.
@@ -4202,6 +4262,9 @@ def _monitor_tick():
         if _PLAY_PROC[0] is proc:
             NOW_PLAYING["position"] = position
             NOW_PLAYING["duration"] = duration
+    if not settling:
+        # Catches mpv's own Ctrl+/Ctrl- as well as the remote.
+        note_audio_delay()
 
 
 _SHUTDOWN_DONE = [False]
@@ -12626,6 +12689,7 @@ class Handler(BaseHTTPRequestHandler):
                                + int(data.get("delta") or 0) / 1000.0)
                 seconds = max(-10.0, min(10.0, seconds))
                 mpv_command("set_property", "audio-delay", round(seconds, 3))
+                note_audio_delay()          # now, not at the monitor's next look
                 return self.send_json(remote_state())
 
             if route == "/api/remote/episode":
