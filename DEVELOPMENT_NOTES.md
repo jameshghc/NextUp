@@ -16,6 +16,32 @@ at the top.
 
 ---
 
+## 2026-10-08 — v0.1.51, the phone in the drive lists
+
+The phone on the cable is now a drive like any other. It appears in the
+docking station's picker and in Library › Drives as "Phone · James's S21
+Ultra". Its ID is `phone:<serial>`; there's no letter.
+
+- **Reading the phone:** one `find … -exec stat` over adb lists
+  `Movies/Film & TV` with sizes, in `dock_drive_index`'s own shape, so the
+  matching, the SELECT marks and the price all work unchanged. Read for
+  real: all 7 films and 4 shows on the S21 matched, none unidentified.
+- **Copying:** goes to `Film & TV/Films` and `Film & TV/TV` (the phone's
+  folder says TV, not the drives' "TV Shows"). Each file is pushed under a
+  `.nextup-part` name, its size is checked on the phone, then it's renamed.
+  The push can't stop part way, so a cancel lands between files.
+  Afterwards, if Next Up is open on the phone, it's asked to rescan, and
+  the copies turn from grey to colour.
+- **Quoting:** everything for the phone's shell is one string with each
+  path quoted, the lesson of the `&` in "Film & TV". The test copies a film
+  named with both `'` and `&`.
+- **Test isolation:** `isolate()` still switches drive copying off.
+  `phone_dock_test.py` keeps the real list and copy and points them only at
+  a fake phone, a temp folder that its fake adb really reads and writes.
+  Every real USB drive stays switched off.
+
+---
+
 ## 2026-10-08 — v0.1.50, the phone on the cable, and a first phone layout
 
 Asked for in one go on the S21, the test phone:

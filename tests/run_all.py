@@ -24,6 +24,7 @@ SUITES = [
     ("phone link", "phone_link_test.py"),
     ("android core", "android_core_test.py"),
     ("phone over usb", "usb_phone_test.py"),
+    ("phone as a drive", "phone_dock_test.py"),
     ("sharing between computers", os.path.join("synctest", "driver.py")),
 ]
 SLOW = {"sharing between computers"}

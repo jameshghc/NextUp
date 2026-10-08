@@ -108,7 +108,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.50"
+APP_VERSION = "0.1.51"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -6529,6 +6529,16 @@ def _list_dock_drives_mac():
 
 
 def list_dock_drives():
+    """Every copy target: the drives plugged in, and a phone on the cable."""
+    drives = _list_local_dock_drives()
+    try:
+        drives += phone_dock_drives()
+    except Exception:
+        log_problem("phone in the drive list")
+    return drives
+
+
+def _list_local_dock_drives():
     """Drives worth offering as a copy target. Excludes the system drive and
     anything the library itself already lives on — the point is to move
     files off this machine, not to offer the shelf as a place to put them
@@ -6661,6 +6671,12 @@ _DOCK_SKIP_DIRS = {"$RECYCLE.BIN", "System Volume Information"}
 
 def dock_drive_index(root):
     """{basename_lower: {size: path}} for every video file on the drive."""
+    if is_phone_dest(root):
+        cached = _DOCK_INDEX.get(root)
+        if cached and time.time() - cached["at"] < DOCK_INDEX_TTL:
+            return cached
+        _DOCK_INDEX[root] = phone_dock_index(root)
+        return _DOCK_INDEX[root]
     root = os.path.normpath(root)
     cached = _DOCK_INDEX.get(root)
     if cached and time.time() - cached["at"] < DOCK_INDEX_TTL:
@@ -6689,7 +6705,7 @@ def dock_drive_index(root):
 
 
 def dock_index_forget(root):
-    _DOCK_INDEX.pop(os.path.normpath(root), None)
+    _DOCK_INDEX.pop(root if is_phone_dest(root) else os.path.normpath(root), None)
 
 
 def dock_found_on_drive(index, item, size=None):
@@ -6713,9 +6729,9 @@ def dock_presence(selection, dest):
     stopped partway leaves a .nextup-part beside the real name and nothing
     at it, so it correctly reads as not there. Returns {key: {have, of}}.
     """
-    if not dest or not os.path.isdir(dest):
+    if not dock_dest_ok(dest):
         return {}
-    if media_file_check(dest) is None:
+    if not is_phone_dest(dest) and media_file_check(dest) is None:
         return {"_stalled": True}
     index = dock_drive_index(dest)
     catalogue, matched = _drive_catalogue(dest)
@@ -6901,8 +6917,10 @@ def _drive_catalogue(root):
     for name, sizes in index["files"].items():
         stem_hit = lib_by_stem.get(_daytime_key(os.path.splitext(name)[0])) or None
         for size, path in sizes.items():
-            rel = os.path.relpath(path, root)
-            if any(is_extras_dir(part) for part in rel.split(os.sep)[:-1]):
+            # A phone's paths are its own (forward slashes, under Film & TV),
+            # so they're taken apart as such rather than against a drive.
+            rel = path[len(PHONE_DOCK_ROOT) + 1:] if is_phone_dest(root)                 else os.path.relpath(path, root)
+            if any(is_extras_dir(part) for part in re.split(r"[\/]", rel)[:-1]):
                 continue                    # featurettes, as the scan skips them
             if is_staging_path(path) or size < 50 * 1024 * 1024:
                 continue                    # half-downloaded, or samples and trailers
@@ -6956,11 +6974,16 @@ def _drive_catalogue(root):
 
     films = sorted((g for g in groups.values() if g["kind"] == "movie"), key=order)
     show_list = sorted((g for g in groups.values() if g["kind"] == "tvshow"), key=order)
-    try:
-        usage = shutil.disk_usage(root)
-        free, total = usage.free, usage.total
-    except OSError:
-        free = total = None
+    free = total = None
+    if is_phone_dest(root):
+        phone = next((d for d in phone_dock_drives() if d["letter"] == root), {})
+        free, total = phone.get("free"), phone.get("total")
+    else:
+        try:
+            usage = shutil.disk_usage(root)
+            free, total = usage.free, usage.total
+        except OSError:
+            pass
     unidentified.sort()
     return {
         "root": root, "films": films, "shows": show_list,
@@ -7053,16 +7076,22 @@ def dock_copy_worker(plan, dest_root):
                 break
             DOCK["step"] = item["label"]
             DOCK["done"] = i
-            dest = os.path.join(dest_root, item["dest_rel"])
+            phone = is_phone_dest(dest_root)
+            dest = phone_dest_path(item["dest_rel"]) if phone \
+                else os.path.join(dest_root, item["dest_rel"])
             try:
-                os.makedirs(os.path.dirname(dest), exist_ok=True)
-                if (os.path.exists(dest) and os.path.getsize(dest) == item["size"]) \
+                if not phone:
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                if (not phone and os.path.exists(dest) and os.path.getsize(dest) == item["size"]) \
                         or dock_item_on_drive(item, matched, index, item["size"]):
                     # Already on the drive — at the planned path from an
                     # earlier run of this job, under its own name at its own
                     # size, or as the drive's own copy of this very film or
                     # episode however that copy is named. Exactly what the
                     # SELECT marks showed as ticked, so a tick is a promise.
+                    DOCK["bytes_done"] += item["size"]
+                elif phone:
+                    phone_copy_file(_phone_serial(dest_root), item["src"], dest, item["size"])
                     DOCK["bytes_done"] += item["size"]
                 else:
                     dock_copy_file(item["src"], dest, item["size"])
@@ -7080,6 +7109,11 @@ def dock_copy_worker(plan, dest_root):
         DOCK["running"] = False
         DOCK["finished_at"] = time.time()
         dock_index_forget(dest_root)     # the drive has new files on it now
+        if is_phone_dest(dest_root):
+            try:
+                usb_phone_rescan(_phone_serial(dest_root))
+            except Exception:
+                pass
 
 
 def find_episode_gaps(budget, has_key):
@@ -11744,15 +11778,18 @@ def usb_phone_state():
 
     name = ask("shell", "settings", "get", "global", "device_name") \
         or ask("shell", "getprop", "ro.product.model")
-    free_gb = None
+    free_gb = free_bytes = total_bytes = None
     lines = ask("shell", "df", "-k", "/storage/emulated").splitlines()
     try:
-        free_gb = round(int(lines[-1].split()[3]) / 1024 / 1024, 1)
+        cols = lines[-1].split()
+        free_bytes, total_bytes = int(cols[3]) * 1024, int(cols[1]) * 1024
+        free_gb = round(free_bytes / 1024 ** 3, 1)
     except (IndexError, ValueError):
         pass
     installed = ("package:" + USB_PHONE_PACKAGE) in ask(
         "shell", "pm", "list", "packages", "--user", "0", USB_PHONE_PACKAGE).split()
     return {"found": True, "serial": serial, "name": name, "free_gb": free_gb,
+            "free_bytes": free_bytes, "total_bytes": total_bytes,
             "app_installed": installed,
             "app_running": bool(ask("shell", "pidof", USB_PHONE_PACKAGE))}
 
@@ -11764,6 +11801,146 @@ def _usb_phone_call(local, method, path, body=None, timeout=30):
         headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read() or b"{}")
+
+
+def _usb_find_app(serial):
+    """A port here that reaches Next Up on the phone, through an adb tunnel,
+    or None. The caller takes the tunnel down again."""
+    for port in USB_PHONE_PORTS:
+        tunnel = usb_adb("-s", serial, "forward", "tcp:0", "tcp:%d" % port).strip()
+        if not tunnel.isdigit():
+            continue
+        try:
+            if _usb_phone_call(int(tunnel), "GET", "/api/status", timeout=5).get("version"):
+                return int(tunnel)
+        except Exception:
+            pass
+        usb_adb("-s", serial, "forward", "--remove", "tcp:" + tunnel)
+    return None
+
+
+def usb_phone_rescan(serial):
+    """Ask Next Up on the phone to look at its folder again, if it's open —
+    so films just copied over turn from grey to their own colours. Quietly
+    nothing when it isn't open: the phone scans for itself next time."""
+    if not usb_adb("-s", serial, "shell", "pidof", USB_PHONE_PACKAGE).strip():
+        return False
+    local = _usb_find_app(serial)
+    if not local:
+        return False
+    try:
+        _usb_phone_call(local, "POST", "/api/library/scan", {})
+        return True
+    except Exception:
+        return False
+    finally:
+        usb_adb("-s", serial, "forward", "--remove", "tcp:%d" % local)
+
+
+# --- the phone as a drive -------------------------------------------------------------
+#
+# In the docking station's list and the Drives view beside the USB drives,
+# as "phone:<serial>" — it has no drive letter. Its library folder is the
+# user's own Film & TV, so that's where copies go and what's read: Films/
+# as the drives have it, and TV/ rather than the drives' "TV Shows", which
+# is what that folder already uses.
+#
+# Everything goes through adb. Two rules learned the hard way: anything
+# for the phone's own shell is ONE string with each path quoted — adb joins
+# its words with spaces and that shell reads "&" in "Film & TV" as "run in
+# the background" — and a push lands under a temporary name and is renamed
+# when it's whole, the same promise the drive copies make.
+
+PHONE_DOCK_ROOT = "/storage/emulated/0/Movies/Film & TV"
+
+
+def is_phone_dest(dest):
+    return (dest or "").startswith("phone:")
+
+
+def _phone_serial(dest):
+    return dest.split(":", 1)[1]
+
+
+def _sh_quote(path):
+    """A path as one word for the phone's shell: single quotes, and any
+    single quote inside closed, escaped and reopened."""
+    return "'" + path.replace("'", "'\\''") + "'"
+
+
+def phone_dock_drives():
+    state = usb_phone_state()
+    if not state.get("found"):
+        return []
+    return [{"letter": "phone:" + state["serial"], "label": state.get("name") or "Phone",
+             "removable": True, "free": state.get("free_bytes"),
+             "total": state.get("total_bytes"), "phone": True}]
+
+
+def dock_dest_ok(dest):
+    """Is this destination there to be read and written: a folder for a
+    drive, a connected and allowed phone for a phone."""
+    if is_phone_dest(dest):
+        rows = [l.split() for l in usb_adb("devices").splitlines()[1:] if l.strip()]
+        return any(len(r) > 1 and r[0] == _phone_serial(dest) and r[1] == "device"
+                   for r in rows)
+    return bool(dest) and os.path.isdir(dest)
+
+
+def dock_free(dest):
+    if is_phone_dest(dest):
+        for d in phone_dock_drives():
+            if d["letter"] == dest:
+                return d["free"]
+        return None
+    try:
+        return shutil.disk_usage(dest).free
+    except OSError:
+        return None
+
+
+def phone_dock_index(dest):
+    """dock_drive_index's shape, for the phone: every video in Film & TV by
+    name, with its sizes. One find over adb lists the lot with sizes."""
+    started = time.time()
+    out = usb_adb("-s", _phone_serial(dest), "shell",
+                  "find %s -type f -exec stat -c '%%s %%n' {} +" % _sh_quote(PHONE_DOCK_ROOT),
+                  timeout=120)
+    index = {}
+    for line in out.splitlines():
+        size, _, path = line.strip().partition(" ")
+        if not size.isdigit() or not path:
+            continue
+        name = path.rsplit("/", 1)[-1]
+        if os.path.splitext(name)[1].lower() not in VIDEO_EXT or name.endswith(".nextup-part"):
+            continue
+        index.setdefault(name.lower(), {})[int(size)] = path
+    return {"at": time.time(), "files": index, "partial": False, "took": time.time() - started}
+
+
+def phone_dest_path(dest_rel):
+    """A planned file's place on the phone. The plan says "TV Shows"; the
+    phone's folder says "TV"."""
+    rel = dest_rel.replace("\\", "/")
+    if rel.startswith("TV Shows/"):
+        rel = "TV/" + rel[len("TV Shows/"):]
+    return PHONE_DOCK_ROOT + "/" + rel
+
+
+def phone_copy_file(serial, src, dest, size):
+    """Push one file, whole or not at all. The push itself can't be stopped
+    part way, so a cancel takes effect between files; on a USB 3 cable a
+    film is a minute or so."""
+    part = dest + ".nextup-part"
+    usb_adb("-s", serial, "shell", "mkdir -p %s" % _sh_quote(dest.rsplit("/", 1)[0]))
+    # Generous: a slow cable at 5 MB/s, with two minutes' grace.
+    usb_adb("-s", serial, "push", src, part, timeout=120 + size // (5 * 1024 * 1024))
+    landed = usb_adb("-s", serial, "shell", "stat -c %%s %s" % _sh_quote(part)).strip()
+    if landed != str(size):
+        usb_adb("-s", serial, "shell", "rm -f %s" % _sh_quote(part))
+        raise OSError("the copy on the phone came out the wrong size — is it full, "
+                      "or was the cable pulled?")
+    usb_adb("-s", serial, "shell", "mv %s %s" % (_sh_quote(part), _sh_quote(dest)))
 
 
 def usb_send_library(step=None):
@@ -11784,17 +11961,7 @@ def usb_send_library(step=None):
     local = None
     try:
         say("Finding Next Up on the phone")
-        for port in USB_PHONE_PORTS:
-            tunnel = usb_adb("-s", serial, "forward", "tcp:0", "tcp:%d" % port).strip()
-            if not tunnel.isdigit():
-                continue
-            try:
-                if _usb_phone_call(int(tunnel), "GET", "/api/status", timeout=5).get("version"):
-                    local = int(tunnel)
-                    break
-            except Exception:
-                pass
-            usb_adb("-s", serial, "forward", "--remove", "tcp:" + tunnel)
+        local = _usb_find_app(serial)
         if not local:
             raise AppError("Next Up is open on the phone but isn't answering. "
                            "Close it, open it again, and retry.")
@@ -12230,10 +12397,10 @@ class Handler(BaseHTTPRequestHandler):
 
             if route == "/api/drive/catalogue":
                 dest = dock_root(one("dest"))
-                if not dest or not os.path.isdir(dest):
+                if not dock_dest_ok(dest):
                     raise AppError("That drive isn't there any more — plug it "
                                    "back in and press Reread.")
-                if media_file_check(dest) is None:
+                if not is_phone_dest(dest) and media_file_check(dest) is None:
                     raise AppError("That drive isn't answering. Give it a moment "
                                    "to spin up and press Reread.")
                 if one("fresh") == "1":
@@ -12654,17 +12821,12 @@ class Handler(BaseHTTPRequestHandler):
                 plan, warnings = dock_plan_items(data.get("items") or [])
                 sized, size_warnings = dock_size_plan(plan)
                 dest = dock_root(data.get("dest"))
-                free = None
-                if dest:
-                    try:
-                        free = shutil.disk_usage(dest).free
-                    except OSError:
-                        pass
+                free = dock_free(dest) if dest else None
                 # The same test the copy itself applies: a file already at
                 # its destination at the same size is skipped, so it comes
                 # out of the price too, and gets said out loud.
                 present = []
-                if dest and os.path.isdir(dest):
+                if dest and dock_dest_ok(dest):
                     index = dock_drive_index(dest)
                     _, matched = _drive_catalogue(dest)
                     present = [i for i in sized if dock_item_on_drive(i, matched, index, i["size"])]
@@ -12688,7 +12850,7 @@ class Handler(BaseHTTPRequestHandler):
                 if DOCK["running"]:
                     return self.send_json({"ok": True, "already": True})
                 dest = dock_root(data.get("dest"))
-                if not dest or not os.path.isdir(dest):
+                if not dock_dest_ok(dest):
                     raise AppError("Pick a drive first.")
                 plan, _ = dock_plan_items(data.get("items") or [])
                 if not plan:
@@ -15937,7 +16099,7 @@ async function drvDrives(){
   if(!r.supported){ sel.append(new Option('Not available on this OS', '')); drvLoad(); return; }
   if(!r.drives.length){ sel.append(new Option('No drives found — plug one in', '')); drvLoad(); return; }
   r.drives.forEach(d => sel.append(new Option(
-    d.letter + (d.label ? ' "' + d.label + '"' : '') + ' — ' + dockGB(d.free) + ' free', d.letter)));
+    driveName(d) + ' — ' + dockGB(d.free) + ' free', d.letter)));
   /* The drive you were last looking at, or failing that the one picked in
      the copy tray — the likeliest thing you want to see is where you just
      sent something. */
@@ -16886,7 +17048,7 @@ async function trayRefreshDrives(){
   if(!r.supported){ sel.append(new Option('Not available on this OS', '')); trayUpdate(); return; }
   if(!r.drives.length){ sel.append(new Option('No drives found — plug one in', '')); trayUpdate(); return; }
   r.drives.forEach(d => sel.append(new Option(
-    d.letter + (d.label ? ' "' + d.label + '"' : '') + ' — ' + dockGB(d.free) + ' free', d.letter)));
+    driveName(d) + ' — ' + dockGB(d.free) + ' free', d.letter)));
   if([...sel.options].some(o => o.value === was)) sel.value = was;
   /* Keep the Settings picker on the same drive, so the two never disagree. */
   const settingsPick = $('#dock_drive');
@@ -19053,6 +19215,13 @@ const DOCK_PAGE_SIZE = 60;
 let dockPhase = 'idle';           // idle | confirm | running
 let dockPolling = false;
 
+/* A drive by its letter and label; a phone on the cable by its own name —
+   its "letter" is phone:<serial>, which means nothing to anybody. */
+function driveName(d){
+  if(d.phone) return 'Phone · ' + (d.label || 'on the cable');
+  return d.letter + (d.label ? ' "' + d.label + '"' : '');
+}
+
 function dockGB(bytes){
   if(!bytes) return '0 GB';
   const gb = bytes / (1024*1024*1024);
@@ -19085,7 +19254,7 @@ async function dockRefreshDrives(){
     return;
   }
   r.drives.forEach(d => {
-    const label = d.letter + (d.label ? ' "'+d.label+'"' : '') +
+    const label = driveName(d) +
       ' — ' + dockGB(d.free) + ' free of ' + dockGB(d.total);
     sel.append(new Option(label, d.letter));
   });
