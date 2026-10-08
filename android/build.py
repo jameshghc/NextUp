@@ -55,9 +55,14 @@ def project_stale():
 def main():
     copy_sources()
     stale, stamp, current = project_stale()
+    project = os.path.join(HERE, "build", "mobile", "android")
     if stale:
-        shutil.rmtree(os.path.join(HERE, "build", "mobile", "android"), ignore_errors=True)
-    if not os.path.isdir(os.path.join(HERE, "build", "mobile", "android")):
+        shutil.rmtree(project, ignore_errors=True)
+    # The project's own build file, not just its folder: a delete that a
+    # program holding a file open interrupted leaves an empty folder behind,
+    # and "the folder exists" then sent an update into nothing.
+    if not os.path.isfile(os.path.join(project, "gradle", "build.gradle")):
+        shutil.rmtree(project, ignore_errors=True)
         run(BRIEFCASE, "create", "android", "--no-input")
         run(BRIEFCASE, "build", "android", "--no-input")
         with open(stamp, "w") as fh:

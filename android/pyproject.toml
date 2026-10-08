@@ -13,6 +13,9 @@ author_email = "jcarstairs@live.co.uk"
 formal_name = "Next Up"
 description = "Your films and TV, on the phone."
 long_description = """Next Up, with a library of what's on the phone."""
+# The Next Up remote, at every size Android asks for — made from
+# nextup_logo.png by make_icons.ps1.
+icon = "icons/nextup"
 # The app's own code, then Next Up itself and what it serves, all side by
 # side: nextup.py finds its fonts and logo beside its own file.
 sources = [
