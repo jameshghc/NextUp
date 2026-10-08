@@ -27,8 +27,14 @@ requires = []
 requires = [
     "toga-android~=0.5.0",
 ]
-# No title bar: the page has its own header.
+# No title bar: the page has its own header. The dark theme, and Next Up's
+# own colours instead of Briefcase's teal: the launch screen and the bars
+# are near-black like the page, the accent marigold.
 base_theme = "Theme.MaterialComponents.NoActionBar"
+primary_color = "#060509"
+primary_color_dark = "#060509"
+accent_color = "#e0a33e"
+splash_background_color = "#060509"
 build_gradle_dependencies = [
     "com.google.android.material:material:1.13.0",
     "androidx.webkit:webkit:1.15.0",

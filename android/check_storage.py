@@ -1,4 +1,4 @@
-"""Can Next Up on the phone see videos in Movies/Next Up/?
+"""Can Next Up on the phone see videos in Movies/Film & TV/?
 
 Puts a 51 MB dummy film on the phone (over the 50 MB floor the scan uses to
 skip samples), asks the app's own server to scan, and passes when the scan
@@ -7,7 +7,7 @@ running (check_device.py)."""
 import json, os, subprocess, sys, tempfile, time, urllib.request
 
 ADB = r"X:\DevTools\briefcase-data\tools\android_sdk\platform-tools\adb.exe"
-PHONE_DIR = "/sdcard/Movies/Next Up/Check Film (2020)"
+PHONE_DIR = "/sdcard/Movies/Film & TV/Films/Check Film (2020)"
 PHONE_FILE = PHONE_DIR + "/Check Film (2020).mkv"
 LOCAL_PORT, APP_PORT = 8781, 8770
 
@@ -45,7 +45,7 @@ def main():
         found = (counts.get("movies") or 0) + (counts.get("unmatched") or 0)
         print("scan: error=%r counts=%s" % (status.get("error"), counts))
         if found >= 1:
-            print("PASS  the app sees videos in Movies/Next Up")
+            print("PASS  the app sees videos in Movies/Film & TV")
             return 0
         print("FAIL  the scan found nothing")
         return 1

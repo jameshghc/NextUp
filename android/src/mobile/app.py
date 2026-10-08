@@ -31,19 +31,27 @@ class NextUp(toga.App):
             self.main_window.content = toga.Label(
                 "Next Up couldn't start:\n\n" + traceback.format_exc())
         self.main_window.show()
+        dark_bars(self)
         ask_for_videos(self)
 
 
-# Where films live on the phone: shared storage, so they outlast the app
-# being reinstalled and show up in My Files like any other video.
-PHONE_LIBRARY = "/storage/emulated/0/Movies/Next Up"
+# Where films live on the phone: the user's own Film & TV folder in shared
+# storage (Films/ and TV/ inside), so they outlast the app being reinstalled
+# and show up in My Files like any other video.
+PHONE_LIBRARY = "/storage/emulated/0/Movies/Film & TV"
+# The first builds' default, swapped for the folder above wherever it's
+# still the only one set.
+OLD_DEFAULT = "/storage/emulated/0/Movies/Next Up"
+# Next Up's near-black, for the phone's own status and navigation bars so
+# they don't frame the page in Android's default teal and white.
+INK = "#060509"
 VIDEO_PERMISSION = "android.permission.READ_MEDIA_VIDEO"
 
 
 def first_run_library(nextup):
     """A fresh install has no media folders. On a phone there is only one
     sensible answer, so it's set rather than asked for."""
-    if nextup.CONFIG.get("media_folders"):
+    if nextup.CONFIG.get("media_folders") not in (None, [], [OLD_DEFAULT]):
         return
     try:
         os.makedirs(PHONE_LIBRARY, exist_ok=True)
@@ -51,6 +59,25 @@ def first_run_library(nextup):
         pass                    # created later, once access is granted
     nextup.CONFIG["media_folders"] = [PHONE_LIBRARY]
     nextup.save_json(nextup.CONFIG_PATH, nextup.CONFIG)
+
+
+def dark_bars(app):
+    """The status bar and the navigation bar in the page's own colour, with
+    light icons on them. Set at run time: Briefcase's theme settings reach
+    the status bar but not the navigation bar."""
+    try:
+        from java import jclass
+        Color = jclass("android.graphics.Color")
+        Controller = jclass("androidx.core.view.WindowInsetsControllerCompat")
+        window = app._impl.native.getWindow()
+        ink = Color.parseColor(INK)
+        window.setStatusBarColor(ink)
+        window.setNavigationBarColor(ink)
+        bars = Controller(window, window.getDecorView())
+        bars.setAppearanceLightStatusBars(False)
+        bars.setAppearanceLightNavigationBars(False)
+    except Exception:
+        traceback.print_exc()   # cosmetic: the app works without it
 
 
 def has_video_access(app):
