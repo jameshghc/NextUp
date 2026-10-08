@@ -108,7 +108,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.55"
+APP_VERSION = "0.1.56"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -12190,7 +12190,9 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             if route == "/":
-                return self.send_html(PAGE)
+                # Marked on the phone, for the few rules only it wants.
+                return self.send_html(PAGE if PLATFORM != "android"
+                                      else PAGE.replace("<body>", '<body class="android">', 1))
 
             if route == "/favicon.ico" and os.path.exists(ICON_PATH):
                 # A real .ico, with the small sizes a tab actually renders.
@@ -14314,6 +14316,10 @@ section:first-child{margin-top:0}
   position:fixed;inset:0;background:rgba(5,4,9,.66);z-index:50;overflow:auto;
   padding:40px 20px;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
 }
+/* On the phone, over the top strip too. On the PC that strip holds the
+   window's own buttons and has to stay reachable; on the phone it's only
+   the version and the counts, and the panel scrolled up under it. */
+body.android .sheet{z-index:85}
 /* minmax(0,1fr), not 1fr: a plain `1fr` is `minmax(auto,1fr)`, so the track
    is never allowed narrower than its content's own minimum — and one flex
    row in there, an episode with a long name, has a minimum of its whole
@@ -17370,7 +17376,47 @@ $('#q').oninput = () => {
 $('#libsort').onchange = () => loadLibrary();
 $('#shelf').onchange = () => loadLibrary();
 
+/* The phone's Back gesture, asked by the Android app before it does
+   anything: close the top thing that's open — a tile's menu, a detail
+   sheet, the queue — and say there was one. Nothing open, and the app goes
+   to the background, as Android apps do from their first screen. */
+function nextupBack(){
+  if(tileMenu){ closeTileMenu(); return true; }
+  const sheets = document.querySelectorAll('.sheet');
+  if(sheets.length){ sheets[sheets.length - 1].remove(); return true; }
+  if(queueOverlayOpen){ queueOverlayOpen = false; placeQueueSide(); return true; }
+  return false;
+}
+
 /* ---------- the detail sheet ---------- */
+
+/* On a touch screen, a panel pulled down from its top goes away, as a
+   phone's own sheets do — it follows the finger, and past a point lets go.
+   Only from the top: anywhere further down, dragging down is just
+   scrolling back up the panel. */
+function sheetSwipe(back, body){
+  let y0 = null, dy = 0;
+  back.addEventListener('touchstart', e => {
+    y0 = back.scrollTop <= 0 && e.touches.length === 1 ? e.touches[0].clientY : null;
+    dy = 0;
+  }, {passive: true});
+  back.addEventListener('touchmove', e => {
+    if(y0 === null) return;
+    dy = e.touches[0].clientY - y0;
+    body.style.transition = 'none';
+    body.style.transform = dy > 0 ? 'translateY(' + Math.round(dy * 0.7) + 'px)' : '';
+    back.style.opacity = dy > 0 ? String(Math.max(0.45, 1 - dy / 700)) : '';
+  }, {passive: true});
+  back.addEventListener('touchend', () => {
+    if(y0 === null) return;
+    y0 = null;
+    if(dy > 120){ back.remove(); return; }
+    body.style.transition = 'transform .2s ease';
+    body.style.transform = '';
+    back.style.opacity = '';
+  });
+}
+
 function sheet(){
   const back = el('div','sheet');
   const body = el('div','sheetbody');
@@ -17384,6 +17430,7 @@ function sheet(){
      backdrop behind it, so clicking the obvious gap did nothing. Anything
      that isn't the content itself now dismisses. */
   back.onclick = e => { if(e.target === back || e.target === body) back.remove(); };
+  sheetSwipe(back, body);
   document.addEventListener('keydown', function esc2(e){
     if(e.key === 'Escape'){ back.remove(); document.removeEventListener('keydown', esc2); }
   });

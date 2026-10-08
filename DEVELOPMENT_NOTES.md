@@ -16,6 +16,38 @@ at the top.
 
 ---
 
+## 2026-10-09 — v0.1.56, the phone app full-screen, with Back and swipe-down
+
+From the user on the S21 and S24U.
+
+- **Full screen** (app.py `full_screen`): status and navigation bars hidden
+  (a swipe in shows them for a moment), and `layoutInDisplayCutoutMode =
+  SHORT_EDGES`. That alone left a 75px strip at the camera end in
+  landscape: Briefcase's MainActivity gives the page MARGINS for system
+  bars + display cutout, from a listener on the page view — which toga
+  replaces after startup, taking a listener set there with it. `no_margins`
+  answers one level up instead, on android.R.id.content, passing on insets
+  with systemBars and displayCutout zeroed; Briefcase's listener then sets
+  0 margins.
+- **Back** closes what's open before leaving. The page's `nextupBack()`
+  closes the tile menu, the top `.sheet`, or the queue overlay and returns
+  true, or returns false. app.py's `handle_back` registers an
+  OnBackInvokedCallback (an interface, so a dynamic proxy), asks the page
+  via evaluateJavascript, and on false does `moveTaskToBack(true)` — the
+  background, not a quit. Needs `android:enableOnBackInvokedCallback="true"`
+  (pyproject: `android_manifest_application_attrs_extra_content`).
+  androidx's OnBackPressedCallback was tried first: Chaquopy's static
+  proxy can't call its one-argument constructor, so it won't compile.
+- **The top strip over the details.** `#titlebar` is z-index 80, above a
+  `.sheet` (50) — right on the PC, where it holds the window buttons. On
+  Android, `/` is served with `<body class="android">`, and
+  `body.android .sheet{z-index:85}`.
+- **Swipe down to close** a detail sheet (`sheetSwipe`): from the panel's
+  top only, follows the finger, closes past 120px, springs back otherwise.
+- Verified on the S21 (Android 15): no strip, Back closes the details
+  then backgrounds the app, the scrolled sheet covers the strip, a swipe
+  down closes it.
+
 ## 2026-10-09 — v0.1.55 (cont.), a film finished on the phone counts as watched
 
 Reading mpv-android's own source (MPVActivity.kt) for the audio-delay

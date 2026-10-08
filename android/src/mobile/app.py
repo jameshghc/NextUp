@@ -34,6 +34,7 @@ class NextUp(toga.App):
                 "Next Up couldn't start:\n\n" + traceback.format_exc())
         self.main_window.show()
         dark_bars(self)
+        handle_back(self)
         ask_for_videos(self)
 
 
@@ -83,6 +84,92 @@ def dark_bars(app):
         bars.setAppearanceLightNavigationBars(False)
     except Exception:
         traceback.print_exc()   # cosmetic: the app works without it
+    full_screen(app)
+
+
+def full_screen(app):
+    """The whole screen for Next Up: the clock-and-notifications bar and the
+    navigation bar hidden while it's open (a swipe in from the edge shows
+    them for a moment, as in a game or a video app), and the page allowed
+    beside the camera instead of a grey strip there in landscape."""
+    try:
+        from java import jclass
+        WindowCompat = jclass("androidx.core.view.WindowCompat")
+        Controller = jclass("androidx.core.view.WindowInsetsControllerCompat")
+        Types = jclass("androidx.core.view.WindowInsetsCompat$Type")
+        Params = jclass("android.view.WindowManager$LayoutParams")
+        window = app._impl.native.getWindow()
+        WindowCompat.setDecorFitsSystemWindows(window, False)
+        attrs = window.getAttributes()
+        attrs.layoutInDisplayCutoutMode = Params.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        window.setAttributes(attrs)
+        bars = Controller(window, window.getDecorView())
+        bars.setSystemBarsBehavior(Controller.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE)
+        bars.hide(Types.systemBars())
+        no_margins(app)
+    except Exception:
+        traceback.print_exc()
+
+
+def no_margins(app):
+    """Briefcase's launcher keeps the page clear of the bars AND the camera
+    cutout by giving it margins, which in landscape left a strip down the
+    camera end even with the bars hidden. Its handler sits on the page
+    itself, which the app replaces after this runs — so the answer is given
+    one level up instead: the container the page sits in passes on no bars
+    and no cutout, and the launcher's own handler then sets no margins. A
+    bar swiped in for a moment floats over the page."""
+    from java import jclass, dynamic_proxy
+    Listener = jclass("androidx.core.view.OnApplyWindowInsetsListener")
+    ViewCompat = jclass("androidx.core.view.ViewCompat")
+    Builder = jclass("androidx.core.view.WindowInsetsCompat$Builder")
+    Types = jclass("androidx.core.view.WindowInsetsCompat$Type")
+    Insets = jclass("androidx.core.graphics.Insets")
+    content = app._impl.native.findViewById(jclass("android.R$id").content)
+    edges = Types.systemBars() | Types.displayCutout()
+
+    class Edge(dynamic_proxy(Listener)):
+        def onApplyWindowInsets(self, view, insets):
+            return Builder(insets).setInsets(edges, Insets.NONE).build()
+
+    ViewCompat.setOnApplyWindowInsetsListener(content, Edge())
+    ViewCompat.requestApplyInsets(content)
+
+
+def handle_back(app):
+    """Back closes what's open in the page first — a film's details, say —
+    and only from the bare page does it leave, by going to the background
+    rather than quitting, as Android apps do. The page is asked
+    (nextupBack, in nextup.py) because only it knows what's open.
+
+    Android's own Back callback (13 and later), which the manifest opts in
+    to — see pyproject.toml."""
+    try:
+        from java import jclass, dynamic_proxy
+        Callback = jclass("android.window.OnBackInvokedCallback")
+        Dispatcher = jclass("android.window.OnBackInvokedDispatcher")
+        ValueCallback = jclass("android.webkit.ValueCallback")
+        activity = app._impl.native
+        webview = app.main_window.content._impl.native
+
+        class Answer(dynamic_proxy(ValueCallback)):
+            def onReceiveValue(self, value):
+                if str(value) != "true":
+                    activity.moveTaskToBack(True)
+
+        class OnBack(dynamic_proxy(Callback)):
+            def onBackInvoked(self):
+                webview.evaluateJavascript(
+                    "typeof nextupBack === 'function' && nextupBack()", Answer())
+
+        _KEEP.append(OnBack())      # Android holds it weakly enough to lose it
+        activity.getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+            Dispatcher.PRIORITY_DEFAULT, _KEEP[-1])
+    except Exception:
+        traceback.print_exc()   # Back then just leaves, as it did before
+
+
+_KEEP = []
 
 
 def has_video_access(app):

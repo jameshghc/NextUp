@@ -37,7 +37,9 @@ held = socket.socket(); held.bind(("127.0.0.1", 8794)); held.listen(1)
 port = n.serve_in_thread(8794)
 out["port"] = port
 with urllib.request.urlopen("http://127.0.0.1:%%d/" %% port, timeout=10) as r:
-    out["status"], out["has_title"] = r.status, b"<title>" in r.read()
+    body = r.read()
+    out["status"], out["has_title"] = r.status, b"<title>" in body
+    out["android_body"] = b'<body class="android">' in body
 out["dismissed_loaded"] = "movie:424242" in n.DISMISSED
 out["again"] = n.serve_in_thread(8797)
 with urllib.request.urlopen("http://127.0.0.1:%%d/api/status" %% port, timeout=10) as r:
@@ -162,6 +164,37 @@ check("the mpv test in Settings says how the phone plays, not 'install mpv.exe'"
       out.get("mpv_test"))
 check("no player hooked up is said plainly", "error" in (out.get("no_player") or {})
       and "winget" not in out["no_player"]["error"], out.get("no_player"))
+
+check("the page is served marked as the phone's, for its phone-only rules",
+      out.get("android_body"), out.get("android_body"))
+page_src = open(os.path.join(ROOT, "nextup.py"), encoding="utf-8").read()
+check("on the phone a details panel covers the top strip instead of scrolling under it",
+      "body.android .sheet{" in page_src)
+check("a details panel can be swiped down to close", "function sheetSwipe(" in page_src
+      and "sheetSwipe(back" in page_src)
+
+# The phone's Back gesture asks the page first: close what's open, or say
+# there's nothing, so the app can go to the background. Run in node against
+# a pretend page: two details panels open, then none.
+import re as _re
+page_js = "\n;\n".join(_re.findall(r"<script>(.*?)</script>", open(os.path.join(ROOT, "nextup.py"),
+                                     encoding="utf-8").read(), _re.S))
+fn = _re.search(r"function nextupBack\(\)\{.*?\n\}", page_js, _re.S)
+check("the page has a Back handler for the phone", fn, "")
+if fn:
+    probe = """
+let tileMenu = null, queueOverlayOpen = false;
+const sheets = [{removed:false}, {removed:false}];
+const document = {querySelectorAll: s => s === '.sheet'
+  ? sheets.filter(x => !x.removed).map(x => ({remove(){ x.removed = true; }})) : []};
+function closeTileMenu(){} function placeQueueSide(){}
+""" + fn.group(0) + """
+console.log(JSON.stringify([nextupBack(), sheets[1].removed, sheets[0].removed, nextupBack(), sheets[0].removed, nextupBack()]));
+"""
+    r = subprocess.run(["node", "-e", probe], capture_output=True, text=True)
+    got = json.loads(r.stdout or "null")
+    check("Back closes the top panel first, then the next, then says nothing's open",
+          got == [True, True, False, True, True, False], (got, r.stderr[:300]))
 
 shutil.rmtree(home, ignore_errors=True)
 print("\n%d/%d passed" % (sum(results), len(results)))

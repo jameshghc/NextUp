@@ -3,7 +3,7 @@
 [tool.briefcase]
 project_name = "Next Up"
 bundle = "app.nextup"
-version = "0.1.55"
+version = "0.1.56"
 url = "https://nextup.app/"
 license = "Proprietary"
 author = "jambo"
@@ -45,6 +45,9 @@ build_gradle_dependencies = [
 # Reading the films stored on the phone. Asked for at first launch (app.py);
 # Android shows the user its own Allow / Don't allow prompt.
 permission."android.permission.READ_MEDIA_VIDEO" = {}
+# Back goes through Next Up first (app.py, handle_back): Android 13+ only
+# hands it to an app that says it wants it.
+android_manifest_application_attrs_extra_content = 'android:enableOnBackInvokedCallback="true"'
 build_gradle_extra_content = """
 chaquopy.defaultConfig.staticProxy("toga_android.widgets.internal.webview")
 """
