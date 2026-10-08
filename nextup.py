@@ -5080,21 +5080,30 @@ def browse_library(kind, query, sort, shelf, limit, offset):
         except Exception:
             pass        # a snapshot problem must never take the Library down
 
-    if shelf == "unrated":
-        rows = [r for r in rows if not r["userrating"]]
-    elif shelf == "rated":
-        rows = [r for r in rows if r["userrating"]]
-    elif shelf == "progress":
-        rows = [r for r in rows if r.get("in_progress")]
-    elif shelf == "watchlist":
-        rows = [r for r in rows if r.get("watchlisted")]
-    elif shelf == "favourite":
-        rows = [r for r in rows if r.get("favourited")]
-    # A separate step, not another branch of the chain above. It used to be
-    # an `if` sitting in the middle of that chain, which made the watchlist
-    # and favourites branches after it unreachable: both shelves quietly
-    # showed the whole library from v0.1.20 until this was noticed.
-    if shelf in ("progress", "watchlist", "favourite"):
+    # Shelves combine with "+": the Favourites section sends "favourite" and
+    # the Show list can add one more beside it — "favourite+here" is your
+    # favourites that are actually on this device.
+    shelves = set((shelf or "all").split("+"))
+    tests = {
+        "unrated": lambda r: not r["userrating"],
+        "rated": lambda r: r["userrating"],
+        "progress": lambda r: r.get("in_progress"),
+        "watchlist": lambda r: r.get("watchlisted"),
+        "favourite": lambda r: r.get("favourited"),
+        # Where the file is. Asked for on the phone, whose library is mostly
+        # the PC's catalogue greyed out: what can actually be watched here,
+        # now, is the question as often as anything else.
+        "here": lambda r: not r.get("elsewhere"),
+        "elsewhere": lambda r: r.get("elsewhere"),
+    }
+    for name in shelves:
+        if name in tests:
+            rows = [r for r in rows if tests[name](r)]
+    # Progress, the watchlist and favourites are marks this device keeps, so
+    # a greyed row from elsewhere never belongs on them. (Once an `if` in the
+    # middle of a chain of elifs, which made the two after it unreachable:
+    # both shelves showed the whole library from v0.1.20 until noticed.)
+    if shelves & {"progress", "watchlist", "favourite"}:
         rows = [r for r in rows if not r.get("elsewhere")]
 
     if query:
@@ -14901,12 +14910,10 @@ header.mast .libplaces.offview{visibility:hidden}
     </label>
     <label class="f"><span>Show</span>
       <select id="shelf">
-        <option value="all">Everything</option>
-        <option value="unrated">Not rated yet</option>
-        <option value="rated">Rated</option>
+        <option value="all">Show all</option>
         <option value="progress">Part way through</option>
         <option value="watchlist">Watchlist</option>
-        <option value="favourite">Favourites</option>
+        <option value="here">On this device</option>
       </select>
     </label>
     <label class="f"><span>Sort</span>
@@ -15880,8 +15887,6 @@ function drawLibNav(){
         /* Favourites holds films and shows alike — the same 'all' the
            Shelf dropdown's Favourites has always used. */
         libKind = id === 'tv' ? 'tv' : id === 'fav' ? 'all' : 'film';
-        if(id==='fav') $('#shelf').value = 'favourite';
-        else if($('#shelf').value === 'favourite') $('#shelf').value = 'all';
       }
       drawLibNav(); applyLibSection();
       if(!LIB_PANELS[id]){ loadLibrary(); paintResumeRow(); }
@@ -16118,7 +16123,24 @@ function resumeCard(item){
 
 const LIB_PAGE_SIZE = 120;
 
+/* What to ask the server for: the Show list's choice, and "favourite" too
+   while the Favourites section is up — the section is the only way to
+   favourites now, and whatever's picked in the list narrows it further. */
+function libShelf(){
+  const parts = [];
+  if(libSection === 'fav') parts.push('favourite');
+  if($('#shelf').value !== 'all') parts.push($('#shelf').value);
+  return parts.join('+') || 'all';
+}
+
+/* Each load is numbered, and only the latest one may draw. Two in flight —
+   Favourites then Films, clicked in quick succession — came back in either
+   order, and when the Favourites reply landed second it drew favourites
+   under a lit FILMS tab. */
+let libLoadSeq = 0;
+
 async function loadLibrary(keepOffset){
+  const mine = ++libLoadSeq;
   if(!keepOffset) libOffset = 0;
   /* Asked once and remembered: the badge on every greyed tile names the
      machine the snapshot came from, and without this it falls back to a
@@ -16126,12 +16148,13 @@ async function loadLibrary(keepOffset){
   if(snapState === null) await refreshSnapshotState();
   const q = new URLSearchParams({
     kind: libKind, q: $('#q').value.trim(),
-    sort: $('#libsort').value, shelf: $('#shelf').value,
+    sort: $('#libsort').value, shelf: libShelf(),
     offset: libOffset, limit: LIB_PAGE_SIZE,
   });
   const out = $('#tiles-out');
   out.innerHTML = '<p class="empty">Looking…</p>';
   const data = await api('/api/browse?'+q);
+  if(mine !== libLoadSeq) return;       // a newer load has been asked for
   if(data.error){
     out.innerHTML = '<div class="notice bad"><p>'+esc(data.error)+'</p></div>';
     $('#pager').classList.add('hidden');
@@ -16957,14 +16980,7 @@ $('#q').oninput = () => {
   searchTimer = setTimeout(() => loadLibrary(), 220);
 };
 $('#libsort').onchange = () => loadLibrary();
-/* Picking Favourites from the dropdown lights the section up as well, so the
-   two controls can never sit there disagreeing about where you are. */
-$('#shelf').onchange = () => {
-  const fav = $('#shelf').value === 'favourite';
-  if(fav && libSection !== 'fav'){ libSection = 'fav'; libKind = 'all'; drawLibNav(); }
-  else if(!fav && libSection === 'fav'){ libSection = 'film'; libKind = 'film'; drawLibNav(); }
-  loadLibrary();
-};
+$('#shelf').onchange = () => loadLibrary();
 
 /* ---------- the detail sheet ---------- */
 function sheet(){

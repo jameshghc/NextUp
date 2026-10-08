@@ -126,8 +126,23 @@ for _ in range(100):
 check("sending runs in the background and reports back", (s.get("send") or {}).get("result"), s.get("send"))
 desk.shutdown(); phone.shutdown()
 
+# --- the Show filter: what's on this device, and what isn't ------------------------------
+n.import_library_snapshot({"kind": "nextup-library-snapshot", "version": 1, "device": "DESKTOP-TEST",
+                           "exported_at": "2026-10-08 12:00:00", "app_version": n.APP_VERSION,
+                           "movies": [{"tmdb_id": "x999001", "title": "Elsewhere Film", "year": 2001,
+                                       "genres": "", "directors": "", "cast_names": "", "plot": "",
+                                       "poster": None, "tmdb_rating": 7.0, "runtime": 100,
+                                       "userrating": 0, "playcount": 0}],
+                           "shows": [], "episodes": []}, fetch_art=False)
+local = n.browse_library("film", "", "title", "here", 400, 0)["items"]
+away = n.browse_library("film", "", "title", "elsewhere", 400, 0)["items"]
+check("On this device shows only what's here", local and not any(i.get("elsewhere") for i in local),
+      len(local))
+check("Not on this device shows only what isn't", [i["title"] for i in away] == ["Elsewhere Film"],
+      [i["title"] for i in away][:5])
+
 import re, subprocess
-WORK = os.path.join(here, "_work"); os.makedirs(WORK, exist_ok=True)
+WORK =os.path.join(here, "_work"); os.makedirs(WORK, exist_ok=True)
 js = "\n;\n".join(re.findall(r"<script>(.*?)</script>", n.PAGE, re.S))
 open(os.path.join(WORK, "page.js"), "w", encoding="utf-8").write(js)
 r = subprocess.run(["node", "-e", "new Function(require('fs').readFileSync(process.argv[1],'utf8'));console.log('ok')",
@@ -135,6 +150,18 @@ r = subprocess.run(["node", "-e", "new Function(require('fs').readFileSync(proce
 check("page script parses", r.stdout.strip() == "ok", r.stderr[:300])
 check("Settings has the plugged-in phone section", 'id="usbphone_body"' in n.PAGE
       and "SEND MY LIBRARY" in n.PAGE)
+check("the Show list offers Show all and On this device",
+      '<option value="all">Show all</option>' in n.PAGE and '<option value="here">' in n.PAGE)
+check("and no longer offers Not rated yet, Rated, Favourites or Not on this device",
+      not any('<option value="%s">' % v in n.PAGE for v in ("unrated", "rated", "favourite", "elsewhere")))
+conn = n.db()
+fav_ids = [r[0] for r in conn.execute("SELECT id FROM movies ORDER BY id LIMIT 2")]
+conn.execute("UPDATE movies SET favourited_at='2026-10-08 12:00:00' WHERE id IN (?,?)", fav_ids)
+conn.commit(); conn.close()
+n.LIB.loaded_at = 0
+both = n.browse_library("all", "", "title", "favourite+here", 400, 0)["items"]
+check("Favourites and On this device together", both and all(i.get("favourited") and not i.get("elsewhere")
+                                                             for i in both), [i["title"] for i in both])
 
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
