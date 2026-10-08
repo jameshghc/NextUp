@@ -20733,6 +20733,7 @@ def startup_failure(message):
 # empty library. None on the desktop, where there's nothing to ask.
 ANDROID_VIDEO_ACCESS = None
 _SERVING = [None]
+_SERVER = [None]                # the server serve_in_thread started, for main()
 _PREPARED = [False]
 
 
@@ -20783,6 +20784,7 @@ def serve_in_thread(port=None, host="127.0.0.1", tries=20):
                          name="playback monitor").start()
     threading.Thread(target=sync_loop, daemon=True, name="sync").start()
     threading.Thread(target=refresh_watch_scores, daemon=True, name="watch scores").start()
+    _SERVER[0] = server
     _SERVING[0] = server.server_address[1]
     return _SERVING[0]
 
@@ -20816,6 +20818,8 @@ def main():
         # One port only, here: the desktop's address is fixed, and the
         # already-running check above has dealt with anything else on it.
         serve_in_thread(APP_PORT, tries=1)
+        # Kept here too: the window's close releases the port with it.
+        server = _SERVER[0]
     except OSError as exc:
         startup_failure("Next Up couldn't open port %d: %s" % (APP_PORT, exc))
         return

@@ -78,6 +78,22 @@ check("no access to videos is said, not left as an empty library",
 check("nothing written beside the code", sorted(os.listdir(ROOT)) == before,
       set(os.listdir(ROOT)) ^ set(before))
 
+# main() can't be run here — it opens the window — so its names are checked
+# instead: every one it reads must be assigned in it, defined in the module,
+# or built in. When serve_in_thread took over the start-up, `server` stopped
+# being assigned in main() but was still read there on the way out, and the
+# app showed a NameError every time its window closed.
+import symtable, builtins
+src = open(os.path.join(ROOT, "nextup.py"), encoding="utf-8").read()
+table = symtable.symtable(src, "nextup.py", "exec")
+module_names = set(table.get_identifiers())
+main_table = next(t for t in table.get_children() if t.get_name() == "main")
+undefined = sorted(s.get_name() for s in main_table.get_symbols()
+                   if s.is_referenced() and not s.is_assigned() and not s.is_parameter()
+                   and not s.is_imported() and s.get_name() not in module_names
+                   and not hasattr(builtins, s.get_name()))
+check("main() uses no name it never defines", not undefined, undefined)
+
 shutil.rmtree(home, ignore_errors=True)
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
