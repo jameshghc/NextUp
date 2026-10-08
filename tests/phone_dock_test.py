@@ -169,5 +169,14 @@ n.dock_copy_worker(n.dock_plan_items(selection)[0], DEST)
 check("cancel stops it", not os.path.exists(local(root + "/TV")), n.DOCK["step"])
 desk.shutdown()
 
+# --- one place to fill a drive: Library > Drives ------------------------------------------
+page = n.PAGE
+drives_html = page[page.index('<div id="view-drives">'):page.index('<!-- ================= RATE')]
+check("SELECT is gone from the Library toolbar", 'id="libselect"' not in page)
+check("the Settings docking station is gone", "<h3>Docking station</h3>" not in page
+      and 'id="dock_drive"' not in page)
+check("Drives holds the library view, the copy tray and the mode switch",
+      all(x in drives_html for x in ('id="drv_mode"', 'id="drv_lib"', 'id="seltray"', 'id="tray_add"')))
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

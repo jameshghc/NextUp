@@ -16,6 +16,40 @@ at the top.
 
 ---
 
+## 2026-10-08 — v0.1.52, one place to fill a drive: Library › Drives
+
+The user's call: the docking station lives in Drives, and you fill a drive
+by tapping tiles. The Settings docking card and the Library's SELECT were
+the same job in two other places, and both are gone.
+
+Drives has two views (**Show me**):
+
+- **Your library — tap to add** (the default). Your library, only what's
+  on this device, paged 120 at a time, marked against the drive picked.
+  - A blue ✓ means on it, a red ✕ means not on it (dimmed), "3/10" means
+    partly copied.
+  - Tap a dimmed tile to tick it; one fully on the drive can't be ticked.
+  - The tray underneath prices the copy (what's left, against free space,
+    with a confirm), runs it and shows progress. Afterwards it re-reads the
+    marks, so what was copied shows as on the drive.
+- **What's on the drive:** the old read-only Drives view, unchanged.
+
+It's the same machinery (`/api/dock/plan|start|status|present`), with the
+tray and the marks now following Drives' own drive picker. Works the same
+for USB drives and the phone. REREAD also re-lists the drives, so a phone
+plugged in since the page opened turns up.
+
+**One slip, caught in the browser:** reading the marks clears the tray's
+status line, so the "Done — 2 of 2 copied" message vanished at once. The
+marks are now read first and the message written after.
+
+`tests/drives_serve.py` (launch config `nextup-drives`, port 8775) is the
+sandbox with a pretend drive (a temp folder) and three small test films.
+Its copy refuses anything else, because the sandbox's library points at
+the real films on E:.
+
+---
+
 ## 2026-10-08 — v0.1.51, the phone in the drive lists
 
 The phone on the cable is now a drive like any other. It appears in the

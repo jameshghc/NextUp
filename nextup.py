@@ -108,7 +108,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.51"
+APP_VERSION = "0.1.52"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -13831,7 +13831,6 @@ section:first-child{margin-top:0}
    The tray sits between the grid and the pager and only exists while you're
    selecting. It is the docking station's front end brought to where the
    posters are: same selection, same copy engine, same drive list. */
-.libselect[aria-pressed="true"]{background:rgba(224,163,62,.18);color:var(--marigold-2)}
 .seltray{
   display:flex;align-items:center;gap:10px;flex-wrap:wrap;
   margin:12px 0 0;padding:12px 16px;border-radius:var(--r-card);
@@ -13881,6 +13880,11 @@ section:first-child{margin-top:0}
 #view-library.selecting .tile.offdrive .drivebadge{background:hsl(2 74% 52%);color:#fff}
 #view-library.selecting .tile.partdrive .drivebadge{background:var(--marigold);color:#1a1206}
 #view-library.selecting .tile .watchbadge{display:none}
+/* Filling a drive: what isn't on it is dimmed, so what's there and what you
+   could add part at a glance — and a tick lights it back up. */
+#view-library.selecting .tile.offdrive:not(.picked) .art,
+#view-library.selecting .tile.partdrive:not(.picked) .art{filter:brightness(.5) saturate(.7)}
+#view-library.selecting .tile.ondrive{cursor:default}
 .tile.picked{box-shadow:0 0 0 2px var(--marigold),var(--shadow-card)}
 .tile.picked:hover{box-shadow:0 0 0 2px var(--marigold-2),var(--shadow-lift)}
 
@@ -14358,7 +14362,6 @@ label.f span b{color:var(--marigold);font-weight:400;font-family:var(--mono)}
 .dockrow input[type=checkbox]{flex:none;width:16px;height:16px;accent-color:var(--marigold)}
 .dockrow .t{flex:1;min-width:0;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dockrow .t small{display:block;font-family:var(--mono);font-size:10.5px;color:var(--muted)}
-select#dock_drive{background:var(--ink);border:1px solid var(--line);color:var(--paper);border-radius:3px;padding:8px 10px;font-family:var(--body);font-size:14px}
 
 #playingbar{
   display:flex;align-items:center;gap:12px;background:var(--ink-2);border:1px solid var(--line);
@@ -14472,7 +14475,7 @@ select#dock_drive{background:var(--ink);border:1px solid var(--line);color:var(-
 .rate.prompt{border-radius:10px}
 
 /* -- inputs ----------------------------------------------------------------- */
-select,textarea,.searchbox input,.fields input,.fixform input,select#dock_drive{
+select,textarea,.searchbox input,.fields input,.fixform input{
   background:rgba(255,255,255,.05);border:1px solid transparent;border-radius:var(--r-btn);
   box-shadow:inset 0 1px 0 rgba(255,255,255,.04);transition:border-color .12s ease,box-shadow .12s ease;
   color:var(--paper);
@@ -15110,11 +15113,6 @@ header.mast .libplaces.offview{visibility:hidden}
     </label>
     <div class="libcount" id="libcount"></div>
     <div class="libscanmsg" id="libscanmsg"></div>
-    <!-- Selection mode: posters become things you tick rather than open,
-         and a tray appears under the grid to send the ticked ones to a
-         drive. The list it builds is the docking station's own. -->
-    <button class="iconbtn libselect" id="libselect" title="Tick films and shows to copy to a drive"
-            aria-pressed="false">SELECT</button>
     <button class="iconbtn libdupes hidden" id="libdupes"
             title="The same film more than once">DUPES</button>
     <button class="librefresh" id="librefresh" title="Look for new files"
@@ -15128,18 +15126,6 @@ header.mast .libplaces.offview{visibility:hidden}
     </div><!-- /.searchrow -->
   </div><!-- /.libtop -->
   <div id="tiles-out"></div>
-  <div class="seltray hidden" id="seltray">
-    <div class="selcount" id="tray_count">Nothing ticked yet</div>
-    <label class="f seldrive"><span>Drive</span>
-      <select id="tray_drive"><option value="">No drives found</option></select>
-    </label>
-    <button class="iconbtn" id="tray_refresh" title="Look for drives again">↻</button>
-    <button class="play" id="tray_add" disabled>ADD TO DRIVE</button>
-    <button class="iconbtn hidden" id="tray_cancel">CANCEL</button>
-    <button class="iconbtn" id="tray_clear">CLEAR</button>
-    <button class="iconbtn" id="tray_done">DONE</button>
-    <div class="selstatus" id="tray_status"></div>
-  </div>
   <div class="pager hidden" id="pager">
     <button class="iconbtn" id="pagerprev">‹ PREV</button>
     <span id="pagerpos"></span>
@@ -15193,11 +15179,20 @@ header.mast .libplaces.offview{visibility:hidden}
   </div>
 
   <!-- ================= DRIVES =================
-       A read-only shelf for whatever is plugged in: the same poster grid,
-       built from what the drive actually holds rather than from the
-       library. For seeing what went onto a drive, or what came in on one. -->
+       Where a drive — or the phone on the cable — is filled, and looked at.
+       "Your library" is the poster grid marked against the drive: tap what
+       isn't on it to add it, then COPY. "What's on the drive" is the drive's
+       own contents, matched to the library where it can be. The docking
+       station that used to live in Settings, and the Library's SELECT, were
+       this same job in two other places; this is the one place now. -->
   <div id="view-drives">
     <div class="filters">
+      <label class="f"><span>Show me</span>
+        <select id="drv_mode">
+          <option value="lib">Your library — tap to add</option>
+          <option value="drive">What's on the drive</option>
+        </select>
+      </label>
       <label class="f"><span>Drive</span>
         <select id="drv_pick" style="min-width:240px"><option value="">Looking for drives…</option></select>
       </label>
@@ -15216,6 +15211,19 @@ header.mast .libplaces.offview{visibility:hidden}
     </div>
     <div id="drv_summary" class="drvsummary"></div>
     <div id="drv_out"><p class="empty">Looking for drives…</p></div>
+    <div id="drv_lib"></div>
+    <div class="pager hidden" id="drv_pager">
+      <button class="iconbtn" id="drv_prev">‹ PREV</button>
+      <span id="drv_pagerpos"></span>
+      <button class="iconbtn" id="drv_next">NEXT ›</button>
+    </div>
+    <div class="seltray hidden" id="seltray">
+      <div class="selcount" id="tray_count">Nothing ticked yet</div>
+      <button class="play" id="tray_add" disabled>COPY TO DRIVE</button>
+      <button class="iconbtn hidden" id="tray_cancel">CANCEL</button>
+      <button class="iconbtn" id="tray_clear">CLEAR</button>
+      <div class="selstatus" id="tray_status"></div>
+    </div>
   </div>
 </div>
 
@@ -15341,46 +15349,6 @@ header.mast .libplaces.offview{visibility:hidden}
     <div id="usbphone_body"><p class="empty">Looking for a phone…</p></div>
   </div>
 
-  <!-- ================= DOCKING STATION =================
-       One-way, additive-only: reads from the library's own drives and
-       writes to whatever's plugged in. Never touches or deletes the
-       original, so there's nothing here that needs an "are you sure". -->
-  <div class="settings">
-    <h3>Docking station</h3>
-    <p class="empty">Plug in a USB drive, tick what you want on it, and Next Up copies the files across — as <code>Films\</code> and <code>TV Shows\</code> folders, ready for another player to point at. The drive you're copying from is never touched.</p>
-    <div class="rowbtns">
-      <select id="dock_drive" style="min-width:260px"><option value="">No drives found</option></select>
-      <button class="iconbtn" id="dock_refresh">REFRESH DRIVES</button>
-    </div>
-    <div id="dock_drivenote" class="libline" style="margin-top:8px"></div>
-
-    <div class="searchrow" style="margin-top:16px">
-      <label class="searchbox"><span>Search</span>
-        <input id="dock_q" type="search" placeholder="Find something to copy across…" autocomplete="off">
-      </label>
-      <label class="f"><span>Show</span>
-        <select id="dock_kind">
-          <option value="all">Everything</option>
-          <option value="film">Films</option>
-          <option value="tv">TV shows</option>
-        </select>
-      </label>
-      <div class="libcount" id="dock_selcount">nothing selected</div>
-    </div>
-    <div id="dock_list" class="docklist"></div>
-    <div class="pager hidden" id="dock_pager">
-      <button class="iconbtn" id="dock_prev">‹ PREV</button>
-      <span id="dock_pagerpos"></span>
-      <button class="iconbtn" id="dock_next">NEXT ›</button>
-    </div>
-
-    <div class="rowbtns" style="margin-top:16px">
-      <button class="play" id="dock_start" disabled>COPY SELECTED TO DRIVE</button>
-      <button class="iconbtn hidden" id="dock_cancel">CANCEL</button>
-    </div>
-    <div id="dock_status"></div>
-  </div>
-
   <div class="settings">
     <h3>What's stored on this machine</h3>
     <p class="empty" id="dbline">All of it lives in the Next Up folder. Nothing leaves your PC except the metadata lookups.</p>
@@ -15444,7 +15412,6 @@ document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
 
 function resetView(view){
   if(view === 'library'){
-    if(libSelecting) setSelecting(false);
     libSection = 'film';
     libKind = 'film';
     libOffset = 0;
@@ -15486,7 +15453,7 @@ function switchTo(view){
   }
   if(view==='rate'){ staleRatings = false; loadRatings(); }
   if(view==='channels') loadChannels();
-  if(view==='settings'){ loadData(); dockOnOpen(); syncLoad(); sorterLoad(); phoneLoad(); usbPhoneLoad(); }
+  if(view==='settings'){ loadData(); syncLoad(); sorterLoad(); phoneLoad(); usbPhoneLoad(); }
 }
 
 /* The shell is a fixed-height column and only the panel inside a tab
@@ -16030,6 +15997,8 @@ function applyLibSection(){
   $('#view-library').classList.toggle('showing-recs', recs);
   $('#view-library').classList.toggle('showing-history', hist);
   $('#view-library').classList.toggle('showing-drives', libSection === 'drives');
+  /* Ticking is what tiles do in Drives' library view, and only there. */
+  $('#view-library').classList.toggle('selecting', ticking());
   if(libSection === 'drives') driveOnOpen();
   if(recs){
     renderCarried(); drawHub(); paintMore();
@@ -16086,27 +16055,89 @@ function drawLibNav(){
    switching between films and shows costs no second look at the disk. */
 let drvData = null, drvInited = false, drvSeq = 0, drvTimer = null;
 
-function driveOnOpen(){
-  if(!drvInited){ drvInited = true; drvDrives(); return; }
-  if(drvData) drvShow(); else drvDrives();
+/* "lib": your library marked against the drive, tap to add. "drive": what
+   the drive itself holds. Library first — filling a drive is why you came. */
+var drvMode = 'lib';           // var: read by ticking() before this line may have run
+let drvLibOffset = 0, drvLibTotal = 0, drvLibSeq = 0;
+const DRV_PAGE = 120;
+
+function ticking(){ return libSection === 'drives' && drvMode === 'lib'; }
+
+function drvApplyMode(){
+  const lib = drvMode === 'lib';
+  $('#drv_lib').classList.toggle('hidden', !lib);
+  $('#drv_pager').classList.toggle('hidden', !lib || drvLibTotal <= DRV_PAGE);
+  $('#seltray').classList.toggle('hidden', !lib);
+  $('#drv_out').classList.toggle('hidden', lib);
+  $('#drv_summary').classList.toggle('hidden', lib);
+  document.querySelector('.drvonly').classList.toggle('hidden', lib);
+  $('#drv_q').placeholder = lib ? 'A title in your library…' : 'A title on this drive…';
+  $('#view-library').classList.toggle('selecting', ticking());
 }
+
+function driveOnOpen(){
+  drvApplyMode();
+  if(!drvInited){ drvInited = true; drvDrives(); trayPoll(); return; }
+  drvRefresh();
+}
+
+/* Whichever view is up, read again for the drive now picked. */
+function drvRefresh(fresh){
+  if(drvMode === 'drive'){ drvLoad(fresh); return; }
+  trayResetConfirm(); trayUpdate();
+  if(drvLibSeq === 0 || fresh) drvLibLoad(); else trayPresence();
+}
+
+async function drvLibLoad(keepOffset){
+  if(!keepOffset) drvLibOffset = 0;
+  const out = $('#drv_lib');
+  const seq = ++drvLibSeq;
+  /* Only what's on this device: there's nothing to copy from a film that
+     lives on another machine. */
+  const q = new URLSearchParams({
+    kind: $('#drv_kind').value, q: $('#drv_q').value.trim(), sort: 'title',
+    shelf: 'here', offset: drvLibOffset, limit: DRV_PAGE});
+  out.innerHTML = '<p class="empty">Looking…</p>';
+  const data = await api('/api/browse?' + q);
+  if(seq !== drvLibSeq) return;
+  if(data.error){ out.innerHTML = '<div class="notice bad"><p>' + esc(data.error) + '</p></div>'; return; }
+  drvLibTotal = data.total || 0;
+  out.innerHTML = '';
+  if(!data.items.length){
+    out.innerHTML = '<p class="empty">Nothing in your library matches that.</p>';
+  } else {
+    const grid = el('div', 'tiles');
+    data.items.forEach(it => grid.append(tile(it)));
+    out.append(grid);
+  }
+  $('#drv_pagerpos').textContent = drvLibTotal
+    ? (drvLibOffset + 1) + '–' + Math.min(drvLibOffset + DRV_PAGE, drvLibTotal) + ' of ' + drvLibTotal : '';
+  $('#drv_prev').disabled = drvLibOffset <= 0;
+  $('#drv_next').disabled = drvLibOffset + DRV_PAGE >= drvLibTotal;
+  drvApplyMode();
+  paintTicks();
+}
+$('#drv_prev').onclick = () => { drvLibOffset = Math.max(0, drvLibOffset - DRV_PAGE); drvLibLoad(true); };
+$('#drv_next').onclick = () => { drvLibOffset += DRV_PAGE; drvLibLoad(true); };
+$('#drv_mode').onchange = () => {
+  drvMode = $('#drv_mode').value;
+  drvApplyMode();
+  if(drvMode === 'drive'){ if(drvData) drvShow(); else drvLoad(); }
+  else drvLibLoad();
+};
 
 async function drvDrives(){
   const sel = $('#drv_pick');
   const was = sel.value;
   const r = await api('/api/dock/drives');
   sel.innerHTML = '';
-  if(!r.supported){ sel.append(new Option('Not available on this OS', '')); drvLoad(); return; }
-  if(!r.drives.length){ sel.append(new Option('No drives found — plug one in', '')); drvLoad(); return; }
+  if(!r.supported){ sel.append(new Option('Not available on this OS', '')); drvRefresh(); return; }
+  if(!r.drives.length){ sel.append(new Option('No drives found — plug one in', '')); drvRefresh(); return; }
   r.drives.forEach(d => sel.append(new Option(
     driveName(d) + ' — ' + dockGB(d.free) + ' free', d.letter)));
-  /* The drive you were last looking at, or failing that the one picked in
-     the copy tray — the likeliest thing you want to see is where you just
-     sent something. */
-  const has = v => v && [...sel.options].some(o => o.value === v);
-  const tray = $('#tray_drive') ? $('#tray_drive').value : '';
-  if(has(was)) sel.value = was; else if(has(tray)) sel.value = tray;
-  drvLoad();
+  /* The drive you were last looking at, if it's still there. */
+  if([...sel.options].some(o => o.value === was)) sel.value = was;
+  drvRefresh();
 }
 
 async function drvLoad(fresh){
@@ -16124,11 +16155,21 @@ async function drvLoad(fresh){
   drvShow();
 }
 
-$('#drv_pick').onchange = () => drvLoad();
-$('#drv_refresh').onclick = () => drvLoad(true);
-$('#drv_kind').onchange = () => drvShow();
+$('#drv_pick').onchange = () => { drvData = null; drvRefresh(); };
+/* REREAD: the drive again, from the disk, and the drives list with it — a
+   phone plugged in since the page opened turns up here. */
+$('#drv_refresh').onclick = async () => {
+  if(drvMode === 'lib' && $('#drv_pick').value){
+    await api('/api/drive/catalogue?' + new URLSearchParams({dest: $('#drv_pick').value, fresh: '1'}));
+  }
+  drvDrives();
+};
+$('#drv_kind').onchange = () => drvMode === 'lib' ? drvLibLoad() : drvShow();
 $('#drv_notlib').onchange = () => drvShow();
-$('#drv_q').oninput = () => { clearTimeout(drvTimer); drvTimer = setTimeout(drvShow, 150); };
+$('#drv_q').oninput = () => {
+  clearTimeout(drvTimer);
+  drvTimer = setTimeout(() => drvMode === 'lib' ? drvLibLoad() : drvShow(), drvMode === 'lib' ? 250 : 150);
+};
 
 function drvShow(){
   if(!drvData) return;
@@ -16605,10 +16646,11 @@ function tile(item){
     openTileMenu(e, item, b);
   };
   b.onclick = () => {
-    /* In selection mode a poster is a thing you tick, not a thing you open. */
-    if(libSelecting){
-      /* Nothing to copy from a machine that hasn't got the file. */
-      if(item.elsewhere) return;
+    /* Filling a drive, a poster is a thing you tick, not a thing you open. */
+    if(ticking()){
+      /* Nothing to copy from a machine that hasn't got the file, and nothing
+         to add that the drive already holds in full. */
+      if(item.elsewhere || b.classList.contains('ondrive')) return;
       toggleTicked(item, b); return;
     }
     /* No local row means no detail page and nothing to play. The hover panel
@@ -16926,11 +16968,9 @@ $('#queue_clear').onclick = async () => {
   if(!r.error){ queueOverlayOpen = false; renderQueue(r.state); }
 };
 
-/* ---------- selection mode ----------
-   One selection for the whole app: this is the docking station's own Map,
-   so a film ticked here is ticked in the Settings checklist and vice versa,
-   and a copy started from either place is the same job. */
-let libSelecting = false;
+/* ---------- filling a drive ----------
+   Drives' library view: tiles marked against the chosen drive, ticked to
+   add, and a tray under them that prices the copy and runs it. */
 let trayPhase = 'idle';           // idle | confirm | running
 let trayPolling = false;
 
@@ -16940,13 +16980,12 @@ function toggleTicked(item, tileEl){
   else dockSelected.set(key, {kind:item.kind, id:item.id, title:item.title});
   if(tileEl) tileEl.classList.toggle('picked', dockSelected.has(key));
   trayUpdate();
-  if(typeof dockUpdateStartState === 'function') dockUpdateStartState();
 }
 
 function paintTicks(){
-  document.querySelectorAll('.tile[data-key]').forEach(t =>
+  document.querySelectorAll('#drv_lib .tile[data-key]').forEach(t =>
     t.classList.toggle('picked', dockSelected.has(t.dataset.key)));
-  if(libSelecting) trayPresence();
+  if(ticking()) trayPresence();
 }
 
 /* What's already on the chosen drive, for the posters on screen. Asked of
@@ -16955,8 +16994,8 @@ function paintTicks(){
    written down. One request per page, re-asked when the drive changes. */
 let presenceSeq = 0;
 async function trayPresence(){
-  const dest = $('#tray_drive').value;
-  const tiles = [...document.querySelectorAll('.tile[data-key]')];
+  const dest = $('#drv_pick').value;
+  const tiles = [...document.querySelectorAll('#drv_lib .tile[data-key]')];
   const clear = () => tiles.forEach(clearDriveMark);
   if(!dest || !tiles.length){ clear(); trayUpdate(); return; }
   const seq = ++presenceSeq;
@@ -16971,7 +17010,8 @@ async function trayPresence(){
   if(trayPhase !== 'confirm' && trayPhase !== 'running'){
     trayNote(present._partial ? 'That drive is too big to read through in one go — marks may be incomplete.' : '', present._partial ? 'bad' : '');
   }
-  const driveName = dest;
+  const opt = $('#drv_pick').selectedOptions[0];
+  const driveName = opt ? opt.textContent.split(' — ')[0] : dest;
   tiles.forEach(t => {
     const p = present[t.dataset.key];
     const badge = t.querySelector('.drivebadge');
@@ -17005,25 +17045,10 @@ function clearDriveMark(t){
   if(t.dataset.t0 !== undefined){ t.title = t.dataset.t0; delete t.dataset.t0; }
 }
 
-function setSelecting(on){
-  libSelecting = !!on;
-  $('#view-library').classList.toggle('selecting', libSelecting);
-  $('#seltray').classList.toggle('hidden', !libSelecting);
-  $('#libselect').setAttribute('aria-pressed', String(libSelecting));
-  $('#libselect').textContent = libSelecting ? 'SELECTING' : 'SELECT';
-  if(libSelecting){ trayRefreshDrives().then(trayPresence); trayUpdate(); trayPoll(); }
-  else { presenceSeq++; document.querySelectorAll('.tile[data-key]').forEach(clearDriveMark); }
-}
-$('#libselect').onclick = () => setSelecting(!libSelecting);
-$('#tray_done').onclick = () => setSelecting(false);
-document.addEventListener('keydown', e => {
-  if(e.key === 'Escape' && libSelecting && !document.querySelector('.sheet')) setSelecting(false);
-});
 
 $('#tray_clear').onclick = () => {
   dockSelected.clear();
   paintTicks(); trayUpdate(); trayResetConfirm();
-  if(typeof dockUpdateStartState === 'function') dockUpdateStartState();
 };
 
 function trayUpdate(){
@@ -17037,26 +17062,9 @@ function trayUpdate(){
   $('#tray_count').textContent = vals.length
     ? vals.length + ' ticked · ' + parts.join(', ') + (there ? ' · ' + there + ' already on drive' : '')
     : 'Nothing ticked yet';
-  $('#tray_add').disabled = !(vals.length && $('#tray_drive').value) || trayPhase === 'running';
+  $('#tray_add').disabled = !(vals.length && $('#drv_pick').value) || trayPhase === 'running';
 }
 
-async function trayRefreshDrives(){
-  const sel = $('#tray_drive');
-  const was = sel.value;
-  const r = await api('/api/dock/drives');
-  sel.innerHTML = '';
-  if(!r.supported){ sel.append(new Option('Not available on this OS', '')); trayUpdate(); return; }
-  if(!r.drives.length){ sel.append(new Option('No drives found — plug one in', '')); trayUpdate(); return; }
-  r.drives.forEach(d => sel.append(new Option(
-    driveName(d) + ' — ' + dockGB(d.free) + ' free', d.letter)));
-  if([...sel.options].some(o => o.value === was)) sel.value = was;
-  /* Keep the Settings picker on the same drive, so the two never disagree. */
-  const settingsPick = $('#dock_drive');
-  if(settingsPick && [...settingsPick.options].some(o => o.value === sel.value)) settingsPick.value = sel.value;
-  trayUpdate();
-}
-$('#tray_refresh').onclick = trayRefreshDrives;
-$('#tray_drive').onchange = () => { trayResetConfirm(); trayUpdate(); trayPresence(); };
 
 function trayNote(text, tone){
   const n = $('#tray_status');
@@ -17067,13 +17075,14 @@ function trayNote(text, tone){
 function trayResetConfirm(){
   if(trayPhase === 'confirm'){
     trayPhase = 'idle';
-    $('#tray_add').textContent = 'ADD TO DRIVE';
+    $('#tray_add').textContent = 'COPY TO DRIVE';
     trayNote('');
   }
 }
 
 $('#tray_add').onclick = async () => {
-  const dest = $('#tray_drive').value;
+  const dest = $('#drv_pick').value;
+  const where = $('#drv_pick').selectedOptions[0] ? $('#drv_pick').selectedOptions[0].textContent.split(' — ')[0] : dest;
   const items = [...dockSelected.values()].map(v => ({kind:v.kind, id:v.id}));
   if(!items.length || !dest) return;
 
@@ -17089,13 +17098,13 @@ $('#tray_add').onclick = async () => {
     if(plan.error){ trayNote(esc(plan.error), 'bad'); return; }
     if(!plan.count){
       trayNote(plan.already
-        ? 'Nothing to copy — all ' + plan.already + ' of those files are already on ' + esc(dest) + '.'
+        ? 'Nothing to copy — all ' + plan.already + ' of those files are already on ' + esc(where) + '.'
         : 'Nothing left to copy — ' + esc(plan.warnings[0] || 'everything ticked has moved or gone missing.'), plan.already ? 'good' : 'bad');
       return;
     }
     let note = plan.count + ' file' + (plan.count === 1 ? '' : 's') + ' to copy, ' + dockGB(plan.bytes) + '.';
     if(plan.already) note += ' ' + plan.already + ' already on the drive (' + dockGB(plan.already_bytes) + '), skipped.';
-    if(!plan.fits){ trayNote(esc(note + ' That is more than the ' + dockGB(plan.free) + ' free on ' + dest + '.'), 'bad'); return; }
+    if(!plan.fits){ trayNote(esc(note + ' That is more than the ' + dockGB(plan.free) + ' free on ' + where + '.'), 'bad'); return; }
     if(plan.warnings.length) note += ' ' + plan.warnings.length + ' skipped: ' + plan.warnings.slice(0, 2).join('; ');
     trayNote(esc(note) + ' Press again to start.');
     trayPhase = 'confirm';
@@ -17105,10 +17114,8 @@ $('#tray_add').onclick = async () => {
 
   trayPhase = 'running';
   $('#tray_add').disabled = true;
-  $('#tray_add').textContent = 'ADD TO DRIVE';
+  $('#tray_add').textContent = 'COPY TO DRIVE';
   $('#tray_cancel').classList.remove('hidden');
-  const settingsPick = $('#dock_drive');
-  if(settingsPick && [...settingsPick.options].some(o => o.value === dest)) settingsPick.value = dest;
   await post('/api/dock/start', {items, dest});
   trayPoll();
 };
@@ -17118,8 +17125,8 @@ $('#tray_cancel').onclick = async () => {
   await post('/api/dock/cancel');
 };
 
-/* Its own poller, so the tray shows progress whether or not Settings has ever
-   been opened; Settings adopts the same job independently when it is. */
+/* Watches a copy through to the end, and then marks the tiles again: what
+   was just copied is on the drive now, and should say so. */
 async function trayPoll(){
   if(trayPolling) return;
   trayPolling = true;
@@ -17134,6 +17141,12 @@ async function trayPoll(){
           const bits = [];
           if(s.done) bits.push(s.done + ' of ' + s.total + ' copied');
           if(s.step === 'Cancelled') bits.push('stopped early');
+          /* Copied means it isn't waiting any more; and the marks are read
+             again first, because reading them clears the line the result
+             goes on — the other way round, "Done" vanished at once. */
+          dockSelected.clear();
+          document.querySelectorAll('#drv_lib .tile.picked').forEach(t => t.classList.remove('picked'));
+          if(ticking()) await trayPresence();
           trayNote(esc((s.step === 'Cancelled' ? 'Cancelled — ' : 'Done — ') + (bits.join(', ') || 'nothing copied.'))
                    + (s.errors.length ? '<br>' + esc(s.errors.slice(0, 3).join('; ')) : ''),
                    s.errors.length ? 'bad' : 'good');
@@ -19205,15 +19218,10 @@ async function pollSorter(){
   loadStatus();
 }
 
-/* ---------- settings: docking station ---------- */
-/* A cart, not a per-row fetch: the selection survives paging and searching
-   because it's kept here rather than read back off checkboxes that scroll
-   out of the DOM the moment you turn the page. */
+/* ---------- drives: the selection ---------- */
+/* What's ticked to copy, kept here rather than read back off the tiles, so
+   it survives paging and searching in Drives. */
 const dockSelected = new Map();   // "kind:id" -> {kind,id,title}
-let dockOffset = 0, dockTotal = 0, dockRows = [], dockInited = false;
-const DOCK_PAGE_SIZE = 60;
-let dockPhase = 'idle';           // idle | confirm | running
-let dockPolling = false;
 
 /* A drive by its letter and label; a phone on the cable by its own name —
    its "letter" is phone:<serial>, which means nothing to anybody. */
@@ -19226,198 +19234,6 @@ function dockGB(bytes){
   if(!bytes) return '0 GB';
   const gb = bytes / (1024*1024*1024);
   return (gb < 0.1 ? Math.max(1, Math.round(bytes/1048576))+' MB' : gb.toFixed(2)+' GB');
-}
-
-function dockOnOpen(){
-  if(dockInited) return;
-  dockInited = true;
-  dockRefreshDrives();
-  dockLoadList();
-  dockStatusTick();   // adopts a job started before Settings was opened
-}
-
-async function dockRefreshDrives(){
-  const sel = $('#dock_drive');
-  const was = sel.value;
-  const r = await api('/api/dock/drives');
-  sel.innerHTML = '';
-  if(!r.supported){
-    sel.innerHTML = '<option value="">Not available on this OS</option>';
-    $('#dock_drivenote').textContent = 'Drive detection needs Windows or macOS.';
-    dockUpdateStartState();
-    return;
-  }
-  if(!r.drives.length){
-    sel.innerHTML = '<option value="">No drives found</option>';
-    $('#dock_drivenote').textContent = 'Plug in a USB drive and press refresh.';
-    dockUpdateStartState();
-    return;
-  }
-  r.drives.forEach(d => {
-    const label = driveName(d) +
-      ' — ' + dockGB(d.free) + ' free of ' + dockGB(d.total);
-    sel.append(new Option(label, d.letter));
-  });
-  if([...sel.options].some(o => o.value === was)) sel.value = was;
-  dockNoteDrive();
-  dockUpdateStartState();
-}
-
-function dockNoteDrive(){
-  const sel = $('#dock_drive');
-  const opt = sel.selectedOptions[0];
-  $('#dock_drivenote').textContent = opt && opt.value
-    ? 'Films go to ' + opt.value + '\\Films, shows to ' + opt.value + '\\TV Shows.' : '';
-}
-
-$('#dock_drive').onchange = () => { dockNoteDrive(); dockResetConfirm(); };
-$('#dock_refresh').onclick = dockRefreshDrives;
-
-let dockSearchTimer = null;
-$('#dock_q').oninput = () => {
-  clearTimeout(dockSearchTimer);
-  dockSearchTimer = setTimeout(() => dockLoadList(), 280);
-};
-$('#dock_kind').onchange = () => dockLoadList();
-
-async function dockLoadList(keepOffset){
-  if(!keepOffset) dockOffset = 0;
-  const q = new URLSearchParams({
-    kind: $('#dock_kind').value, q: $('#dock_q').value.trim(),
-    sort: 'title', shelf: 'all', offset: dockOffset, limit: DOCK_PAGE_SIZE,
-  });
-  const out = $('#dock_list');
-  out.innerHTML = '<p class="empty">Looking…</p>';
-  const data = await api('/api/browse?'+q);
-  if(data.error){ out.innerHTML = '<div class="notice bad"><p>'+esc(data.error)+'</p></div>'; return; }
-  dockRows = data.items; dockTotal = data.total;
-  out.innerHTML = '';
-  if(!dockRows.length){
-    out.innerHTML = '<p class="empty">Nothing matching that.</p>';
-  } else {
-    dockRows.forEach(item => out.append(dockRow(item)));
-  }
-  const pager = $('#dock_pager');
-  pager.classList.toggle('hidden', dockTotal <= DOCK_PAGE_SIZE);
-  $('#dock_pagerpos').textContent =
-    (dockOffset+1)+'–'+(dockOffset+dockRows.length)+' OF '+dockTotal;
-  $('#dock_prev').disabled = dockOffset === 0;
-  $('#dock_next').disabled = dockOffset + dockRows.length >= dockTotal;
-}
-$('#dock_prev').onclick = () => { dockOffset = Math.max(0, dockOffset - DOCK_PAGE_SIZE); dockLoadList(true); };
-$('#dock_next').onclick = () => { dockOffset += DOCK_PAGE_SIZE; dockLoadList(true); };
-
-function dockRow(item){
-  const key = item.kind+':'+item.id;
-  const row = el('label','dockrow');
-  const box = el('input'); box.type = 'checkbox'; box.checked = dockSelected.has(key);
-  box.onchange = () => {
-    if(box.checked) dockSelected.set(key, {kind:item.kind, id:item.id, title:item.title});
-    else dockSelected.delete(key);
-    dockUpdateStartState();
-  };
-  row.append(box);
-  const t = el('div','t');
-  t.append(document.createTextNode(item.title + (item.year ? ' ('+item.year+')' : '')));
-  t.append(el('small', null,
-    item.kind === 'tvshow' ? (item.episodes||0)+' episodes' : 'Film'));
-  row.append(t);
-  return row;
-}
-
-function dockUpdateStartState(){
-  const n = dockSelected.size;
-  $('#dock_selcount').textContent = n ? n+' selected' : 'nothing selected';
-  const drive = $('#dock_drive').value;
-  $('#dock_start').disabled = !(n && drive) || dockPhase === 'running';
-}
-
-function dockResetConfirm(){
-  if(dockPhase === 'confirm'){
-    dockPhase = 'idle';
-    $('#dock_start').textContent = 'COPY SELECTED TO DRIVE';
-    $('#dock_status').innerHTML = '';
-  }
-  dockUpdateStartState();
-}
-
-$('#dock_start').onclick = async () => {
-  const dest = $('#dock_drive').value;
-  const items = [...dockSelected.values()].map(v => ({kind:v.kind, id:v.id}));
-  if(!items.length || !dest) return;
-
-  if(dockPhase !== 'confirm'){
-    $('#dock_start').disabled = true;
-    $('#dock_status').innerHTML = '<p class="empty">Working out what to copy…</p>';
-    const plan = await post('/api/dock/plan', {items, dest});
-    $('#dock_start').disabled = false;
-    if(plan.error){ $('#dock_status').innerHTML = '<div class="notice bad"><p>'+esc(plan.error)+'</p></div>'; return; }
-    if(!plan.count){
-      $('#dock_status').innerHTML = '<div class="notice bad"><p>Nothing left to copy — '+
-        (plan.warnings[0] || 'everything selected has moved or gone missing.')+'</p></div>';
-      return;
-    }
-    let note = plan.count+' file'+(plan.count===1?'':'s')+', '+dockGB(plan.bytes)+'.';
-    if(!plan.fits) note += ' That\'s more than the '+dockGB(plan.free)+' free on '+dest+'.';
-    let html = '<div class="notice'+(plan.fits?'':' bad')+'"><h3>Ready to copy</h3><p>'+esc(note)+'</p>';
-    if(plan.warnings.length) html += '<p>'+esc(plan.warnings.length+' item(s) skipped: '+plan.warnings.slice(0,3).join('; '))+'</p>';
-    html += '</div>';
-    $('#dock_status').innerHTML = html;
-    if(!plan.fits) return;
-    dockPhase = 'confirm';
-    $('#dock_start').textContent = 'CONFIRM — COPY ' + dockGB(plan.bytes);
-    return;
-  }
-
-  dockPhase = 'running';
-  $('#dock_start').disabled = true;
-  $('#dock_start').textContent = 'COPY SELECTED TO DRIVE';
-  $('#dock_cancel').classList.remove('hidden');
-  await post('/api/dock/start', {items, dest});
-  dockStatusTick();
-};
-
-$('#dock_cancel').onclick = async () => {
-  $('#dock_cancel').disabled = true;
-  await post('/api/dock/cancel');
-};
-
-async function dockStatusTick(){
-  if(dockPolling) return;
-  dockPolling = true;
-  try{
-    while(true){
-      const s = await api('/api/dock/status');
-      if(!s.running){
-        $('#dock_cancel').classList.add('hidden');
-        $('#dock_cancel').disabled = false;
-        dockPhase = 'idle';
-        dockUpdateStartState();
-        if(s.finished_at){
-          const bits = [];
-          if(s.done) bits.push(s.done+' of '+s.total+' copied');
-          if(s.step === 'Cancelled') bits.push('stopped early');
-          let html = '<div class="notice'+(s.errors.length?' bad':'')+'"><h3>'+
-            (s.step === 'Cancelled' ? 'Cancelled' : 'Done')+'</h3><p>'+esc(bits.join(', ') || 'Nothing copied.')+'</p>';
-          if(s.errors.length) html += '<p>'+esc(s.errors.slice(0,5).join('; '))+'</p>';
-          html += '</div>';
-          $('#dock_status').innerHTML = html;
-        }
-        break;
-      }
-      dockPhase = 'running';
-      $('#dock_start').disabled = true;
-      $('#dock_cancel').classList.remove('hidden');
-      const pct = s.bytes_total ? Math.round(100*s.bytes_done/s.bytes_total) : 0;
-      $('#dock_status').innerHTML =
-        '<div class="notice"><h3>Copying — '+esc(s.step||'')+'</h3>'+
-        '<p>'+s.done+' of '+s.total+' files · '+dockGB(s.bytes_done)+' of '+dockGB(s.bytes_total)+'</p>'+
-        '<div class="progress"><i style="width:'+pct+'%"></i></div></div>';
-      await new Promise(r => setTimeout(r, 700));
-    }
-  } finally {
-    dockPolling = false;
-  }
 }
 
 async function pollLibrary(){
