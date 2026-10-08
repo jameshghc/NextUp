@@ -28,14 +28,20 @@ for name in ("CONFIG_PATH", "DB_PATH", "ERROR_LOG", "ART_DIR", "WATCH_LATER",
              "PLAY_STATE_PATH", "RECS_PATH", "CACHE_PATH", "YOUTUBE_PATH",
              "PHONE_SYNC_DIR", "DISMISS_PATH", "FONTS_DIR", "LOGO_PATH"):
     out[name] = getattr(n, name)
-port = n.serve_in_thread(8797)
+conn = n.db()
+conn.execute("INSERT OR IGNORE INTO dismissed (key,at) VALUES ('movie:424242','x')")
+conn.commit(); conn.close()
+n.DISMISSED.clear()
+n.ANDROID_VIDEO_ACCESS = lambda: False
+held = socket.socket(); held.bind(("127.0.0.1", 8794)); held.listen(1)
+port = n.serve_in_thread(8794)
 out["port"] = port
 with urllib.request.urlopen("http://127.0.0.1:%%d/" %% port, timeout=10) as r:
     out["status"], out["has_title"] = r.status, b"<title>" in r.read()
-held = socket.socket(); held.bind(("127.0.0.1", 8794)); held.listen(1)
-moved = n.serve_in_thread(8794)
-with urllib.request.urlopen("http://127.0.0.1:%%d/" %% moved, timeout=10) as r:
-    out["moved"], out["moved_status"] = moved, r.status
+out["dismissed_loaded"] = "movie:424242" in n.DISMISSED
+out["again"] = n.serve_in_thread(8797)
+with urllib.request.urlopen("http://127.0.0.1:%%d/api/status" %% port, timeout=10) as r:
+    out["status_payload"] = json.loads(r.read())
 out["threads"] = sorted(t.name for t in threading.enumerate())
 print("JSON" + json.dumps(out))
 ''' % ROOT
@@ -57,12 +63,18 @@ check("assets stay with the code", out and all(str(out.get(k, "")).lower().start
                                               for k in ("FONTS_DIR", "LOGO_PATH")),
       (out.get("FONTS_DIR"), out.get("LOGO_PATH")))
 check("PLATFORM is android", out.get("platform") == "android", out.get("platform"))
-check("serve answers with the page", out.get("port") == 8797 and out.get("status") == 200
-      and out.get("has_title"), (out.get("port"), out.get("status")))
-check("serve picks another port when busy", (out.get("moved") or 0) > 8794
-      and out.get("moved_status") == 200, out.get("moved"))
+check("serve picks another port when busy, and answers with the page",
+      (out.get("port") or 0) > 8794 and out.get("status") == 200 and out.get("has_title"),
+      (out.get("port"), out.get("status")))
 check("no player monitor on android", out and "playback monitor" not in out.get("threads", []),
       out.get("threads"))
+check("hidden suggestions are loaded at start-up", out.get("dismissed_loaded"))
+check("starting twice reuses the first server", out.get("again") == out.get("port")
+      and out.get("threads", []).count("server") == 1 and out.get("threads", []).count("sync") == 1,
+      (out.get("again"), out.get("threads")))
+check("no access to videos is said, not left as an empty library",
+      "access to your videos" in json.dumps(out.get("status_payload") or {}),
+      (out.get("status_payload") or {}).get("error"))
 check("nothing written beside the code", sorted(os.listdir(ROOT)) == before,
       set(os.listdir(ROOT)) ^ set(before))
 

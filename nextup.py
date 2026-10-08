@@ -12536,6 +12536,16 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": "%s: %s" % (type(exc).__name__, exc)}, 200)
 
     def status_payload(self):
+        if PLATFORM == "android" and ANDROID_VIDEO_ACCESS and not ANDROID_VIDEO_ACCESS():
+            # Without it the folder reads as empty, which looks exactly like
+            # there being nothing on the phone. Say which it is.
+            return {"connected": False,
+                    "error": "Android hasn't given Next Up access to your videos. "
+                             "Allow it in the phone's Settings > Apps > Next Up > "
+                             "Permissions > Photos and videos.",
+                    "has_key": bool(CONFIG.get("tmdb_key")),
+                    "version": APP_VERSION,
+                    "config": self.safe_config()}
         if not (CONFIG.get("media_folders") or []):
             return {"connected": False,
                     "error": "No media folders set yet.",
@@ -20460,6 +20470,26 @@ def startup_failure(message):
             pass
 
 
+# Set by the Android app: a quick "may this app read the phone's videos?"
+# that the status route asks, so a refusal is said rather than shown as an
+# empty library. None on the desktop, where there's nothing to ask.
+ANDROID_VIDEO_ACCESS = None
+_SERVING = [None]
+_PREPARED = [False]
+
+
+def prepare_app():
+    """What has to happen before anything is served: the crash log, the
+    hidden suggestions moved into memory, the last recommendations read
+    back. Once only, however many ways in there are."""
+    if _PREPARED[0]:
+        return
+    _PREPARED[0] = True
+    install_crash_log()
+    adopt_dismissed()
+    load_saved_recs()
+
+
 def serve_in_thread(port=None, host="127.0.0.1", tries=20):
     """Start the app's server and its background work, and return the port.
 
@@ -20469,8 +20499,15 @@ def serve_in_thread(port=None, host="127.0.0.1", tries=20):
     holding the last one. The desktop asks for exactly one port.
 
     No player on Android — there's no mpv to watch there — so the playback
-    monitor and the adoption of a left-over player are desktop only."""
-    port = port or APP_PORT
+    monitor and the adoption of a left-over player are desktop only.
+
+    Once per process. Android re-runs the app's start-up when it's reopened
+    without the process having died, and a second call here would otherwise
+    start a second server and a second set of background loops."""
+    if _SERVING[0]:
+        return _SERVING[0]
+    prepare_app()
+    port = APP_PORT if port is None else port
     server, last = None, None
     for candidate in range(port, port + max(1, tries)):
         try:
@@ -20488,13 +20525,12 @@ def serve_in_thread(port=None, host="127.0.0.1", tries=20):
                          name="playback monitor").start()
     threading.Thread(target=sync_loop, daemon=True, name="sync").start()
     threading.Thread(target=refresh_watch_scores, daemon=True, name="watch scores").start()
-    return server.server_address[1]
+    _SERVING[0] = server.server_address[1]
+    return _SERVING[0]
 
 
 def main():
-    install_crash_log()
-    adopt_dismissed()
-    load_saved_recs()
+    prepare_app()
     print("Next Up  v%s" % APP_VERSION)
     print("  Folders: %s" % (", ".join(CONFIG.get("media_folders") or []) or "none set yet"))
     print("  TMDB   : %s" % ("key set" if CONFIG.get("tmdb_key") else "no key (limited suggestions)"))

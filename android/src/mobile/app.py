@@ -20,6 +20,7 @@ class NextUp(toga.App):
             # Read by nextup.py as it's imported, so it has to be set first.
             os.environ["NEXTUP_HOME"] = data
             import nextup
+            nextup.ANDROID_VIDEO_ACCESS = lambda: has_video_access(self)
             first_run_library(nextup)
             port = nextup.serve_in_thread()
             self.main_window.content = toga.WebView(
@@ -50,6 +51,21 @@ def first_run_library(nextup):
         pass                    # created later, once access is granted
     nextup.CONFIG["media_folders"] = [PHONE_LIBRARY]
     nextup.save_json(nextup.CONFIG_PATH, nextup.CONFIG)
+
+
+def has_video_access(app):
+    """Asked by nextup.py's status route, so a refusal is said on screen
+    rather than looking like an empty phone. Cheap enough to ask each time,
+    which also means allowing it later in Android's settings just works."""
+    try:
+        from java import jclass
+        ContextCompat = jclass("androidx.core.content.ContextCompat")
+        PackageManager = jclass("android.content.pm.PackageManager")
+        return ContextCompat.checkSelfPermission(app._impl.native, VIDEO_PERMISSION) \
+            == PackageManager.PERMISSION_GRANTED
+    except Exception:
+        traceback.print_exc()
+        return True             # can't tell: don't claim a refusal that may not be
 
 
 def ask_for_videos(app):
