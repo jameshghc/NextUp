@@ -16,6 +16,27 @@ at the top.
 
 ---
 
+## 2026-10-08 — v0.1.53 (cont.), play on the phone in the mpv app
+
+"mpv is installed on the phone but nextup doesn't find it." It was never
+looking for the app: on Android, play still ran the desktop lookup for an
+mpv program, which the Play Store mpv isn't.
+
+- On Android, `mpv_play` calls `android_play`, which calls the
+  `ANDROID_PLAYER` hook set by `android/src/mobile/app.py`. `find_mpv`
+  says plainly that channels and streams don't play on the phone yet, and
+  Settings' mpv test says how the phone plays instead of looking for mpv.exe.
+- `open_in_player` (app.py): the file's `content://` address from Android's
+  media index (a file adb just pushed isn't indexed, so it's scanned and the
+  answer waited for, 20 s max), an ACTION_VIEW lent read permission, aimed
+  at `is.xyz.mpv`, with `position` in ms for RESUME. With no mpv, Android's
+  "Play with" list instead.
+- `note_now_playing` does nothing on Android: the player is another app
+  with no line back, so nothing would ever see it end. Resume points and
+  "watched" for phone plays are the next piece (mpv hands back position and
+  duration as an activity result).
+- Verified on the S24U: PLAY on Akira opened it in mpv.
+
 ## 2026-10-08 — v0.1.53, sizes in the copy tray
 
 The user asked for sizes as you tick. The tray now lists every ticked film

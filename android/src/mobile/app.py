@@ -6,6 +6,7 @@ server on a thread inside this app, and a WebView shows the page. Its data
 never beside the code, which Android replaces whenever the app updates.
 """
 import os
+import threading
 import traceback
 
 import toga
@@ -21,6 +22,7 @@ class NextUp(toga.App):
             os.environ["NEXTUP_HOME"] = data
             import nextup
             nextup.ANDROID_VIDEO_ACCESS = lambda: has_video_access(self)
+            nextup.ANDROID_PLAYER = lambda path, start: open_in_player(self, path, start)
             first_run_library(nextup)
             port = nextup.serve_in_thread()
             self.main_window.content = toga.WebView(
@@ -46,6 +48,8 @@ OLD_DEFAULT = "/storage/emulated/0/Movies/Next Up"
 # they don't frame the page in Android's default teal and white.
 INK = "#060509"
 VIDEO_PERMISSION = "android.permission.READ_MEDIA_VIDEO"
+# mpv for Android, from the Play Store.
+MPV_PACKAGE = "is.xyz.mpv"
 
 
 def first_run_library(nextup):
@@ -109,6 +113,64 @@ def ask_for_videos(app):
             ActivityCompat.requestPermissions(activity, [VIDEO_PERMISSION], 1)
     except Exception:
         traceback.print_exc()   # shows in the phone's log; the app carries on
+
+
+def open_in_player(app, path, start):
+    """Play a file in the mpv app, `start` seconds in.
+
+    Another app can't be handed a plain file path on Android — it has to be
+    the file's entry in Android's own media index, lent with permission to
+    read it. If mpv isn't installed (or won't take it), Android's "open
+    with" list instead, so pressing play always opens something."""
+    from java import jclass, jint
+    Intent = jclass("android.content.Intent")
+    NotFound = jclass("android.content.ActivityNotFoundException")
+    activity = app._impl.native
+    intent = Intent(Intent.ACTION_VIEW)
+    intent.setDataAndType(media_uri(activity, path), "video/*")
+    intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    if start > 5:
+        # mpv's own name for it, in milliseconds — the one MX Player uses.
+        intent.putExtra("position", jint(start * 1000))
+    intent.setPackage(MPV_PACKAGE)
+    try:
+        activity.startActivity(intent)
+    except NotFound:
+        intent.setPackage(None)
+        activity.startActivity(Intent.createChooser(intent, "Play with"))
+
+
+def media_uri(activity, path):
+    """The file's content:// address in Android's media index. A file the
+    PC has just copied over isn't in the index yet — adb doesn't tell it —
+    so then Android is asked to look at it, and that answer is waited for."""
+    from java import jclass, dynamic_proxy
+    Media = jclass("android.provider.MediaStore$Video$Media")
+    ContentUris = jclass("android.content.ContentUris")
+    cursor = activity.getContentResolver().query(
+        Media.EXTERNAL_CONTENT_URI, ["_id"], "_data=?", [path], None)
+    if cursor is not None:
+        try:
+            if cursor.moveToFirst():
+                return ContentUris.withAppendedId(Media.EXTERNAL_CONTENT_URI, cursor.getLong(0))
+        finally:
+            cursor.close()
+
+    Scanner = jclass("android.media.MediaScannerConnection")
+    Listener = jclass("android.media.MediaScannerConnection$OnScanCompletedListener")
+    found, done = [None], threading.Event()
+
+    class Scanned(dynamic_proxy(Listener)):
+        def onScanCompleted(self, scanned, uri):
+            found[0] = uri
+            done.set()
+
+    Scanner.scanFile(activity, [path], None, Scanned())
+    done.wait(20)
+    if found[0] is None:
+        raise RuntimeError("Android hasn't added %s to its list of videos yet — "
+                           "try again in a moment." % os.path.basename(path))
+    return found[0]
 
 
 def main():

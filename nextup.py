@@ -3410,6 +3410,12 @@ def find_mpv():
     """Work out where mpv actually is, and say something useful when it isn't
     there. A blank setting is not a failure — the usual install locations get
     checked before giving up."""
+    if PLATFORM == "android":
+        # The phone's mpv is an app of its own, handed a file by Android —
+        # see android_play. There's no program here to find, and nothing
+        # that needs one (channels, streams) plays on the phone yet.
+        raise AppError("On the phone, films and episodes open in the mpv app. "
+                       "Channels and streams don't play here yet.")
     configured = (CONFIG.get("mpv_path") or "").strip().strip('"').strip("'")
     if configured:
         if os.path.isfile(configured):
@@ -3831,6 +3837,8 @@ def mpv_play(path, start=0, keep_open=False):
     it's finished, it's finished.
 
     Returns the process handle, so callers can tell when it exits."""
+    if PLATFORM == "android":
+        return android_play(path, start)
     import subprocess
     exe = find_mpv()
     try:
@@ -3998,6 +4006,10 @@ def _play_display(kind, item_id):
 
 def note_now_playing(proc, kind, item_id, fallback_title, channel=None,
                      channel_id=None):
+    if PLATFORM == "android":
+        # The phone's player is another app, with no line back to this one:
+        # nothing here could ever see it finish, so nothing claims it's on.
+        return
     afk_new_file()
     title, sub, art = _play_display(kind, item_id)
     with _PLAY_LOCK:
@@ -12225,6 +12237,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"channels": out})
 
             if route == "/api/mpv/test":
+                if PLATFORM == "android":
+                    return self.send_json({"ok": True, "message":
+                        "Films and episodes open in the mpv app from the Play Store "
+                        "(or, without it, whichever video player you pick)."})
                 try:
                     exe = find_mpv()
                 except AppError as exc:
@@ -20777,6 +20793,23 @@ def startup_failure(message):
 # that the status route asks, so a refusal is said rather than shown as an
 # empty library. None on the desktop, where there's nothing to ask.
 ANDROID_VIDEO_ACCESS = None
+# Also set by the Android app: hands a file to the mpv app (from the Play
+# Store) to play, from `start` seconds in. Raises with a reason if it can't.
+ANDROID_PLAYER = None
+
+
+def android_play(path, start=0):
+    """Play on the phone: Android opens the file in the mpv app. Returns no
+    process — there isn't one of ours to watch."""
+    if not ANDROID_PLAYER:
+        raise AppError("This copy of Next Up has no way to open a player.")
+    try:
+        ANDROID_PLAYER(path, int(start or 0))
+    except AppError:
+        raise
+    except Exception as exc:
+        raise AppError("Couldn't open the player: %s" % exc)
+    return None
 _SERVING = [None]
 _SERVER = [None]                # the server serve_in_thread started, for main()
 _PREPARED = [False]

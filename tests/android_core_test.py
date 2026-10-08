@@ -19,7 +19,7 @@ shutil.rmtree(home, ignore_errors=True)
 os.makedirs(home)
 
 PROBE = r'''
-import sys, os, json, socket, threading, urllib.request
+import sys, os, json, socket, threading, urllib.request, urllib.error
 sys.argv = ["nextup.py"]
 sys.path.insert(0, r"%s")
 import nextup as n
@@ -42,6 +42,33 @@ out["dismissed_loaded"] = "movie:424242" in n.DISMISSED
 out["again"] = n.serve_in_thread(8797)
 with urllib.request.urlopen("http://127.0.0.1:%%d/api/status" %% port, timeout=10) as r:
     out["status_payload"] = json.loads(r.read())
+# Play: handed to the phone's mpv app, never a desktop mpv looked for.
+handed = []
+n.ANDROID_PLAYER = lambda path, start: handed.append([path, start])
+film = os.path.join(os.getcwd(), "Phone Film (2001).mkv")
+open(film, "wb").write(b"x" * 1000)
+conn = n.db()
+fid = conn.execute("INSERT INTO movies (path,title,year,resume_pos,resume_total) VALUES (?,?,?,?,?)",
+                   (film, "Phone Film", 2001, 600, 6000)).lastrowid
+conn.commit(); conn.close()
+n.LOCAL.loaded_at = 0
+def post(path, body):
+    req = urllib.request.Request("http://127.0.0.1:%%d%%s" %% (port, path), method="POST",
+                                 data=json.dumps(body).encode())
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return json.loads(e.read())
+out["play"] = post("/api/play", {"type": "movie", "id": fid})
+out["play_resume"] = post("/api/play", {"type": "movie", "id": fid, "resume": True})
+out["handed"] = handed
+out["film"] = film
+out["now_playing"] = n.NOW_PLAYING.get("type")
+with urllib.request.urlopen("http://127.0.0.1:%%d/api/mpv/test" %% port, timeout=30) as r:
+    out["mpv_test"] = json.loads(r.read())
+n.ANDROID_PLAYER = None
+out["no_player"] = post("/api/play", {"type": "movie", "id": fid})
 out["threads"] = sorted(t.name for t in threading.enumerate())
 print("JSON" + json.dumps(out))
 ''' % ROOT
@@ -52,7 +79,7 @@ proc = subprocess.run([sys.executable, "-c", PROBE], capture_output=True, text=T
                       encoding="utf-8", errors="replace", env=env, cwd=home, timeout=120)
 line = next((l for l in proc.stdout.splitlines() if l.startswith("JSON")), None)
 out = json.loads(line[4:]) if line else {}
-if not out:
+if not out or "handed" not in out:
     print(proc.stdout[-1500:], proc.stderr[-1500:])
 
 data_names = ("CONFIG_PATH", "DB_PATH", "ERROR_LOG", "ART_DIR", "WATCH_LATER", "PLAY_STATE_PATH",
@@ -93,6 +120,19 @@ undefined = sorted(s.get_name() for s in main_table.get_symbols()
                    and not s.is_imported() and s.get_name() not in module_names
                    and not hasattr(builtins, s.get_name()))
 check("main() uses no name it never defines", not undefined, undefined)
+
+handed = out.get("handed") or []
+check("PLAY on the phone hands the file to the mpv app, from the start",
+      out.get("play", {}).get("ok") and handed[:1] == [[out.get("film"), 0]], (out.get("play"), handed))
+check("RESUME hands it over with where you got to",
+      len(handed) == 2 and handed[1][1] == 600, handed)
+check("nothing claims to be playing: the player is another app, out of sight",
+      out.get("now_playing") in (None, ""), out.get("now_playing"))
+check("the mpv test in Settings says how the phone plays, not 'install mpv.exe'",
+      out.get("mpv_test", {}).get("ok") and "mpv app" in out.get("mpv_test", {}).get("message", ""),
+      out.get("mpv_test"))
+check("no player hooked up is said plainly", "error" in (out.get("no_player") or {})
+      and "winget" not in out["no_player"]["error"], out.get("no_player"))
 
 shutil.rmtree(home, ignore_errors=True)
 print("\n%d/%d passed" % (sum(results), len(results)))
