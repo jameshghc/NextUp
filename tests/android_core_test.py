@@ -65,6 +65,18 @@ out["play_resume"] = post("/api/play", {"type": "movie", "id": fid, "resume": Tr
 out["handed"] = handed
 out["film"] = film
 out["now_playing"] = n.NOW_PLAYING.get("type")
+# mpv closing: where it stopped, then once seen to the end.
+def row():
+    c = n.db(); r = c.execute("SELECT resume_pos, playcount FROM movies WHERE id=?", (fid,)).fetchone(); c.close()
+    return [r["resume_pos"], r["playcount"]]
+n.android_play_finished(position=1500, duration=6000, completed=False)
+out["after_stop"] = row()
+post("/api/play", {"type": "movie", "id": fid})
+out["handed_after_stop"] = handed[-1]
+n.android_play_finished(position=None, duration=None, completed=True)
+out["after_end"] = row()
+n.android_play_finished(position=10, duration=6000, completed=False)
+out["stray_finish"] = row()
 with urllib.request.urlopen("http://127.0.0.1:%%d/api/mpv/test" %% port, timeout=30) as r:
     out["mpv_test"] = json.loads(r.read())
 n.ANDROID_PLAYER = None
@@ -122,10 +134,18 @@ undefined = sorted(s.get_name() for s in main_table.get_symbols()
 check("main() uses no name it never defines", not undefined, undefined)
 
 handed = out.get("handed") or []
-check("PLAY on the phone hands the file to the mpv app, from the start",
-      out.get("play", {}).get("ok") and handed[:1] == [[out.get("film"), 0]], (out.get("play"), handed))
+check("PLAY on the phone picks up where you got to, as mpv does by itself on the PC",
+      out.get("play", {}).get("ok") and handed[:1] == [[out.get("film"), 600]], (out.get("play"), handed))
 check("RESUME hands it over with where you got to",
-      len(handed) == 2 and handed[1][1] == 600, handed)
+      len(handed) >= 2 and handed[1][1] == 600, handed)
+check("stopping in mpv part way saves where you got to", out.get("after_stop") == [1500, None]
+      or out.get("after_stop") == [1500, 0], out.get("after_stop"))
+check("and the next PLAY starts there", (out.get("handed_after_stop") or [0, 0])[1] == 1500,
+      out.get("handed_after_stop"))
+check("seeing it to the end counts it watched, and clears the resume point",
+      out.get("after_end") == [0, 1], out.get("after_end"))
+check("a report from mpv with nothing playing changes nothing", out.get("stray_finish") == [0, 1],
+      out.get("stray_finish"))
 check("nothing claims to be playing: the player is another app, out of sight",
       out.get("now_playing") in (None, ""), out.get("now_playing"))
 check("the mpv test in Settings says how the phone plays, not 'install mpv.exe'",

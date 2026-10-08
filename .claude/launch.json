@@ -40,6 +40,14 @@
         "tests\\drives_serve.py"
       ],
       "port": 8775
+    },
+    {
+      "name": "nextup-phone",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "tests\\phone_serve.py"
+      ],
+      "port": 8776
     }
   ]
 }

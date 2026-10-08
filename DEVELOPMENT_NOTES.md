@@ -16,6 +16,44 @@ at the top.
 
 ---
 
+## 2026-10-09 — v0.1.54, the phone remembers where you got to, and has your ratings
+
+Two things the user found on the S24U, and a way to see the phone's
+behaviour without one.
+
+**Where you got to.** On the PC, PLAY with no position still resumes,
+because mpv's own watch-later file does it. The phone's mpv keeps none for
+us, and nothing came back when it closed, so every PLAY started at 0.
+
+- `/api/play` on Android starts at `resume_position()` when not told
+  otherwise — what mpv on the PC does by itself.
+- `open_in_player` now starts mpv *for a result* (`app._impl.start_activity`
+  with `on_complete`, on the app's own loop). mpv hands back `position` and
+  `duration` in ms on leaving part way, or `end_by=playback_completion` at
+  the end (the MX Player convention); `player_report` reads that and calls
+  `nextup.android_play_finished`.
+- `android_play_finished` records it exactly as a PC sitting:
+  `note_playback_finished` (resume point, or watched past 97%), or
+  `_record_play` at the end. `note_now_playing` keeps the sitting in
+  `_ANDROID_SITTING` for it. A report with nothing sitting does nothing.
+
+**Ratings.** The snapshot carries them, but its rows only stand in for
+films the phone hasn't got. Every film on the phone is shown from the
+phone's own scan, unrated — so the ratings went nowhere that mattered.
+`adopt_snapshot_marks()` copies rating (and rated_at) and playcount across
+by TMDB id, only where the phone has none, with no history entry (old
+ratings arriving, not new ones). Run on import and after every scan, so a
+film copied over later picks its rating up too.
+
+**`tests/phone_serve.py`** (launch config `nextup-phone`, port 8776):
+Next Up with `NEXTUP_PLATFORM=android`, sandboxed, with a library built the
+way the phone's is — Akira, Aladdin, Dune, Parasite and Pantheon "found on
+the phone" as empty stand-in files, fresh and unrated, plus the real PC
+library imported as a snapshot. A pretend mpv prints what it was handed
+and closes 3 s later as if 5 minutes were watched. Open at phone width.
+It can't show Android itself: permissions, the media index, the real mpv,
+the WebView.
+
 ## 2026-10-08 — v0.1.53 (cont.), play on the phone in the mpv app
 
 "mpv is installed on the phone but nextup doesn't find it." It was never

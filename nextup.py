@@ -108,7 +108,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.53"
+APP_VERSION = "0.1.54"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -4007,8 +4007,11 @@ def _play_display(kind, item_id):
 def note_now_playing(proc, kind, item_id, fallback_title, channel=None,
                      channel_id=None):
     if PLATFORM == "android":
-        # The phone's player is another app, with no line back to this one:
-        # nothing here could ever see it finish, so nothing claims it's on.
+        # The phone's player is another app, out of sight, so nothing claims
+        # it's on. What it was is kept for when mpv closes and says where it
+        # got to — see android_play_finished.
+        _ANDROID_SITTING.clear()
+        _ANDROID_SITTING.update(kind=kind, id=item_id, started_at=time.time())
         return
     afk_new_file()
     title, sub, art = _play_display(kind, item_id)
@@ -6355,6 +6358,9 @@ def library_scan_worker():
             LIBSCAN.update(done=done, total=total, step=label)
 
         LIBSCAN["result"] = scan_local_library(progress)
+        # A film copied over since the library was sent has a row now,
+        # and can take the rating that came with it.
+        adopt_snapshot_marks()
         LIBSCAN["step"] = "Done"
         cache_flush()
         LOCAL.loaded_at = 0
@@ -8631,12 +8637,54 @@ def import_library_snapshot(payload, fetch_art=True):
             arrived = 0
     LIB.loaded_at = 0
     result = dict(stored)
+    result["marks"] = adopt_snapshot_marks()
     result["art"] = arrived
     # Worth saying out loud when the two differ, rather than leaving someone
     # to wonder where two films went.
     result["collapsed"] = (len(movies) - stored["movies"]) + \
                           (len(shows) - stored["shows"])
     return result
+
+
+def adopt_snapshot_marks():
+    """Your ratings and plays from the other machine, on the copies here.
+
+    The snapshot's own rows only stand in for films this machine hasn't
+    got. Anything it has got is shown from its own row instead — on a phone
+    that's every film on it, scanned there, unrated, and the ratings that
+    came with the library went nowhere. So they're copied across by TMDB id:
+    a rating only where there's none here, and plays only where there are
+    none, so nothing rated or watched on this machine is ever overwritten.
+
+    Copied quietly, with no history entry: these are old ratings arriving,
+    not new ones being made. Run after a snapshot is taken in and after
+    every scan, since a film copied over later only has a row from then."""
+    conn = db()
+    try:
+        meta = conn.execute("SELECT exported_at FROM snapshot_meta WHERE id = 1").fetchone()
+        if not meta:
+            return 0
+        when = meta["exported_at"] or now_stamp()
+        changed = 0
+        for table, snap in (("movies", "snapshot_movies"), ("shows", "snapshot_shows")):
+            changed += conn.execute(
+                "UPDATE %s SET userrating = (SELECT s.userrating FROM %s s WHERE s.tmdb_id = %s.tmdb_id),"
+                " rated_at = COALESCE(rated_at, ?)"
+                " WHERE COALESCE(userrating, 0) = 0 AND tmdb_id IS NOT NULL AND tmdb_id <> ''"
+                " AND EXISTS (SELECT 1 FROM %s s WHERE s.tmdb_id = %s.tmdb_id AND s.userrating > 0)"
+                % (table, snap, table, snap, table), (when,)).rowcount
+        changed += conn.execute(
+            "UPDATE movies SET playcount = (SELECT s.playcount FROM snapshot_movies s WHERE s.tmdb_id = movies.tmdb_id)"
+            " WHERE COALESCE(playcount, 0) = 0 AND tmdb_id IS NOT NULL AND tmdb_id <> ''"
+            " AND EXISTS (SELECT 1 FROM snapshot_movies s WHERE s.tmdb_id = movies.tmdb_id AND s.playcount > 0)"
+            ).rowcount
+        conn.commit()
+    finally:
+        conn.close()
+    if changed:
+        LOCAL.loaded_at = 0
+        LIB.loaded_at = 0
+    return changed
 
 
 def snapshot_forget():
@@ -12479,6 +12527,11 @@ class Handler(BaseHTTPRequestHandler):
                 # film's page means play it, and the one place that means
                 # "pick it up where I stopped" is a button that says so.
                 start = resume_position(kind, item_id) if data.get("resume") else 0
+                if PLATFORM == "android" and not start:
+                    # On the PC, mpv's own watch-later file picks PLAY up
+                    # where you stopped. The phone's mpv keeps none for us,
+                    # so the same start is handed over by hand.
+                    start = resume_position(kind, item_id)
                 # An episode holds the window open so the next one can follow
                 # it. A film doesn't: when it's finished, it's finished.
                 # Held open for an episode (the run follows it) and for
@@ -20796,6 +20849,33 @@ ANDROID_VIDEO_ACCESS = None
 # Also set by the Android app: hands a file to the mpv app (from the Play
 # Store) to play, from `start` seconds in. Raises with a reason if it can't.
 ANDROID_PLAYER = None
+
+
+# What the phone handed to mpv last, until mpv closes and reports back.
+_ANDROID_SITTING = {}
+
+
+def android_play_finished(position=None, duration=None, completed=False):
+    """mpv on the phone has closed. Called by the Android app with what mpv
+    handed back: where it stopped and how long the file is, in seconds, or
+    that it played to the end. Recorded exactly as a sitting in mpv on the
+    PC is — a resume point, or watched."""
+    sitting = dict(_ANDROID_SITTING)
+    _ANDROID_SITTING.clear()
+    kind, item_id = sitting.get("kind"), sitting.get("id")
+    if kind not in ("movie", "episode") or not item_id:
+        return
+    ran_for = time.time() - (sitting.get("started_at") or time.time())
+    if completed:
+        # mpv reports no position when the file runs out: the end is the
+        # position.
+        try:
+            _record_play("movies" if kind == "movie" else "episodes", kind, item_id,
+                         seconds=ran_for, position=duration, total=duration)
+        finally:
+            refresh_watch_scores()
+    elif position is not None and duration:
+        note_playback_finished(kind, item_id, ran_for, position=position, duration=duration)
 
 
 def android_play(path, start=0):

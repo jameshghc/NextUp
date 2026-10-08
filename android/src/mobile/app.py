@@ -22,7 +22,7 @@ class NextUp(toga.App):
             os.environ["NEXTUP_HOME"] = data
             import nextup
             nextup.ANDROID_VIDEO_ACCESS = lambda: has_video_access(self)
-            nextup.ANDROID_PLAYER = lambda path, start: open_in_player(self, path, start)
+            nextup.ANDROID_PLAYER = lambda path, start: open_in_player(self, nextup, path, start)
             first_run_library(nextup)
             port = nextup.serve_in_thread()
             self.main_window.content = toga.WebView(
@@ -115,8 +115,9 @@ def ask_for_videos(app):
         traceback.print_exc()   # shows in the phone's log; the app carries on
 
 
-def open_in_player(app, path, start):
-    """Play a file in the mpv app, `start` seconds in.
+def open_in_player(app, nextup, path, start):
+    """Play a file in the mpv app, `start` seconds in, and when it closes
+    tell nextup where it got to.
 
     Another app can't be handed a plain file path on Android — it has to be
     the file's entry in Android's own media index, lent with permission to
@@ -125,19 +126,57 @@ def open_in_player(app, path, start):
     from java import jclass, jint
     Intent = jclass("android.content.Intent")
     NotFound = jclass("android.content.ActivityNotFoundException")
-    activity = app._impl.native
     intent = Intent(Intent.ACTION_VIEW)
-    intent.setDataAndType(media_uri(activity, path), "video/*")
+    intent.setDataAndType(media_uri(app._impl.native, path), "video/*")
     intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     if start > 5:
         # mpv's own name for it, in milliseconds — the one MX Player uses.
-        intent.putExtra("position", jint(start * 1000))
+        intent.putExtra("position", jint(int(start * 1000)))
     intent.setPackage(MPV_PACKAGE)
-    try:
-        activity.startActivity(intent)
-    except NotFound:
-        intent.setPackage(None)
-        activity.startActivity(Intent.createChooser(intent, "Play with"))
+
+    def closed(code, data):
+        try:
+            nextup.android_play_finished(**player_report(data))
+        except Exception:
+            traceback.print_exc()
+
+    started, failed = threading.Event(), []
+
+    def launch():
+        # Started "for a result": that's what has Android hand back what mpv
+        # says as it closes. On the app's own thread, where Android expects it.
+        try:
+            try:
+                app._impl.start_activity(intent, on_complete=closed)
+            except NotFound:
+                intent.setPackage(None)
+                app._impl.start_activity(Intent.createChooser(intent, "Play with"),
+                                         on_complete=closed)
+        except Exception as exc:
+            failed.append(exc)
+        finally:
+            started.set()
+
+    app.loop.call_soon_threadsafe(launch)
+    started.wait(10)
+    if failed:
+        raise failed[0]
+
+
+def player_report(data):
+    """What mpv hands back as it closes (the MX Player convention): where it
+    stopped and the file's length, in milliseconds, when you leave part
+    way; "playback_completion" when it ran to the end. Another player may
+    hand back nothing at all, which records nothing."""
+    extras = data.getExtras() if data is not None else None
+    if extras is None:
+        return {}
+    if extras.getString("end_by") == "playback_completion":
+        return {"completed": True}
+    position, duration = extras.getInt("position", -1), extras.getInt("duration", -1)
+    if position < 0 or duration <= 0:
+        return {}
+    return {"position": position / 1000.0, "duration": duration / 1000.0}
 
 
 def media_uri(activity, path):

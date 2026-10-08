@@ -163,5 +163,46 @@ both = n.browse_library("all", "", "title", "favourite+here", 400, 0)["items"]
 check("Favourites and On this device together", both and all(i.get("favourited") and not i.get("elsewhere")
                                                              for i in both), [i["title"] for i in both])
 
+# --- your ratings come with the library, onto what's on the phone too ---------------------
+conn = n.db()
+def film(tmdb, rating=0, plays=0):
+    return conn.execute("INSERT INTO movies (path,title,year,tmdb_id,userrating,playcount) VALUES (?,?,?,?,?,?)",
+                        ("/phone/%s.mkv" % tmdb, "Film " + tmdb, 2000, tmdb, rating, plays)).lastrowid
+unrated, own = film("r1"), film("r2", rating=4)
+show = conn.execute("INSERT INTO shows (name,title,tmdb_id,userrating) VALUES (?,?,?,?)",
+                    ("rshow", "Rated Show", "r9", 0)).lastrowid
+conn.commit()
+events_before = conn.execute("SELECT COUNT(*) FROM history").fetchone()[0]
+conn.close()
+def snap_film(tmdb, rating, plays=0):
+    return {"tmdb_id": tmdb, "title": "Film " + tmdb, "year": 2000, "genres": "", "directors": "",
+            "cast_names": "", "plot": "", "poster": None, "tmdb_rating": 7.0, "runtime": 100,
+            "userrating": rating, "playcount": plays}
+n.import_library_snapshot({"kind": "nextup-library-snapshot", "version": 1, "device": "DESKTOP-TEST",
+                           "exported_at": "2026-10-08 12:00:00", "app_version": n.APP_VERSION,
+                           "movies": [snap_film("r1", 8, plays=2), snap_film("r2", 9), snap_film("r3", 7.5)],
+                           "shows": [{"tmdb_id": "r9", "title": "Rated Show", "year": 2000, "genres": "",
+                                      "plot": "", "poster": None, "tmdb_rating": 7, "userrating": 6,
+                                      "episode_count": 0}],
+                           "episodes": []}, fetch_art=False)
+def field(table, rid, col):
+    c = n.db(); v = c.execute("SELECT %s FROM %s WHERE id=?" % (col, table), (rid,)).fetchone()[0]; c.close(); return v
+check("a film on the phone takes your rating from the PC", field("movies", unrated, "userrating") == 8,
+      field("movies", unrated, "userrating"))
+check("and that you've watched it", field("movies", unrated, "playcount") == 2, field("movies", unrated, "playcount"))
+check("a show too", field("shows", show, "userrating") == 6, field("shows", show, "userrating"))
+check("a rating made on the phone is never overwritten", field("movies", own, "userrating") == 4,
+      field("movies", own, "userrating"))
+# A film copied over after the library was sent: picked up by the next scan.
+conn = n.db(); later = film("r3"); conn.commit(); conn.close()
+n.adopt_snapshot_marks()
+check("a film copied over later takes its rating at the next scan", field("movies", later, "userrating") == 7.5,
+      field("movies", later, "userrating"))
+import inspect
+check("the scan does that", "adopt_snapshot_marks()" in inspect.getsource(n.library_scan_worker))
+c = n.db(); after = c.execute("SELECT COUNT(*) FROM history").fetchone()[0]; c.close()
+check("copied ratings aren't new ratings: nothing added to your history", after == events_before,
+      (events_before, after))
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
