@@ -16,6 +16,26 @@ at the top.
 
 ---
 
+## 2026-10-09 — v0.1.59, the phone peek redone: colour, and DETAILS
+
+"Too minimalistic now." The user asked for colour-coded genre tags, a
+DETAILS button under PLAY instead of the whole poster opening details, PLAY
+left where it was, and the text in the top half — "be creative".
+
+- `.peektop` (phone only): the year large in the display face, the length
+  (or episodes, or "up to S2E3") small caps under it, TMDB as a pill
+  coloured by score (>=7.5 green, >=6 marigold, else rust) beside YOUR
+  rating in solid marigold, and up to three genre tags.
+- Genre colours: `genreHue()` — a hue per TMDB genre round the wheel
+  (warm action, cool sci-fi and mystery, red horror…), and a steady hashed
+  hue for anything unlisted; each tag is `hsl(var(--h) …)` text, tint and
+  border. `genreShort()` trims "science fiction" to "sci-fi" and the like.
+- Top 62% for the text, so PLAY sits about two thirds down as it did, with
+  DETAILS (`.peekdetails`) under it. A greyed poster has no buttons: where
+  it is goes at the foot on one line.
+- A second tap on the poster now closes the peek; DETAILS opens the
+  details.
+
 ## 2026-10-09 — v0.1.58, a poster's peek on the phone: facts and PLAY
 
 A touch screen has no hover, so the PC's hover panel — title, names,

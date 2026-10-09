@@ -108,7 +108,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.58"
+APP_VERSION = "0.1.59"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -14092,20 +14092,46 @@ section:first-child{margin-top:0}
 .peek .line{font-family:var(--mono);font-size:10px;color:var(--muted);letter-spacing:.03em}
 .peek .blurb{font-size:12px;color:var(--paper);line-height:1.35;overflow:hidden;flex:1}
 .peek .foot{display:flex;gap:6px;flex-wrap:wrap;margin-top:auto}
-/* The phone's peek, opened by a tap (.peeking) rather than a hover: the
-   facts and PLAY, centred on the poster, and nothing else — the names, the
-   blurb and the toggles are all on the details page a second tap away. */
-.tile .peek .peekplay{display:none}
-body.android .tile .peek{opacity:0;justify-content:center;align-items:center;text-align:center;gap:12px}
+/* The phone's peek, opened by a tap (.peeking) rather than a hover. Top
+   half the facts (.peektop), set out to be read at a glance; then PLAY,
+   then DETAILS. The names, the blurb and the toggles are on the details
+   page. */
+.tile .peek .peekplay,.tile .peek .peekdetails,.tile .peek .peektop{display:none}
+body.android .tile .peek{opacity:0;justify-content:flex-start;align-items:center;text-align:center;
+  gap:0;padding:12px 8px}
 body.android .tile.peeking .peek{opacity:1}
 body.android .tile .peek h4,body.android .tile .peek .names,body.android .tile .peek .blurb,
 body.android .tile .peek .watchtoggle,body.android .tile .peek .favtoggle,
-body.android .tile .peek .foot{display:none}
-body.android .tile .peek .line{font-size:11px;line-height:1.6}
-body.android .tile .peek .facts span{display:block}
-body.android .tile .peek .facts i{display:none}
-body.android .tile .peek .peekplay{display:block;padding:8px 18px;font-size:13px}
-body.android .tile.peeking .peek .peekplay{pointer-events:auto}
+body.android .tile .peek .foot,body.android .tile .peek .facts{display:none}
+/* Where a greyed one is, at the foot where PLAY would be: one line. */
+body.android .tile .peek .elsewhereline{order:9;margin-top:auto;font-size:9.5px;width:100%;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* Text in the top ~60%, so PLAY sits about two thirds down, where it was,
+   with DETAILS under it. */
+body.android .tile .peek .peektop{display:flex;flex-direction:column;align-items:center;gap:4px;
+  flex:0 0 62%;min-height:0;overflow:hidden;width:100%}
+.peektop .pyear{font-family:var(--display);font-weight:800;font-size:24px;line-height:1;
+  color:var(--paper);letter-spacing:-.02em}
+.peektop .plen{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--muted)}
+.peektop .pscores{display:flex;gap:4px;justify-content:center;flex-wrap:nowrap;margin-top:2px}
+.peektop .pscore{font-family:var(--mono);font-size:9px;letter-spacing:.03em;padding:2px 4px;
+  border-radius:4px;border:1px solid currentColor;line-height:1.3;white-space:nowrap}
+.peektop .pscore b{margin-left:3px;font-weight:700}
+.peektop .pscore.hi{color:#86d993}
+.peektop .pscore.mid{color:var(--marigold)}
+.peektop .pscore.lo{color:var(--rust)}
+.peektop .pscore.you{color:#060509;background:var(--marigold);border-color:var(--marigold)}
+.peektop .ptags{display:flex;flex-wrap:wrap;gap:4px;justify-content:center;margin-top:3px}
+.peektop .ptag{font-family:var(--mono);font-size:8.5px;letter-spacing:.05em;text-transform:uppercase;
+  padding:2px 6px;border-radius:999px;white-space:nowrap;
+  color:hsl(var(--h) 85% 78%);background:hsl(var(--h) 60% 45% / .22);
+  border:1px solid hsl(var(--h) 70% 62% / .5)}
+body.android .tile .peek .peekplay{display:block;margin-top:0;padding:8px 18px;font-size:13px}
+body.android .tile .peek .peekdetails{display:block;margin-top:8px;padding:5px 14px;font-size:10.5px;
+  letter-spacing:.1em}
+body.android .tile.peeking .peek .peekplay,
+body.android .tile.peeking .peek .peekdetails{pointer-events:auto}
 
 /* Corners: what the world thinks on the left, what you think on the right.
    Progress is a bar rather than a badge, and it's the only state shown at
@@ -16800,6 +16826,31 @@ function tile(item){
      rather than letting "TMDB 7.9" break in the middle. */
   peek.append(el('div','line facts', facts.filter(Boolean)
     .map(f => '<span>' + esc(String(f)) + '</span>').join('<i>  ·  </i>')));
+  /* The phone's peek, top half: the same facts set out to be taken in at a
+     glance — the year large, the length under it, the two scores as
+     coloured pills (TMDB's by how good, yours in marigold), and the genres
+     as tags, each genre its own colour so a shelf of them reads at a
+     glance. Hidden on the PC, which shows the line above. */
+  const top = el('div','peektop');
+  if(item.year) top.append(el('div','pyear', esc(String(item.year))));
+  const length = item.kind === 'movie' && item.runtime ? item.runtime + ' min'
+    : item.kind === 'tvshow' && item.episodes ? item.episodes + ' episodes' : '';
+  if(length) top.append(el('div','plen', esc(length)));
+  if(item.progress_note) top.append(el('div','plen', 'up to ' + esc(item.progress_note)));
+  const scores = el('div','pscores');
+  if(item.tmdb) scores.append(el('span','pscore ' + (item.tmdb >= 7.5 ? 'hi' : item.tmdb >= 6 ? 'mid' : 'lo'),
+    'TMDB<b>' + esc(String(item.tmdb)) + '</b>'));
+  if(item.userrating) scores.append(el('span','pscore you',
+    'YOU<b>' + (Math.round(item.userrating * 2) / 2) + '</b>'));
+  if(scores.children.length) top.append(scores);
+  const tags = el('div','ptags');
+  (item.genres || []).slice(0, 3).forEach(g => {
+    const t = el('span','ptag', esc(genreShort(g)));
+    t.style.setProperty('--h', genreHue(g));
+    tags.append(t);
+  });
+  if(tags.children.length) top.append(tags);
+  peek.append(top);
   /* The phone's peek: the facts, then the one thing you'd tap a poster
      for. Hidden on the PC, where this panel is a hover and PLAY is on the
      details page. */
@@ -16814,6 +16865,13 @@ function tile(item){
       go.textContent = r && r.error ? 'FAILED' : 'PLAYING';
     };
     peek.append(go);
+    const more = el('button','iconbtn peekdetails','DETAILS');
+    more.onclick = (e) => {
+      e.stopPropagation();
+      closePeeks();
+      item.kind === 'tvshow' ? openShow(item.id) : openFilm(item.id);
+    };
+    peek.append(more);
   }
   if(item.directors && item.directors.length)
     peek.append(el('div','line names', esc(item.directors.join(', '))));
@@ -16876,10 +16934,11 @@ function tile(item){
       if(item.elsewhere || b.classList.contains('ondrive')) return;
       toggleTicked(item, b); return;
     }
-    /* On the phone the first tap opens the peek — the facts and PLAY — and
-       a second tap on the poster opens its details. There's no hover on a
-       touch screen to do the first job. */
-    if(document.body.classList.contains('android') && !b.classList.contains('peeking')){
+    /* On the phone a tap opens the peek — the facts, PLAY and DETAILS —
+       and a tap on the poster again closes it. There's no hover on a touch
+       screen to do this job, and the peek's own buttons say where to go. */
+    if(document.body.classList.contains('android')){
+      if(b.classList.contains('peeking')){ closePeeks(); return; }
       closePeeks();
       b.classList.add('peeking');
       return;
@@ -16902,6 +16961,29 @@ function closePeeks(){
 document.addEventListener('click', e => {
   if(!e.target.closest || !e.target.closest('.tile')) closePeeks();
 });
+
+/* A colour for each genre, for the phone's peek tags: warm for action and
+   its neighbours, cool for science fiction and mystery, and so on round
+   the wheel. Anything not listed still gets a steady colour of its own. */
+const GENRE_HUES = {
+  'action': 14, 'action & adventure': 14, 'adventure': 32, 'western': 38, 'comedy': 50,
+  'family': 92, 'kids': 110, 'reality': 150, 'documentary': 178, 'news': 190,
+  'science fiction': 200, 'sci-fi & fantasy': 200, 'tv movie': 215, 'mystery': 232,
+  'drama': 258, 'fantasy': 278, 'animation': 298, 'music': 318, 'romance': 334,
+  'soap': 340, 'horror': 356, 'crime': 4, 'thriller': 22, 'war': 64, 'war & politics': 64,
+  'history': 42, 'talk': 170,
+};
+function genreHue(g){
+  const k = String(g || '').toLowerCase();
+  if(k in GENRE_HUES) return GENRE_HUES[k];
+  let h = 0;
+  for(const c of k) h = (h * 31 + c.charCodeAt(0)) % 360;
+  return h;
+}
+function genreShort(g){
+  return ({'science fiction': 'sci-fi', 'sci-fi & fantasy': 'sci-fi', 'action & adventure': 'action',
+           'war & politics': 'war', 'documentary': 'docs', 'tv movie': 'tv film'})[String(g).toLowerCase()] || g;
+}
 
 /* PLAY from a poster's peek: a film from where you got to, a show from the
    episode you're up to (its first, if you haven't started). */

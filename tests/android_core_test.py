@@ -173,9 +173,12 @@ check("on the phone a details panel covers the top strip instead of scrolling un
 check("phone landscape: smaller tiles, and the search row and pager scroll with them",
       "@media (orientation:landscape) and (max-height:520px)" in page_src
       and "body.android #view-library{overflow-y:auto}" in page_src)
-check("phone: a tap shows a short peek with PLAY, a second tap opens the details",
+check("phone: a tap shows the peek — facts and colour-coded genres up top, PLAY, DETAILS below",
       "'play peekplay'" in page_src and "classList.add('peeking')" in page_src
-      and "body.android .tile.peeking .peek{" in page_src)
+      and "body.android .tile.peeking .peek{" in page_src and "peekdetails" in page_src
+      and "function genreHue(" in page_src and "peektop" in page_src)
+check("phone: a second tap on the poster closes the peek rather than opening details",
+      "if(b.classList.contains('peeking')){ closePeeks(); return; }" in page_src)
 check("a details panel can be swiped down to close", "function sheetSwipe(" in page_src
       and "sheetSwipe(back" in page_src)
 
