@@ -16,6 +16,37 @@ at the top.
 
 ---
 
+## 2026-10-09 — v0.1.64, the phone and the PC swap history over the cable
+
+Asked for: one history, ratings, favourites and watch points between the
+phone and the PC (the user suggested OneDrive; Android's OneDrive keeps no
+folder another app can write into and have synced, so the cable first).
+Also "the android app hasn't carried over favourite markers — is it not
+just pulling the database?" No: it gets a catalogue (titles, posters,
+ratings, play counts), keyed by TMDB id, since the PC's database is keyed by
+its own E: paths. Favourites and the watchlist were never in it; the swap
+carries them.
+
+Reuses the sharing files built for the cloud folder and the Wi-Fi link:
+- `_own_sharing_lines` (split out of `phone_events_for`): seeds + this
+  machine's own history as sharing lines.
+- The phone: GET `/api/share/export` → `share_export()` (its own lines, its
+  device id and name); POST `/api/share/import` → `share_import()` (the
+  PC's text written whole to PHONE_SYNC_DIR, read from the top,
+  `sync_apply`). Both 404 off Android.
+- The PC: `usb_swap_history` in SEND MY LIBRARY, after the catalogue and
+  before the phone's scan: the phone's file through `phone_receive` (so
+  with cloud sharing on it lands in the shared folder for the other
+  computers), then `phone_events_for` (the PC's own + every other
+  device's, never the phone's own) back. An older phone app is said
+  ("Update Next Up on the phone…"), not an error.
+- On the phone: no mpv files to write (`_sync_watch_later`), and PC
+  "watched" events don't add plays — the PC's counts arrive whole with the
+  catalogue. A finished scan applies what was waiting (no sync loop there).
+- app.py `name_the_phone`: CONFIG device_name from Android's own name
+  ("James's S24 Ultra"), not "localhost".
+- Checked live: the S24 exports 42 events under its own name and id.
+
 ## 2026-10-09 — v0.1.63, the phone stops wiping its watch points
 
 "The films seem to have all forgotten their watch points on android." They

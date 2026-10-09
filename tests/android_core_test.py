@@ -90,6 +90,30 @@ with urllib.request.urlopen("http://127.0.0.1:%%d/api/mpv/test" %% port, timeout
     out["mpv_test"] = json.loads(r.read())
 n.ANDROID_PLAYER = None
 out["no_player"] = post("/api/play", {"type": "movie", "id": fid})
+# The swap over the cable, the phone's half: the PC's events in, its own out.
+conn = n.db()
+sid = conn.execute("INSERT INTO movies (path,title,year,tmdb_id,playcount) VALUES (?,?,?,?,0)",
+                   (film + ".shared.mkv", "Shared Film", 2002, "sh1")).lastrowid
+conn.commit(); conn.close()
+n.LOCAL.loaded_at = 0; n.LIB.loaded_at = 0
+def pc_event(uid, event, **extra):
+    ev = {"v": 1, "uid": uid, "utc": 1790000000 + int(uid[1:]) * 60, "device_id": "pc-desk",
+          "device": "DESKTOP", "kind": "movie", "tmdb": "sh1", "season": None, "episode": None,
+          "show": None, "title": "Shared Film", "event": event, "value": None, "seconds": None,
+          "position": None, "total": None}
+    ev.update(extra)
+    return json.dumps(ev)
+text = "\n".join([pc_event("e1", "favourited"), pc_event("e2", "watched"),
+                   pc_event("e3", "stopped", position=1234, total=6000)]) + "\n"
+out["share_in"] = post("/api/share/import", {"text": text})
+c = n.db()
+r = c.execute("SELECT favourited_at, resume_pos, playcount FROM movies WHERE id=?", (sid,)).fetchone()
+out["shared_row"] = [bool(r["favourited_at"]), r["resume_pos"], r["playcount"]]
+c.close()
+with urllib.request.urlopen("http://127.0.0.1:%%d/api/share/export" %% port, timeout=30) as resp:
+    exp = json.loads(resp.read())
+out["share_out"] = {"device_id": exp.get("device_id"), "own": n.sync_device_id(),
+                    "lines": [json.loads(x) for x in exp.get("text", "").splitlines() if x.strip()]}
 out["threads"] = sorted(t.name for t in threading.enumerate())
 print("JSON" + json.dumps(out))
 ''' % ROOT
@@ -221,6 +245,17 @@ check("nothing claims to be playing: the player is another app, out of sight",
 check("the mpv test in Settings says how the phone plays, not 'install mpv.exe'",
       out.get("mpv_test", {}).get("ok") and "mpv app" in out.get("mpv_test", {}).get("message", ""),
       out.get("mpv_test"))
+share_out = out.get("share_out") or {}
+lines = share_out.get("lines") or []
+check("the phone takes in the PC's favourites and watch points",
+      (out.get("shared_row") or [None])[0] and (out.get("shared_row") or [0, 0])[1] == 1234,
+      out.get("shared_row"))
+check("and no play is counted twice: the PC's counts come with the catalogue",
+      (out.get("shared_row") or [0, 0, None])[2] == 0, out.get("shared_row"))
+check("the phone hands over its own events, under its own id",
+      share_out.get("device_id") == share_out.get("own") and lines
+      and all(e.get("device_id") == share_out.get("own") for e in lines), share_out.get("device_id"))
+check("and never the PC's back again", not any(e.get("uid") in ("e1", "e2", "e3") for e in lines))
 check("no player hooked up is said plainly", "error" in (out.get("no_player") or {})
       and "winget" not in out["no_player"]["error"], out.get("no_player"))
 

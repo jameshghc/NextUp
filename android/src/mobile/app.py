@@ -24,6 +24,7 @@ class NextUp(toga.App):
             nextup.ANDROID_VIDEO_ACCESS = lambda: has_video_access(self)
             nextup.ANDROID_PLAYER = lambda path, start: open_in_player(self, nextup, path, start)
             first_run_library(nextup)
+            name_the_phone(self, nextup)
             port = nextup.serve_in_thread()
             self.main_window.content = toga.WebView(
                 url="http://127.0.0.1:%d/" % port, style=toga.style.Pack(flex=1))
@@ -65,6 +66,26 @@ def first_run_library(nextup):
         pass                    # created later, once access is granted
     nextup.CONFIG["media_folders"] = [PHONE_LIBRARY]
     nextup.save_json(nextup.CONFIG_PATH, nextup.CONFIG)
+
+
+def name_the_phone(app, nextup):
+    """What the phone is called — Android's own name for it, "James's S24
+    Ultra" — rather than "localhost", which is all its hostname says. It's
+    on the profile screen, and it's how the PC lists the phone among the
+    devices it shares history with. Left alone once set, so renaming it in
+    Next Up sticks."""
+    if (nextup.CONFIG.get("device_name") or "").strip():
+        return
+    try:
+        from java import jclass
+        Global = jclass("android.provider.Settings$Global")
+        Build = jclass("android.os.Build")
+        name = Global.getString(app._impl.native.getContentResolver(), "device_name") or Build.MODEL
+        if name:
+            nextup.CONFIG["device_name"] = str(name)[:40]
+            nextup.save_json(nextup.CONFIG_PATH, nextup.CONFIG)
+    except Exception:
+        traceback.print_exc()   # it'll just be "localhost"
 
 
 def dark_bars(app):

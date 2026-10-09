@@ -109,7 +109,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.63"
+APP_VERSION = "0.1.64"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -6459,6 +6459,13 @@ def library_scan_worker():
         # have is still waiting in the inbox — this scan may have brought it.
         SYNC["apply_pending"] = True
         _SYNC_WAKE.set()
+        if PLATFORM == "android":
+            # The phone has no sharing folder, so no loop to do it: now.
+            conn = db()
+            try:
+                sync_apply(conn)
+            finally:
+                conn.close()
     except Exception as exc:
         LIBSCAN["error"] = str(exc)
     finally:
@@ -9236,8 +9243,8 @@ def _sync_watch_later(path, position):
     names the file by the MD5 of the path as it was given; checked against
     the files it wrote here. Anything else mpv saved in it — volume, audio
     delay — is kept."""
-    if not path:
-        return
+    if not path or PLATFORM == "android":
+        return          # the phone's mpv is another app, with no such files here
     full = os.path.join(WATCH_LATER, hashlib.md5(path.encode("utf-8")).hexdigest().upper())
     try:
         if not position:
@@ -9290,7 +9297,9 @@ def _sync_apply_one(conn, ev, kind, item_id, playing):
 
     if kind == "tvshow" or not _is_playback_event(event):
         return
-    if event == "watched" and not ev.get("seed"):
+    # Not on the phone: the PC's play counts arrive whole with the catalogue,
+    # so counting its "watched" events as well would count each twice.
+    if event == "watched" and not ev.get("seed") and PLATFORM != "android":
         conn.execute("UPDATE %s SET playcount=COALESCE(playcount,0)+1 WHERE id=?" % table,
                      (item_id,))
     if stamp and not ev.get("seed"):
@@ -11461,6 +11470,63 @@ def phone_path_for_key(key):
 PHONE_SYNC_MAX_BYTES = 20 * 1024 * 1024
 
 
+def _own_sharing_lines(conn):
+    """This machine's own events as sharing-file lines: the seeds that say
+    what was true before there was history, then every event it logged
+    itself — never one it was told by another device."""
+    me, name = sync_device_id(), snapshot_device_name()
+    lines = _sync_seed_events(conn, me, name)
+    for r in conn.execute(
+            "SELECT * FROM history WHERE origin IS NULL AND uid IS NOT NULL"
+            " AND tmdb_id IS NOT NULL ORDER BY at ASC, id ASC"):
+        if r["kind"] not in SYNC_KINDS:
+            continue
+        row = dict(r)
+        if row["utc"] is None:
+            row["utc"] = stamp_seconds(row["at"]) or 0.0
+        lines.append(_sync_event_from_row(row, me, name))
+    return lines
+
+
+def share_export():
+    """The phone's half of the swap over the cable: everything it has to
+    say, as its own sharing file. The PC files it as this phone's, as if it
+    had come over the Wi-Fi link — and, with cloud sharing on, puts it in the
+    shared folder where the other computers read it too."""
+    conn = db()
+    try:
+        lines = _own_sharing_lines(conn)
+    finally:
+        conn.close()
+    return {"device_id": sync_device_id(), "device": snapshot_device_name(),
+            "text": "".join(json.dumps(x, ensure_ascii=False) + "\n" for x in lines)}
+
+
+def share_import(text, sender=None):
+    """And the other half: what the PC sends back — its own history and
+    what every other device has told it — taken in as one whole file and
+    applied. Whole every time, read from the top: uids make a line seen
+    twice harmless. Ratings, favourites, the watchlist and watch points land
+    on the films the phone has; the rest wait for a scan to bring them."""
+    os.makedirs(PHONE_SYNC_DIR, exist_ok=True)
+    name = "device-%s.jsonl" % re.sub(r"[^A-Za-z0-9_-]", "", str(sender or "pc"))[:40]
+    own = os.path.join(PHONE_SYNC_DIR, name)
+    with _SYNC_LOCK:
+        tmp = own + ".tmp"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text or "")
+        os.replace(tmp, own)
+        conn = db()
+        try:
+            conn.execute("DELETE FROM sync_files WHERE name=?", (name,))
+            arrived = sync_import(conn, PHONE_SYNC_DIR)
+            applied = sync_apply(conn)
+        finally:
+            conn.close()
+    LIB.loaded_at = 0
+    return {"arrived": arrived, "applied": applied}
+
+
 def phone_events_for(device_id):
     """Everything the phone should know, as sharing-file lines: this PC's
     own history, the seeds that describe what was true before there was
@@ -11475,19 +11541,9 @@ def phone_events_for(device_id):
     of it every time (from offset 0), never resume from where it stopped:
     uids make re-reading harmless, but resuming would skip whatever moved
     in ahead of the old end."""
-    me, name = sync_device_id(), snapshot_device_name()
     conn = db()
     try:
-        lines = _sync_seed_events(conn, me, name)
-        for r in conn.execute(
-                "SELECT * FROM history WHERE origin IS NULL AND uid IS NOT NULL"
-                " AND tmdb_id IS NOT NULL ORDER BY at ASC, id ASC"):
-            if r["kind"] not in SYNC_KINDS:
-                continue
-            row = dict(r)
-            if row["utc"] is None:
-                row["utc"] = stamp_seconds(row["at"]) or 0.0
-            lines.append(_sync_event_from_row(row, me, name))
+        lines = _own_sharing_lines(conn)
         for r in conn.execute("SELECT device_id,payload FROM sync_inbox ORDER BY utc ASC"):
             if r["device_id"] != device_id:
                 try:
@@ -12237,12 +12293,35 @@ def usb_send_library(step=None):
         # answers, over whatever its Wi-Fi is doing.
         reply = _usb_phone_call(local, "POST", "/api/library/snapshot/import",
                                 {"snapshot": build_library_snapshot()}, timeout=1200)
+        say("Swapping history, ratings, favourites and watch points")
+        shared = usb_swap_history(local)
         say("Having the phone look at its own films")
         _usb_phone_call(local, "POST", "/api/library/scan", {})
-        return reply.get("imported") or {}
+        return dict(reply.get("imported") or {}, shared=shared)
     finally:
         if local:
             usb_adb("-s", serial, "forward", "--remove", "tcp:%d" % local)
+
+
+def usb_swap_history(local):
+    """Both ways at once, over the cable: the phone's history, ratings,
+    favourites, watchlist and watch points to the PC, and the PC's — with
+    every other device's — to the phone. The same sharing files the Wi-Fi
+    link and the cloud folder use, so a phone synced here reaches the other
+    computers too when sharing is on. A phone app too old to know how is
+    said, not an error: the catalogue has still gone."""
+    try:
+        mine = _usb_phone_call(local, "GET", "/api/share/export", timeout=120)
+    except Exception:
+        return {"skipped": "Update Next Up on the phone to swap history over the cable."}
+    if not mine.get("device_id"):
+        return {"skipped": "Update Next Up on the phone to swap history over the cable."}
+    kept = phone_receive({"id": mine["device_id"]}, mine.get("text") or "")
+    back = _usb_phone_call(local, "POST", "/api/share/import",
+                           {"text": phone_events_for(mine["device_id"]),
+                            "from": sync_device_id()}, timeout=600)
+    return {"from_phone": kept, "to_phone": back.get("arrived", 0),
+            "phone": mine.get("device") or "the phone"}
 
 
 def usb_send_worker():
@@ -12422,6 +12501,13 @@ class Handler(BaseHTTPRequestHandler):
 
             if route == "/api/profiles":
                 return self.send_json(profiles_state())
+
+            if route == "/api/share/export":
+                # The phone's half of the cable swap. Only on the phone, and
+                # its server only answers on the phone itself (through adb).
+                if PLATFORM != "android":
+                    return self.send_json({"error": "only on the phone"}, 404)
+                return self.send_json(share_export())
 
             if route == "/api/library/snapshot/status":
                 return self.send_json(snapshot_state())
@@ -12973,6 +13059,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(
                     {"ok": True, "device": device_rename(data.get("name")),
                      "state": profiles_state()})
+
+            if route == "/api/share/import":
+                if PLATFORM != "android":
+                    return self.send_json({"error": "only on the phone"}, 404)
+                return self.send_json(dict(share_import(data.get("text") or "",
+                                                        data.get("from")), ok=True))
 
             if route == "/api/library/snapshot/import":
                 # Either posted whole, or read from a file dropped in the
@@ -20537,6 +20629,11 @@ function usbPhoneRender(s){
     body.append(el('p','libline', 'Sent: ' + (r.movies||0) + ' films, ' + (r.shows||0)
       + ' shows, ' + (r.episodes||0) + ' episodes' + (r.art ? ', ' + r.art + ' posters' : '')
       + '. The phone is scanning its own films now.'));
+    const sh = r.shared || {};
+    if(sh.skipped) body.append(el('p','libline', esc(sh.skipped)));
+    else if(sh.from_phone != null)
+      body.append(el('p','libline', 'Swapped: ' + sh.from_phone + ' things from the phone — what you watched, '
+        + 'rated and favourited there — and ' + sh.to_phone + ' new ones to it.'));
   }
 }
 

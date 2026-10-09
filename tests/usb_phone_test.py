@@ -20,6 +20,9 @@ def check(name, ok, detail=""):
 
 # --- a pretend phone app -----------------------------------------------------------
 got = []
+# What the pretend phone has to share: a favourite, made on the phone, of a
+# film the PC also has — filled in once the library is open below.
+PHONE_SHARE = {"device_id": "phone-s24", "device": "James's S24 Ultra", "text": ""}
 class FakePhone(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def reply(self, obj):
@@ -28,10 +31,14 @@ class FakePhone(BaseHTTPRequestHandler):
         self.end_headers(); self.wfile.write(body)
     def do_GET(self):
         got.append(("GET", self.path, None))
+        if self.path.startswith("/api/share/export"):
+            return self.reply(PHONE_SHARE)
         self.reply({"version": "0.1.49", "connected": True})
     def do_POST(self):
         raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
         got.append(("POST", self.path, json.loads(raw or b"{}")))
+        if self.path.startswith("/api/share/import"):
+            return self.reply({"ok": True, "arrived": 5, "applied": 4})
         self.reply({"ok": True, "imported": {"movies": 3, "shows": 2, "episodes": 9, "art": 0}})
 phone = ThreadingHTTPServer(("127.0.0.1", 0), FakePhone)
 threading.Thread(target=phone.serve_forever, daemon=True).start()
@@ -90,6 +97,17 @@ except n.AppError as exc:
 check("needs the phone app open", refused and "Open Next Up on the phone" in refused, refused)
 SCRIPT["running"] = True
 n.CONFIG["tmdb_key"] = "test-key-123"
+# The phone favourited a film the PC has; the PC favourited another.
+_c = n.db()
+_two = _c.execute("SELECT id, tmdb_id, title FROM movies WHERE tmdb_id IS NOT NULL AND tmdb_id<>''"
+                  " AND favourited_at IS NULL ORDER BY id LIMIT 2").fetchall()
+_c.execute("UPDATE movies SET favourited_at='2026-10-09 01:00:00' WHERE id=?", (_two[1]["id"],))
+_c.commit(); _c.close()
+PHONE_SHARE["text"] = json.dumps({"v": 1, "uid": "phone-ev-1", "utc": time.time(),
+    "device_id": "phone-s24", "device": "James's S24 Ultra", "kind": "movie",
+    "tmdb": str(_two[0]["tmdb_id"]), "season": None, "episode": None, "show": None,
+    "title": _two[0]["title"], "event": "favourited", "value": None, "seconds": None,
+    "position": None, "total": None}) + "\n"
 calls.clear(); got.clear()
 result = n.usb_send_library()
 posts = {p: body for m, p, body in got if m == "POST"}
@@ -102,6 +120,23 @@ check("the TMDB key goes, so the phone can identify its own films",
 check("the phone then scans its own folder", "/api/library/scan" in posts, list(posts))
 check("and NOT ONE video file is sent", not any(c and c[0] in ("push", "install", "sync")
                                                 or "push" in c for c in calls), calls)
+order = [path for m, path, body in got if m == "POST"]
+check("the swap comes after the catalogue and before the phone's scan",
+      order.index("/api/library/snapshot/import") < order.index("/api/share/import")
+      < order.index("/api/library/scan"), order)
+_c = n.db()
+_fav = _c.execute("SELECT favourited_at FROM movies WHERE id=?", (_two[0]["id"],)).fetchone()[0]
+_c.close()
+check("a favourite made on the phone arrives on the PC", _fav, _fav)
+sent = (posts.get("/api/share/import") or {}).get("text") or ""
+_lines = [json.loads(x) for x in sent.splitlines() if x.strip()]
+check("the PC's favourites go to the phone",
+      any(e.get("event") == "favourited" and e.get("tmdb") == str(_two[1]["tmdb_id"]) for e in _lines),
+      len(_lines))
+check("the phone isn't sent its own events back",
+      not any(e.get("device_id") == "phone-s24" for e in _lines))
+check("the result says what was swapped", (result.get("shared") or {}).get("from_phone") == 1
+      and (result.get("shared") or {}).get("to_phone") == 5, result.get("shared"))
 check("the result says what arrived", result.get("movies") == 3 and result.get("shows") == 2, result)
 check("the tunnel is taken down after", any(c[:2] == ("forward", "--remove") or
                                             (len(c) > 2 and c[2:4] == ("forward", "--remove")) for c in calls), calls)
