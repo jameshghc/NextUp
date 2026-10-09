@@ -14069,10 +14069,8 @@ section:first-child{margin-top:0}
 .addfab .addgo:hover:not(:disabled){background:#38bd5b}
 .addfab .addgo.confirm{background:var(--marigold);color:#1a1206}
 .addfab .addgo:disabled{opacity:.5;cursor:default}
-/* What's on a drive, in a panel over the library. */
-.sheetbody.drvsheet{display:block;max-width:1100px}
-.sheetbody.drvsheet h2{margin:0 110px 12px 0;font-size:24px;overflow-wrap:anywhere}
-.drvsheet .filters{margin-bottom:10px}
+/* What's on a drive, shown in the library's own place. */
+#view-library.drvview > .pager{display:none}
 /* The tick lives in the poster's bottom-right corner, where nothing else is.
    Hidden until selection mode, then a hollow ring; ticked, a marigold disc
    with a check, and the whole tile gets a marigold ring of its own. */
@@ -15439,7 +15437,8 @@ header.mast .libplaces.offview{visibility:hidden}
       <select id="drv_pick"><option value="">Looking for drives…</option></select>
     </label>
     <button class="iconbtn" id="drv_refresh" title="Look for drives again, and read the chosen one afresh">REREAD</button>
-    <button class="iconbtn" id="drv_browse" title="Everything on the chosen drive">WHAT'S ON IT</button>
+    <button class="iconbtn" id="drv_browse" title="Everything on the chosen drive, here in place of your library">WHAT'S ON IT</button>
+    <label class="toggle drvonly hidden"><input type="checkbox" id="drv_notlib"> Only what isn't in my library</label>
     <div class="selcount" id="tray_count">Tick what to add</div>
     <button class="iconbtn" id="tray_clear">CLEAR</button>
     <button class="iconbtn hidden" id="tray_cancel">CANCEL</button>
@@ -16339,7 +16338,7 @@ function drawLibNav(){
 let drvData = null, drvInited = false, drvSeq = 0, drvTimer = null;
 var addMode = false;           // var: read by ticking() before this line may have run
 
-function ticking(){ return addMode && !LIB_PANELS[libSection]; }
+function ticking(){ return addMode && !drvView && !LIB_PANELS[libSection]; }
 
 function setAddMode(on){
   addMode = on;
@@ -16350,6 +16349,7 @@ function setAddMode(on){
     if(!drvInited){ drvInited = true; drvDrives(); trayPoll(); }
     else drvRefresh();
   } else {
+    if(drvView) setDriveView(false);
     document.querySelectorAll('#tiles-out .tile[data-key]').forEach(clearDriveMark);
   }
   trayUpdate();
@@ -16405,36 +16405,33 @@ $('#drv_refresh').onclick = async () => {
   drvDrives();
 };
 
-/* What's on the chosen drive, in a panel over the library: everything on
-   it, films and shows, what of it the library also has (its posters open
-   their pages) and what it doesn't. */
-function openDriveContents(){
-  const body = sheet();
-  body.classList.add('drvsheet');
-  const opt = $('#drv_pick').selectedOptions[0];
-  body.append(el('h2', null, esc('On ' + (opt ? opt.textContent.split(' — ')[0] : 'the drive'))));
-  body.insertAdjacentHTML('beforeend',
-    '<div class="filters">'
-    + '<label class="f"><span>Show</span><select id="drv_kind">'
-    + '<option value="all">Films and TV</option><option value="film">Films</option>'
-    + '<option value="tv">TV shows</option></select></label>'
-    + '<label class="searchbox drvsearch"><span>Search</span>'
-    + '<input id="drv_q" type="search" placeholder="A title on this drive…" autocomplete="off"></label>'
-    + '<label class="toggle drvonly"><input type="checkbox" id="drv_notlib"> Only what isn\'t in my library</label>'
-    + '</div><div id="drv_summary" class="drvsummary"></div><div id="drv_out"></div>');
-  $('#drv_kind').onchange = () => drvShow();
-  $('#drv_notlib').onchange = () => drvShow();
-  $('#drv_q').oninput = () => { clearTimeout(drvTimer); drvTimer = setTimeout(drvShow, 150); };
-  if(drvData) drvShow(); else drvLoad();
+/* What's on the chosen drive, in the library's own place: WHAT'S ON IT
+   swaps the posters for the drive's contents — what the library also has
+   (its posters open their pages) and what it doesn't — filtered by the
+   same search box and Films / TV tabs. Again, or DONE, and it's your
+   library. */
+var drvView = false;
+function setDriveView(on){
+  drvView = on;
+  $('#drv_browse').textContent = on ? 'BACK TO LIBRARY' : "WHAT'S ON IT";
+  document.querySelector('#addbar .drvonly').classList.toggle('hidden', !on);
+  $('#view-library').classList.toggle('drvview', on);
+  $('#view-library').classList.toggle('selecting', ticking());
+  if(on){
+    $('#tiles-out').innerHTML = '<div id="drv_summary" class="drvsummary"></div><div id="drv_out"></div>';
+    $('#libcount').textContent = '';
+    if(drvData) drvShow(); else drvLoad();
+  } else loadLibrary();
 }
-$('#drv_browse').onclick = () => openDriveContents();
+$('#drv_browse').onclick = () => setDriveView(!drvView);
+$('#drv_notlib').onchange = () => drvShow();
 
 function drvShow(){
   if(!drvData || !$('#drv_out')) return;
   const d = drvData, out = $('#drv_out');
-  const kind = $('#drv_kind').value;
+  const kind = libKind === 'tv' ? 'tv' : libKind === 'film' ? 'film' : 'all';
   const onlyNew = $('#drv_notlib').checked;
-  const term = $('#drv_q').value.trim().toLowerCase();
+  const term = $('#q').value.trim().toLowerCase();
   const keep = it => (!onlyNew || !it.in_library) && (!term || (it.title || '').toLowerCase().includes(term));
   const films = kind === 'tv' ? [] : d.films.filter(keep);
   const shows = kind === 'film' ? [] : d.shows.filter(keep);
@@ -16621,6 +16618,8 @@ function libShelf(){
 let libLoadSeq = 0;
 
 async function loadLibrary(keepOffset){
+  /* Showing what's on a drive: the search box and the tabs filter that. */
+  if(drvView){ drvShow(); return; }
   const mine = ++libLoadSeq;
   if(!keepOffset) libOffset = 0;
   /* Asked once and remembered: the badge on every greyed tile names the

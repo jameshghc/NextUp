@@ -36,9 +36,13 @@ feature lost.
 - `#addfab`: fixed bottom right while something is ticked or a copy runs.
   The total beside `#tray_add` (ADD → CONFIRM, marigold, after pricing →
   ADDING… with the percentage beside it → ADD).
-- WHAT'S ON IT → `openDriveContents()`: the old Drives catalogue in a
-  sheet — summary, Films/TV, search, "only what isn't in my library",
-  posters that open their pages. Back closes it.
+- WHAT'S ON IT → `setDriveView(true)`: the old Drives catalogue in the
+  library's own place, not over it (a sheet was tried first; the user
+  wanted it all within the library screen). `#tiles-out` holds the summary
+  and the drive's posters; `loadLibrary` routes to `drvShow` while
+  `drvView`, so the library's search box and Films/TV tabs filter it; "only
+  what isn't in my library" shows in the bar; the pager hides. The button
+  becomes BACK TO LIBRARY; DONE leaves it too.
 - Gone: `#view-drives`, the Drives place, drvMode/drvApplyMode/drvLibLoad,
   its pager. Hidden on the phone (`body.android`), which has no drives to
   fill from it.

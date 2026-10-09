@@ -188,8 +188,9 @@ check("the library has the tick button, and the add bar under the filters",
                                   'id="tray_cancel"', 'id="tray_clear"')))
 check("a floating green ADD with the selection's size beside it",
       'id="addfab"' in lib_html and 'id="addfab_size"' in lib_html and '>ADD</button>' in lib_html)
-check("what's on a drive is still there to browse, in a panel",
-      "function openDriveContents(" in page and 'id="drv_notlib"' in page)
+check("what's on a drive is still there to browse — in the library screen, not a panel",
+      "function setDriveView(" in page and 'id="drv_notlib"' in lib_html
+      and "function openDriveContents(" not in page)
 check("ticking is the library's own tiles now", "#tiles-out .tile[data-key]" in page
       and "#drv_lib" not in page)
 
