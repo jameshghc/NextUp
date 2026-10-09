@@ -14111,7 +14111,7 @@ body.android .tile .peek .elsewhereline{order:9;margin-top:auto;font-size:9.5px;
 body.android .tile .peek .peektop{display:flex;flex-direction:column;align-items:center;gap:4px;
   justify-content:flex-end;padding-bottom:10px;
   flex:0 0 62%;min-height:0;overflow:hidden;width:100%}
-.peektop .pname{font-family:var(--display);font-weight:700;font-size:14px;line-height:1.15;
+.peektop .pname{font-family:var(--display);font-weight:700;font-size:14.7px;line-height:1.15;
   color:var(--paper);letter-spacing:-.01em;display:-webkit-box;-webkit-line-clamp:3;
   -webkit-box-orient:vertical;overflow:hidden;flex:none}
 .peektop .plen{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;
@@ -16829,16 +16829,15 @@ function tile(item){
   peek.append(el('div','line facts', facts.filter(Boolean)
     .map(f => '<span>' + esc(String(f)) + '</span>').join('<i>  ·  </i>')));
   /* The phone's peek, top half: the same facts set out to be taken in at a
-     glance — the name, the year and length small under it, the two scores as
+     glance — "Name (year)", the length small under it, the two scores as
      coloured pills (TMDB's by how good, yours in marigold), and the genres
      as tags, each genre its own colour so a shelf of them reads at a
      glance. Hidden on the PC, which shows the line above. */
   const top = el('div','peektop');
-  top.append(el('div','pname', esc(item.title || '')));
+  top.append(el('div','pname', esc(item.title || '') + (item.year ? ' (' + esc(String(item.year)) + ')' : '')));
   const length = item.kind === 'movie' && item.runtime ? item.runtime + ' min'
     : item.kind === 'tvshow' && item.episodes ? item.episodes + ' episodes' : '';
-  const when = [item.year, length].filter(Boolean).join(' · ');
-  if(when) top.append(el('div','plen', esc(String(when))));
+  if(length) top.append(el('div','plen', esc(length)));
   if(item.progress_note) top.append(el('div','plen', 'up to ' + esc(item.progress_note)));
   const scores = el('div','pscores');
   if(item.tmdb) scores.append(el('span','pscore ' + (item.tmdb >= 7.5 ? 'hi' : item.tmdb >= 6 ? 'mid' : 'lo'),

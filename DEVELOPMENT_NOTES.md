@@ -38,7 +38,8 @@ left where it was, and the text in the top half — "be creative".
 - Then: the year was too big, and the name was missing. `.pname` (display
   face, 14px, up to three lines) heads the block, the year joins the length
   small under it ("1995 · 83 MIN"), and the block sits at the foot of its
-  62% (`justify-content:flex-end`) — just above PLAY.
+  62% (`justify-content:flex-end`) — just above PLAY. Then "Name (year)"
+  in the name's own face, 5% larger (14.7px), and the length alone below.
 
 ## 2026-10-09 — v0.1.58, a poster's peek on the phone: facts and PLAY
 
