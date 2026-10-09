@@ -175,16 +175,23 @@ n.dock_copy_worker(n.dock_plan_items(selection)[0], DEST)
 check("cancel stops it", not os.path.exists(local(root + "/TV")), n.DOCK["step"])
 desk.shutdown()
 
-# --- one place to fill a drive: Library > Drives ------------------------------------------
+# --- one place to fill a drive: the library itself --------------------------------------
 page = n.PAGE
-drives_html = page[page.index('<div id="view-drives">'):page.index('<!-- ================= RATE')]
 check("SELECT is gone from the Library toolbar", 'id="libselect"' not in page)
 check("the Settings docking station is gone", "<h3>Docking station</h3>" not in page
       and 'id="dock_drive"' not in page)
-check("Drives holds the library view, the copy tray and the mode switch",
-      all(x in drives_html for x in ('id="drv_mode"', 'id="drv_lib"', 'id="seltray"', 'id="tray_add"')))
-check("the tray lists what's ticked, with sizes", 'id="tray_list"' in drives_html
-      and "function trayQuote" in page)
+check("the Drives tab is gone", "['drives','Drives']" not in page and 'id="view-drives"' not in page)
+lib_html = page[page.index('<div class="searchrow">'):page.index('<!-- ================= RATE')]
+check("the library has the tick button, and the add bar under the filters",
+      all(x in lib_html for x in ('id="libadd"', 'id="addbar"', 'id="drv_pick"', 'id="drv_browse"',
+                                  'id="drv_refresh"', 'id="tray_list"', 'id="tray_status"',
+                                  'id="tray_cancel"', 'id="tray_clear"')))
+check("a floating green ADD with the selection's size beside it",
+      'id="addfab"' in lib_html and 'id="addfab_size"' in lib_html and '>ADD</button>' in lib_html)
+check("what's on a drive is still there to browse, in a panel",
+      "function openDriveContents(" in page and 'id="drv_notlib"' in page)
+check("ticking is the library's own tiles now", "#tiles-out .tile[data-key]" in page
+      and "#drv_lib" not in page)
 
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

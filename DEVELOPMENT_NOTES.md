@@ -16,6 +16,35 @@ at the top.
 
 ---
 
+## 2026-10-09 — v0.1.61, adding to a drive from the library itself
+
+The user preferred filling a drive as an overlay on the main library: a
+tick button opens a bar under the filters with the destination, the
+posters tick, and a floating green button adds with the size beside it.
+Asked: "move" — keep copying, labelled ADD. The Drives tab — gone, with no
+feature lost.
+
+- Search row: `#libadd` (a ticked box, lit green while open) toggles
+  `addMode`. `ticking()` is now `addMode && !LIB_PANELS[libSection]`, so
+  the library's own `#tiles-out` posters tick and are marked (✓ on the
+  drive, ✕ not, n/m partly) — not the greyed ones, which have nothing
+  here to copy from.
+- `#addbar` (the tray's styles, `.seltray.addbar`) under `.libtop`: Add to
+  (`#drv_pick`, drives and plugged-in phones, with free space), REREAD,
+  WHAT'S ON IT, what's ticked and what it comes to against the free space,
+  CLEAR, CANCEL while copying, DONE, the per-item sizes, the status line.
+- `#addfab`: fixed bottom right while something is ticked or a copy runs.
+  The total beside `#tray_add` (ADD → CONFIRM, marigold, after pricing →
+  ADDING… with the percentage beside it → ADD).
+- WHAT'S ON IT → `openDriveContents()`: the old Drives catalogue in a
+  sheet — summary, Films/TV, search, "only what isn't in my library",
+  posters that open their pages. Back closes it.
+- Gone: `#view-drives`, the Drives place, drvMode/drvApplyMode/drvLibLoad,
+  its pager. Hidden on the phone (`body.android`), which has no drives to
+  fill from it.
+- Checked against drives_serve: marks, a refused tick on what's there,
+  pricing, CONFIRM, the copy, Done, re-marked; the panel; DONE clears.
+
 ## 2026-10-09 — v0.1.60, three coloured tags on every phone peek
 
 The user: drop TMDB from the peek, give every poster three coloured tags,
