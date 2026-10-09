@@ -16,6 +16,33 @@ at the top.
 
 ---
 
+## 2026-10-09 — v0.1.63, the phone stops wiping its watch points
+
+"The films seem to have all forgotten their watch points on android." They
+had. `sync_playback_state` folds mpv's watch-later files into the library,
+and a point with no file means "seen to the end" — right on the PC. The
+phone's mpv is another app that keeps no files here, so on the first
+library load after every start (`resume_dir_changed` sees the folder's
+stamp go from nothing to 0.0) every watch point was zeroed and a watch
+counted. Akira went 1518 s → 0 at the 02:02 restart; played again at 02:34
+it began at 0, and stopping 3 s in saved that.
+
+- `resume_dir_changed` and `sync_playback_state` do nothing on Android;
+  the phone hears from mpv directly (android_play_finished).
+- `repair_android_resume`, once (CONFIG resume_repaired), from
+  `prepare_app`: each film and episode gets the furthest point stopped at
+  since it was last seen to the end (not the last stop — the post-wipe
+  plays restarted from 0), unplayed ones left alone; play counts rebuilt as
+  the PC's (snapshot) plus 'watched' events on the phone. On the S24:
+  Akira 20%, Aladdin 17%, Dune 29% back.
+- Verified on the S24 first that resume itself works: play 22 s, back,
+  play again → stopped at 26 s.
+
+Also: the phone opens the library on "On this device" (`defaultShelf()`),
+Show all a tap away; and in portrait the page starts below the camera
+(the cutout inset is zeroed in landscape only — `no_margins` now checks the
+orientation each time insets arrive).
+
 ## 2026-10-09 — v0.1.62, copies to the phone show their progress
 
 "Stuck on ADDING…" — it wasn't stuck. Copying Blade Runner (7.5 GB) and

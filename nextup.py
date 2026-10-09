@@ -109,7 +109,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.62"
+APP_VERSION = "0.1.63"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -5000,7 +5000,12 @@ _RESUME_SEEN = [None]
 def resume_dir_changed():
     """Cheap check: has mpv touched the resume folder since we last looked?
     Saves walking the whole library on every request while still noticing the
-    moment you quit a film."""
+    moment you quit a film.
+
+    Never on the phone: its mpv is another app, with no resume folder here
+    at all — see sync_playback_state."""
+    if PLATFORM == "android":
+        return False
     try:
         stamp = os.path.getmtime(WATCH_LATER)
     except OSError:
@@ -5045,7 +5050,14 @@ def sync_playback_state():
     actually happened in this app: a saved position means you're part way
     through, and a position that has vanished after being there means you
     reached the end. Files it has never seen played stay blank — no guessing.
+
+    Not on the phone. Its mpv is another app that keeps no resume files
+    here, so "no file" meant "watched to the end" for every film: each
+    start of the app wiped every watch point and counted a watch. The phone
+    hears from mpv directly instead (android_play_finished).
     """
+    if PLATFORM == "android":
+        return
     points = read_resume_points()
     conn = db()
     for table in ("movies", "episodes"):
@@ -15769,7 +15781,7 @@ function resetView(view){
     libKind = 'film';
     libOffset = 0;
     $('#q').value = '';
-    $('#shelf').value = 'all';
+    $('#shelf').value = defaultShelf();
     $('#libsort').value = 'title';
     drawLibNav();
     applyLibSection();
@@ -16309,6 +16321,10 @@ async function loadReasons(p){
 $('#spin').onclick = () => { if(currentTop) rejected.add(currentTop); loadTonight(); };
 
 /* ================= LIBRARY ================= */
+/* The phone opens on what it can play — what's on it — with everything
+   else a tap away under Show all. The PC opens on everything. */
+function defaultShelf(){ return document.body.classList.contains('android') ? 'here' : 'all'; }
+$('#shelf').value = defaultShelf();
 let libKind = 'film';
 let libOffset = 0;
 let libRows = [];
@@ -21290,6 +21306,57 @@ def android_play_finished(position=None, duration=None, completed=False):
         note_playback_finished(kind, item_id, ran_for, position=position, duration=duration)
 
 
+def repair_android_resume():
+    """Once, on the phone: undo what sync_playback_state did there before it
+    was stopped. Every watch point was wiped at each start, and a watch
+    counted each time. The phone's history has every sitting, so each film
+    and episode gets back the furthest point it reached (unless it was seen
+    to the end since), and its play count is rebuilt: the PC's, from the catalogue,
+    plus the ones really finished on the phone."""
+    if PLATFORM != "android" or CONFIG.get("resume_repaired"):
+        return
+    conn = db()
+    try:
+        pc_plays = dict((str(r[0]), r[1] or 0) for r in
+                        conn.execute("SELECT tmdb_id, playcount FROM snapshot_movies"))
+        for kind, table in (("movie", "movies"), ("episode", "episodes")):
+            rows = conn.execute("SELECT * FROM %s" % table).fetchall()
+            for row in rows:
+                events = conn.execute(
+                    "SELECT event, position, total FROM history WHERE kind=? AND item_id=?"
+                    " AND event IN ('stopped', 'watched') ORDER BY id", (kind, row["id"])).fetchall()
+                watched = sum(1 for e in events if e["event"] == "watched")
+                # The furthest point reached since it was last seen to the
+                # end — not simply the last stop: a play after the wipe began
+                # again from nothing, and stopping it a few seconds in is
+                # not where you'd got to.
+                since = events
+                for i, e in enumerate(events):
+                    if e["event"] == "watched":
+                        since = events[i + 1:]
+                stops = [e for e in since if e["event"] == "stopped" and e["position"]]
+                if not events:
+                    # Never played here: whatever it holds wasn't the wipe's doing.
+                    pos, total = row["resume_pos"] or 0, row["resume_total"] or 0
+                elif stops:
+                    best = max(stops, key=lambda e: e["position"])
+                    pos, total = best["position"], best["total"] or 0
+                else:
+                    pos, total = 0, 0
+                plays = watched
+                if table == "movies":
+                    plays += pc_plays.get(str(row["tmdb_id"] or ""), 0)
+                conn.execute("UPDATE %s SET resume_pos=?, resume_total=?, playcount=? WHERE id=?"
+                             % table, (pos, total, plays, row["id"]))
+        conn.commit()
+    finally:
+        conn.close()
+    CONFIG["resume_repaired"] = True
+    save_json(CONFIG_PATH, CONFIG)
+    LOCAL.loaded_at = 0
+    LIB.loaded_at = 0
+
+
 def android_play(path, start=0):
     """Play on the phone: Android opens the file in the mpv app. Returns no
     process — there isn't one of ours to watch."""
@@ -21317,6 +21384,10 @@ def prepare_app():
     install_crash_log()
     adopt_dismissed()
     load_saved_recs()
+    try:
+        repair_android_resume()
+    except Exception:
+        log_problem("repairing the phone's watch points")
 
 
 def serve_in_thread(port=None, host="127.0.0.1", tries=20):

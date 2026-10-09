@@ -156,20 +156,28 @@ def no_margins(app):
     camera end even with the status bar hidden. Its handler sits on the
     page itself, which the app replaces after this runs — so the answer is
     given one level up instead: the container the page sits in passes on no
-    status bar and no cutout, and the launcher's own handler then keeps
-    only the navigation bar's margin. A status bar swiped in for a moment
-    floats over the page."""
+    status bar, and the launcher's own handler then keeps only the margins
+    still wanted. A status bar swiped in for a moment floats over the page.
+
+    The camera: in landscape the page runs beside it, as the user asked —
+    it's only a small hole at the edge of a wide screen. In portrait it sat
+    in the middle of the top bar, over the version and the counts, so there
+    the page starts below it (on a strip the page's own colour)."""
     from java import jclass, dynamic_proxy
     Listener = jclass("androidx.core.view.OnApplyWindowInsetsListener")
     ViewCompat = jclass("androidx.core.view.ViewCompat")
     Builder = jclass("androidx.core.view.WindowInsetsCompat$Builder")
     Types = jclass("androidx.core.view.WindowInsetsCompat$Type")
     Insets = jclass("androidx.core.graphics.Insets")
-    content = app._impl.native.findViewById(jclass("android.R$id").content)
-    edges = Types.statusBars() | Types.displayCutout()
+    Configuration = jclass("android.content.res.Configuration")
+    activity = app._impl.native
+    content = activity.findViewById(jclass("android.R$id").content)
 
     class Edge(dynamic_proxy(Listener)):
         def onApplyWindowInsets(self, view, insets):
+            landscape = (activity.getResources().getConfiguration().orientation
+                         == Configuration.ORIENTATION_LANDSCAPE)
+            edges = Types.statusBars() | (Types.displayCutout() if landscape else 0)
             return Builder(insets).setInsets(edges, Insets.NONE).build()
 
     ViewCompat.setOnApplyWindowInsetsListener(content, Edge())

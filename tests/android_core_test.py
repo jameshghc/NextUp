@@ -142,6 +142,65 @@ undefined = sorted(s.get_name() for s in main_table.get_symbols()
                    and not hasattr(builtins, s.get_name()))
 check("main() uses no name it never defines", not undefined, undefined)
 
+# --- a restart on the phone keeps every watch point ------------------------------------
+# On the PC, mpv's own resume files are the truth, and a point with no file
+# means "watched to the end". The phone's mpv is another app with no such
+# files, so that rule wiped every watch point — and counted a watch — on the
+# first library load after each start. And the repair: points put back from
+# the phone's own history, play counts rebuilt.
+WIPE = r"""
+import sys, os, json
+sys.argv = ["nextup.py"]
+sys.path.insert(0, r"%s")
+import nextup as n
+conn = n.db()
+def film(title, tmdb, pos, plays):
+    return conn.execute("INSERT INTO movies (path,title,year,tmdb_id,resume_pos,resume_total,playcount)"
+                        " VALUES (?,?,?,?,?,?,?)", ("/phone/%%s.mkv" %% title, title, 2000, tmdb,
+                                                   pos, 7000, plays)).lastrowid
+kept = film("Kept", "w1", 1518, 0)
+# What the old rule did: wiped (0) and counted (3) — history knows better.
+wiped = film("Wiped", "w2", 0, 3)
+done = film("Done", "w3", 0, 2)
+conn.execute("INSERT INTO snapshot_movies (tmdb_id,title,playcount) VALUES ('w3','Done',1)")
+for kind, iid, title, ev, pos in (("movie", wiped, "Wiped", "played", None),
+                                  ("movie", wiped, "Wiped", "stopped", 1200),
+                                  # then a play the wipe sent back to the start
+                                  ("movie", wiped, "Wiped", "played", None),
+                                  ("movie", wiped, "Wiped", "stopped", 3),
+                                  ("movie", done, "Done", "stopped", 300),
+                                  ("movie", done, "Done", "watched", None)):
+    conn.execute("INSERT INTO history (at,kind,item_id,title,event,position,total) VALUES (?,?,?,?,?,?,?)",
+                 ("2026-10-09 00:00:00", kind, iid, title, ev, pos, 7000 if pos else None))
+conn.commit(); conn.close()
+n.LIB.load(force=True); n.LOCAL.load(force=True)
+n.repair_android_resume()
+c = n.db()
+row = lambda i: list(c.execute("SELECT resume_pos, playcount FROM movies WHERE id=?", (i,)).fetchone())
+out = {"kept": row(kept), "wiped": row(wiped), "done": row(done)}
+n.repair_android_resume()            # once only
+out["again"] = row(wiped)
+print("JSON" + json.dumps(out))
+""" % ROOT
+home2 = os.path.join(tempfile.gettempdir(), "nextup_androidwipe")
+shutil.rmtree(home2, ignore_errors=True); os.makedirs(home2)
+proc2 = subprocess.run([sys.executable, "-c", WIPE], capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=120, cwd=home2,
+                       env=dict(os.environ, NEXTUP_HOME=home2, NEXTUP_PLATFORM="android",
+                                PYTHONDONTWRITEBYTECODE="1"))
+line2 = next((l for l in proc2.stdout.splitlines() if l.startswith("JSON")), None)
+w = json.loads(line2[4:]) if line2 else {}
+if not w:
+    print(proc2.stdout[-800:], proc2.stderr[-1500:])
+check("loading the library on the phone keeps a watch point, and counts no watch",
+      w.get("kept") == [1518, 0], w.get("kept"))
+check("the repair puts back the furthest point reached, not a restart's few seconds",
+      (w.get("wiped") or [None])[0] == 1200, w.get("wiped"))
+check("and rebuilds play counts: the PC's, plus what was really finished on the phone",
+      (w.get("wiped") or [0, None])[1] == 0 and w.get("done") == [0, 2], (w.get("wiped"), w.get("done")))
+check("the repair runs once", w.get("again") == w.get("wiped"), w.get("again"))
+shutil.rmtree(home2, ignore_errors=True)
+
 handed = out.get("handed") or []
 check("PLAY on the phone picks up where you got to, as mpv does by itself on the PC",
       out.get("play", {}).get("ok") and handed[:1] == [[out.get("film"), 600]], (out.get("play"), handed))
