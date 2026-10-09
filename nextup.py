@@ -32,6 +32,7 @@ Everything it learns lives in nextup_library.db next to this file. Back that
 up and you've backed up your ratings, your progress and the lot.
 """
 
+import atexit
 import glob
 import hashlib
 import hmac
@@ -108,7 +109,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.61"
+APP_VERSION = "0.1.62"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -7187,8 +7188,10 @@ def dock_copy_worker(plan, dest_root):
                     # SELECT marks showed as ticked, so a tick is a promise.
                     DOCK["bytes_done"] += item["size"]
                 elif phone:
-                    phone_copy_file(_phone_serial(dest_root), item["src"], dest, item["size"])
-                    DOCK["bytes_done"] += item["size"]
+                    base = DOCK["bytes_done"]
+                    phone_copy_file(_phone_serial(dest_root), item["src"], dest, item["size"],
+                                    progress=lambda got, base=base: DOCK.update(bytes_done=base + got))
+                    DOCK["bytes_done"] = base + item["size"]
                 else:
                     dock_copy_file(item["src"], dest, item["size"])
             except DockCancelled:
@@ -12111,16 +12114,81 @@ def phone_dest_path(dest_rel):
     return PHONE_DOCK_ROOT + "/" + rel
 
 
-def phone_copy_file(serial, src, dest, size):
-    """Push one file, whole or not at all. The push itself can't be stopped
-    part way, so a cancel takes effect between files; on a USB 3 cable a
-    film is a minute or so."""
+# How often a copy to the phone looks at how much has arrived. adb prints no
+# progress when it isn't writing to a terminal, so the file on the phone is
+# measured instead.
+PHONE_POLL_SECONDS = 2
+_PHONE_PUSH = [None]        # the push running now, for closing Next Up to stop
+
+
+def _adb_popen(args):
+    """adb started and left running, for a push watched as it goes."""
+    import subprocess
+    return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
+def _phone_size(serial, path):
+    """A file's size on the phone, or None if it isn't there."""
+    out = usb_adb("-s", serial, "shell", "stat -c %%s %s" % _sh_quote(path)).strip()
+    return int(out) if out.isdigit() else None
+
+
+def _stop_phone_push():
+    """Closing Next Up stops a copy to the phone part way. Left running, adb
+    carried on alone and left a file that never got its proper name."""
+    proc = _PHONE_PUSH[0]
+    if proc is not None:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+atexit.register(_stop_phone_push)
+
+
+def phone_copy_file(serial, src, dest, size, progress=None):
+    """Push one file, whole or not at all: to a .nextup-part name, checked
+    for size, then renamed.
+
+    progress: called every couple of seconds with how many bytes have
+    arrived — a film is minutes on the cable, and with nothing to show for
+    them the copy looked stuck. CANCEL stops it part way, the half-copied
+    file removed. A whole .nextup-part already there — a copy cut off just
+    before its rename — is renamed rather than sent again."""
     part = dest + ".nextup-part"
     usb_adb("-s", serial, "shell", "mkdir -p %s" % _sh_quote(dest.rsplit("/", 1)[0]))
+    if _phone_size(serial, part) == size:
+        usb_adb("-s", serial, "shell", "mv %s %s" % (_sh_quote(part), _sh_quote(dest)))
+        return
+    exe = usb_adb_path()
+    if not exe:
+        raise OSError("adb isn't set up on this PC")
+    proc = _adb_popen([exe, "-s", serial, "push", src, part])
+    _PHONE_PUSH[0] = proc
     # Generous: a slow cable at 5 MB/s, with two minutes' grace.
-    usb_adb("-s", serial, "push", src, part, timeout=120 + size // (5 * 1024 * 1024))
-    landed = usb_adb("-s", serial, "shell", "stat -c %%s %s" % _sh_quote(part)).strip()
-    if landed != str(size):
+    deadline = time.time() + 120 + size // (5 * 1024 * 1024)
+    try:
+        while proc.poll() is None:
+            if DOCK_CANCEL.is_set():
+                proc.kill()
+                proc.wait(timeout=10)
+                usb_adb("-s", serial, "shell", "rm -f %s" % _sh_quote(part))
+                raise DockCancelled()
+            if time.time() > deadline:
+                proc.kill()
+                proc.wait(timeout=10)
+                break
+            time.sleep(PHONE_POLL_SECONDS)
+            if progress:
+                got = _phone_size(serial, part)
+                if got is not None:
+                    progress(min(got, size))
+    finally:
+        _PHONE_PUSH[0] = None
+    landed = _phone_size(serial, part)
+    if landed != size:
         usb_adb("-s", serial, "shell", "rm -f %s" % _sh_quote(part))
         raise OSError("the copy on the phone came out the wrong size — is it full, "
                       "or was the cable pulled?")

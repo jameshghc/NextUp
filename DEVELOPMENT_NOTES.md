@@ -16,6 +16,28 @@ at the top.
 
 ---
 
+## 2026-10-09 — v0.1.62, copies to the phone show their progress
+
+"Stuck on ADDING…" — it wasn't stuck. Copying Blade Runner (7.5 GB) and
+The 40 Year Old Virgin (5.9 GB) to the S24, `phone_copy_file` ran `adb
+push` to the end inside one `usb_adb` call and added the film's bytes only
+when it returned, so the page sat at 0% for minutes a film. The user closed
+Next Up; the push carried on alone (scrcpy's adb, found on PATH) and both
+films were left whole on the phone as .nextup-part, never renamed.
+
+- The push is now `_adb_popen` (left running) and watched: every
+  `PHONE_POLL_SECONDS` (2) the part file's size on the phone is read
+  (`_phone_size`, `stat -c %s`) and reported, so bytes_done climbs as it
+  goes. adb prints no progress when it isn't writing to a terminal, hence
+  measuring the file.
+- CANCEL now stops a film part way: the push killed, the part removed.
+- Closing Next Up stops a push (`_stop_phone_push`, registered with
+  atexit) rather than leaving adb copying alone.
+- A whole .nextup-part already there — cut off just before its rename — is
+  renamed, not sent again. That finished the user's two films in 0.4 s each.
+- On the S24: a 300 MB test file to /data/local/tmp reported every half
+  second, 16 MB → 300 MB in 10 s (~33 MB/s), then removed.
+
 ## 2026-10-09 — v0.1.61, adding to a drive from the library itself
 
 The user preferred filling a drive as an overlay on the main library: a

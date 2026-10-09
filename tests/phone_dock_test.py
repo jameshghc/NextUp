@@ -85,6 +85,32 @@ def fake_adb(*args, timeout=15):
     return ""
 n.usb_adb = fake_adb
 n.usb_adb_path = lambda: r"C:\fake\adb.exe"
+n.PHONE_POLL_SECONDS = 0.01
+
+pushes = []
+class FakePush:
+    """adb push in a box: half the file on the first look, the rest on the
+    second. kill() stops it where it is, as a real push would."""
+    def __init__(self, args):
+        a = list(args)[1:]                   # [adb] -s SERIAL push SRC DEST
+        calls.append(tuple(a))
+        self.src, self.dst = a[3], local(a[4])
+        os.makedirs(os.path.dirname(self.dst), exist_ok=True)
+        self.data = open(self.src, "rb").read()
+        self.step, self.killed = 0, False
+        pushes.append(self)
+    def poll(self):
+        if self.killed:
+            return -9
+        self.step += 1
+        upto = len(self.data) if self.step >= 2 else len(self.data) // 2
+        open(self.dst, "wb").write(self.data[:upto])
+        return 0 if self.step >= 3 else None
+    def kill(self):
+        self.killed = True
+    def wait(self, timeout=None):
+        return -9 if self.killed else 0
+n._adb_popen = FakePush
 
 # --- the library: one film and one show, small files made here --------------------------
 def make(name, size):
@@ -167,6 +193,50 @@ check("what was already there isn't copied again",
       not any(c[2:3] == ("push",) and c[3] == already for c in calls if len(c) > 3))
 check("the job reports done, no errors", n.DOCK["step"] == "Done" and not n.DOCK["errors"]
       and n.DOCK["done"] == n.DOCK["total"] == 4, (n.DOCK["step"], n.DOCK["errors"], n.DOCK["done"]))
+
+# --- seen as it goes ----------------------------------------------------------------------
+seen = []
+target = root + "/Films/Progress Test (2001)/Progress.Test.2001.mkv"
+big = make("Progress.Test.2001.mkv", 400000)
+n.phone_copy_file(SERIAL, big, target, 400000, progress=seen.append)
+check("a film on its way to the phone reports how far it's got, not just when it's done",
+      200000 in seen and os.path.getsize(local(target)) == 400000, seen)
+
+# --- a whole leftover from a copy cut off before its last step is finished, not resent -------
+left = root + "/Films/Leftover (2002)/Leftover.2002.mkv"
+lsrc = make("Leftover.2002.mkv", 150000)
+os.makedirs(os.path.dirname(local(left)), exist_ok=True)
+shutil.copyfile(lsrc, local(left) + ".nextup-part")
+before = len(pushes)
+n.phone_copy_file(SERIAL, lsrc, left, 150000)
+check("a leftover that's already whole is renamed, not sent again",
+      len(pushes) == before and os.path.isfile(local(left))
+      and not os.path.exists(local(left) + ".nextup-part"), len(pushes) - before)
+
+# --- cancel stops a film part way, and leaves nothing behind ---------------------------------
+mid = root + "/Films/Cancel Test (2003)/Cancel.Test.2003.mkv"
+csrc = make("Cancel.Test.2003.mkv", 300000)
+real_poll = FakePush.poll
+def poll_then_cancel(self):
+    r = real_poll(self)
+    if self.step == 1:
+        n.DOCK_CANCEL.set()
+    return r
+FakePush.poll = poll_then_cancel
+try:
+    n.phone_copy_file(SERIAL, csrc, mid, 300000)
+    cancelled = False
+except n.DockCancelled:
+    cancelled = True
+FakePush.poll = real_poll
+n.DOCK_CANCEL.clear()
+check("CANCEL stops a film part way, with no half-copied file left",
+      cancelled and pushes[-1].killed and not os.path.exists(local(mid) + ".nextup-part")
+      and not os.path.exists(local(mid)), cancelled)
+
+# --- closing Next Up stops a copy to the phone -----------------------------------------------
+check("closing Next Up stops a push still running", hasattr(n, "_stop_phone_push")
+      and "atexit.register(_stop_phone_push)" in open(r"X:\NextUp\nextup.py", encoding="utf-8").read())
 
 # --- cancelling before it starts copies nothing ---------------------------------------------------
 shutil.rmtree(local(root + "/TV"))
