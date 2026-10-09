@@ -108,7 +108,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.57"
+APP_VERSION = "0.1.58"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -14092,6 +14092,20 @@ section:first-child{margin-top:0}
 .peek .line{font-family:var(--mono);font-size:10px;color:var(--muted);letter-spacing:.03em}
 .peek .blurb{font-size:12px;color:var(--paper);line-height:1.35;overflow:hidden;flex:1}
 .peek .foot{display:flex;gap:6px;flex-wrap:wrap;margin-top:auto}
+/* The phone's peek, opened by a tap (.peeking) rather than a hover: the
+   facts and PLAY, centred on the poster, and nothing else — the names, the
+   blurb and the toggles are all on the details page a second tap away. */
+.tile .peek .peekplay{display:none}
+body.android .tile .peek{opacity:0;justify-content:center;align-items:center;text-align:center;gap:12px}
+body.android .tile.peeking .peek{opacity:1}
+body.android .tile .peek h4,body.android .tile .peek .names,body.android .tile .peek .blurb,
+body.android .tile .peek .watchtoggle,body.android .tile .peek .favtoggle,
+body.android .tile .peek .foot{display:none}
+body.android .tile .peek .line{font-size:11px;line-height:1.6}
+body.android .tile .peek .facts span{display:block}
+body.android .tile .peek .facts i{display:none}
+body.android .tile .peek .peekplay{display:block;padding:8px 18px;font-size:13px}
+body.android .tile.peeking .peek .peekplay{pointer-events:auto}
 
 /* Corners: what the world thinks on the left, what you think on the right.
    Progress is a bar rather than a badge, and it's the only state shown at
@@ -16782,11 +16796,29 @@ function tile(item){
   if(item.kind==='tvshow') facts.push(item.episodes+' episodes');
   if(item.userrating) facts.push('you: '+(Math.round(item.userrating*2)/2));
   if(item.progress_note) facts.push('up to '+item.progress_note);
-  peek.append(el('div','line', esc(facts.filter(Boolean).join('  ·  '))));
+  /* Each fact its own span, so the phone can stack them one to a line
+     rather than letting "TMDB 7.9" break in the middle. */
+  peek.append(el('div','line facts', facts.filter(Boolean)
+    .map(f => '<span>' + esc(String(f)) + '</span>').join('<i>  ·  </i>')));
+  /* The phone's peek: the facts, then the one thing you'd tap a poster
+     for. Hidden on the PC, where this panel is a hover and PLAY is on the
+     details page. */
+  if(!item.elsewhere){
+    const go = el('button','play peekplay', item.kind === 'tvshow'
+      ? (item.in_progress ? 'CARRY ON' : 'PLAY')
+      : (item.percent ? 'RESUME' : 'PLAY'));
+    go.onclick = async (e) => {
+      e.stopPropagation();
+      go.textContent = '…';
+      const r = await playFromTile(item);
+      go.textContent = r && r.error ? 'FAILED' : 'PLAYING';
+    };
+    peek.append(go);
+  }
   if(item.directors && item.directors.length)
-    peek.append(el('div','line', esc(item.directors.join(', '))));
+    peek.append(el('div','line names', esc(item.directors.join(', '))));
   if(item.cast && item.cast.length)
-    peek.append(el('div','line', esc(item.cast.join(', '))));
+    peek.append(el('div','line names', esc(item.cast.join(', '))));
   if(item.plot) peek.append(el('div','blurb', esc(item.plot)+'…'));
   const watch = el('button','watchtoggle'+(item.watchlisted?' on':''),
     watchLabel(item.watchlisted));
@@ -16844,13 +16876,47 @@ function tile(item){
       if(item.elsewhere || b.classList.contains('ondrive')) return;
       toggleTicked(item, b); return;
     }
+    /* On the phone the first tap opens the peek — the facts and PLAY — and
+       a second tap on the poster opens its details. There's no hover on a
+       touch screen to do the first job. */
+    if(document.body.classList.contains('android') && !b.classList.contains('peeking')){
+      closePeeks();
+      b.classList.add('peeking');
+      return;
+    }
     /* No local row means no detail page and nothing to play. The hover panel
        already says where it is, so the click is simply inert — this app has
        no transient-message furniture and didn't want any adding for this. */
     if(item.elsewhere) return;
+    closePeeks();
     item.kind==='tvshow' ? openShow(item.id) : openFilm(item.id);
   };
   return b;
+}
+
+/* The phone's tile peeks: at most one open, shut by a tap anywhere that
+   isn't a poster, and by Back. */
+function closePeeks(){
+  document.querySelectorAll('.tile.peeking').forEach(t => t.classList.remove('peeking'));
+}
+document.addEventListener('click', e => {
+  if(!e.target.closest || !e.target.closest('.tile')) closePeeks();
+});
+
+/* PLAY from a poster's peek: a film from where you got to, a show from the
+   episode you're up to (its first, if you haven't started). */
+async function playFromTile(item){
+  if(item.kind !== 'tvshow')
+    return post('/api/play', {type: 'movie', id: item.id, resume: true});
+  const d = await api('/api/show?id=' + item.id);
+  if(!d || d.error) return d || {error: 'no show'};
+  let ep = d.next_up;
+  if(!ep){
+    const first = (d.seasons || []).flatMap(s => s.episodes || [])[0];
+    ep = first && first.id;
+  }
+  if(!ep) return {error: 'no episodes'};
+  return post('/api/play', {type: 'episode', id: ep, resume: true});
 }
 
 /* ---------- right-click menu ----------
@@ -17416,6 +17482,7 @@ function nextupBack(){
   if(tileMenu){ closeTileMenu(); return true; }
   const sheets = document.querySelectorAll('.sheet');
   if(sheets.length){ sheets[sheets.length - 1].remove(); return true; }
+  if(document.querySelectorAll('.tile.peeking').length){ closePeeks(); return true; }
   if(queueOverlayOpen){ queueOverlayOpen = false; placeQueueSide(); return true; }
   return false;
 }

@@ -16,6 +16,27 @@ at the top.
 
 ---
 
+## 2026-10-09 — v0.1.58, a poster's peek on the phone: facts and PLAY
+
+A touch screen has no hover, so the PC's hover panel — title, names,
+blurb, toggles, genres — turned up on a tap as a wall of text. On the phone
+now (`body.android`):
+
+- First tap on a poster adds `.peeking`: the panel shows only the facts
+  (year, TMDB, length or episodes, your rating — one per line, as spans the
+  PC still joins with " · ") and a PLAY button (`.peekplay`): RESUME for a
+  film part watched, CARRY ON for a show started. Hidden on the PC.
+- PLAY (`playFromTile`): a film with resume; a show's `next_up` from
+  /api/show, or its first episode.
+- A second tap on the poster opens the details. One peek at a time
+  (`closePeeks`); a tap off the posters shuts it, and so does Back
+  (`nextupBack`, after any open sheet).
+- Hover is overridden on the phone (`body.android .tile .peek{opacity:0}`
+  outranks `.tile:hover .peek`), since Android keeps a "hover" after a tap.
+- Checked in phone_serve (tap, switch, Back, PLAY a film and a show,
+  second tap opens) and on the S21; the PC's hover and one-click open
+  unchanged.
+
 ## 2026-10-09 — v0.1.57, the library on a phone held sideways
 
 Then, asked for: poster names centred on the phone

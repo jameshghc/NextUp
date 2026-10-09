@@ -173,6 +173,9 @@ check("on the phone a details panel covers the top strip instead of scrolling un
 check("phone landscape: smaller tiles, and the search row and pager scroll with them",
       "@media (orientation:landscape) and (max-height:520px)" in page_src
       and "body.android #view-library{overflow-y:auto}" in page_src)
+check("phone: a tap shows a short peek with PLAY, a second tap opens the details",
+      "'play peekplay'" in page_src and "classList.add('peeking')" in page_src
+      and "body.android .tile.peeking .peek{" in page_src)
 check("a details panel can be swiped down to close", "function sheetSwipe(" in page_src
       and "sheetSwipe(back" in page_src)
 
@@ -186,18 +189,19 @@ fn = _re.search(r"function nextupBack\(\)\{.*?\n\}", page_js, _re.S)
 check("the page has a Back handler for the phone", fn, "")
 if fn:
     probe = """
-let tileMenu = null, queueOverlayOpen = false;
+let tileMenu = null, queueOverlayOpen = false, peeking = 1;
 const sheets = [{removed:false}, {removed:false}];
 const document = {querySelectorAll: s => s === '.sheet'
-  ? sheets.filter(x => !x.removed).map(x => ({remove(){ x.removed = true; }})) : []};
-function closeTileMenu(){} function placeQueueSide(){}
+  ? sheets.filter(x => !x.removed).map(x => ({remove(){ x.removed = true; }}))
+  : s === '.tile.peeking' ? Array(peeking).fill({}) : []};
+function closeTileMenu(){} function placeQueueSide(){} function closePeeks(){ peeking = 0; }
 """ + fn.group(0) + """
-console.log(JSON.stringify([nextupBack(), sheets[1].removed, sheets[0].removed, nextupBack(), sheets[0].removed, nextupBack()]));
+console.log(JSON.stringify([nextupBack(), sheets[1].removed, sheets[0].removed, nextupBack(), sheets[0].removed, nextupBack(), peeking, nextupBack()]));
 """
     r = subprocess.run(["node", "-e", probe], capture_output=True, text=True)
     got = json.loads(r.stdout or "null")
-    check("Back closes the top panel first, then the next, then says nothing's open",
-          got == [True, True, False, True, True, False], (got, r.stderr[:300]))
+    check("Back closes the top panel first, then the next, then an open tile peek, then says nothing's open",
+          got == [True, True, False, True, True, True, 0, False], (got, r.stderr[:300]))
 
 shutil.rmtree(home, ignore_errors=True)
 print("\n%d/%d passed" % (sum(results), len(results)))
