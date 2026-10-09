@@ -22,8 +22,11 @@ From the user on the S21 and S24U.
 
 - **Full screen** (app.py `full_screen`): the status bar hidden (a swipe
   down shows it for a moment) — the navigation bar too at first, but the
-  user wanted Samsung's back/home/recents kept, so it stays, and only
-  statusBars + displayCutout are zeroed below — and `layoutInDisplayCutoutMode =
+  user wanted Samsung's back/home/recents kept, so it stays in portrait;
+  in landscape it cut the page off, so there it's hidden too (`fit_bars`,
+  re-run on every turn through a ComponentCallbacks registered on the
+  activity — the manifest has the app handle orientation itself, so it
+  isn't restarted). Only statusBars + displayCutout are zeroed below — and `layoutInDisplayCutoutMode =
   SHORT_EDGES`. That alone left a 75px strip at the camera end in
   landscape: Briefcase's MainActivity gives the page MARGINS for system
   bars + display cutout, from a listener on the page view — which toga

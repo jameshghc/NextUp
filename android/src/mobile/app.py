@@ -89,9 +89,11 @@ def dark_bars(app):
 
 def full_screen(app):
     """More of the screen for Next Up: the clock-and-notifications bar
-    hidden while it's open (a swipe down from the top shows it for a
+    hidden while it's open (a swipe in from the edge shows it for a
     moment), and the page allowed beside the camera instead of a grey strip
-    there in landscape. The navigation bar stays — the user wants it."""
+    there in landscape. The navigation bar stays in portrait, where it's
+    wanted, and goes in landscape, where it cut the page off — see
+    fit_bars, which runs again whenever the phone turns."""
     try:
         from java import jclass
         WindowCompat = jclass("androidx.core.view.WindowCompat")
@@ -103,12 +105,49 @@ def full_screen(app):
         attrs = window.getAttributes()
         attrs.layoutInDisplayCutoutMode = Params.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         window.setAttributes(attrs)
-        bars = Controller(window, window.getDecorView())
-        bars.setSystemBarsBehavior(Controller.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE)
-        bars.hide(Types.statusBars())
+        fit_bars(app)
         no_margins(app)
+        follow_turns(app)
     except Exception:
         traceback.print_exc()
+
+
+def fit_bars(app):
+    """Status bar hidden always; navigation bar hidden in landscape only."""
+    from java import jclass
+    Controller = jclass("androidx.core.view.WindowInsetsControllerCompat")
+    Types = jclass("androidx.core.view.WindowInsetsCompat$Type")
+    Configuration = jclass("android.content.res.Configuration")
+    activity = app._impl.native
+    window = activity.getWindow()
+    bars = Controller(window, window.getDecorView())
+    bars.setSystemBarsBehavior(Controller.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE)
+    bars.hide(Types.statusBars())
+    if activity.getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE:
+        bars.hide(Types.navigationBars())
+    else:
+        bars.show(Types.navigationBars())
+
+
+def follow_turns(app):
+    """fit_bars again every time the phone is turned. The app handles
+    turning itself (the manifest says so) rather than being restarted, so
+    Android tells it through these callbacks instead."""
+    from java import jclass, dynamic_proxy
+    Callbacks = jclass("android.content.ComponentCallbacks")
+
+    class Turned(dynamic_proxy(Callbacks)):
+        def onConfigurationChanged(self, config):
+            try:
+                fit_bars(app)
+            except Exception:
+                traceback.print_exc()
+
+        def onLowMemory(self):
+            pass
+
+    _KEEP.append(Turned())
+    app._impl.native.registerComponentCallbacks(_KEEP[-1])
 
 
 def no_margins(app):
