@@ -16,6 +16,19 @@ at the top.
 
 ---
 
+## 2026-10-09 — v0.1.57, the library on a phone held sideways
+
+A phone in landscape is ~853x384, past the 600px phone rules, so it got
+the PC's library: search row and pager fixed, one row of four 187px
+posters between, and the pager alone ~30px of the 384. Under
+`@media (orientation:landscape) and (max-height:520px)`, `body.android`
+only: #view-library scrolls as one (#tiles-out no longer its own scroll
+box), so the pager follows the last poster and the search row scrolls away;
+posters minmax(104px) — seven across. PREV/NEXT now also zero both
+#tiles-out and #view-library's scrollTop, so a new page starts at its top
+whichever box scrolls. Portrait unchanged (checked in phone_serve at
+384x853 and 853x384, then on the S21).
+
 ## 2026-10-09 — v0.1.56, the phone app full-screen, with Back and swipe-down
 
 From the user on the S21 and S24U.

@@ -170,6 +170,9 @@ check("the page is served marked as the phone's, for its phone-only rules",
 page_src = open(os.path.join(ROOT, "nextup.py"), encoding="utf-8").read()
 check("on the phone a details panel covers the top strip instead of scrolling under it",
       "body.android .sheet{" in page_src)
+check("phone landscape: smaller tiles, and the search row and pager scroll with them",
+      "@media (orientation:landscape) and (max-height:520px)" in page_src
+      and "body.android #view-library{overflow-y:auto}" in page_src)
 check("a details panel can be swiped down to close", "function sheetSwipe(" in page_src
       and "sheetSwipe(back" in page_src)
 

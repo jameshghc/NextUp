@@ -108,7 +108,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.56"
+APP_VERSION = "0.1.57"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -14320,6 +14320,19 @@ section:first-child{margin-top:0}
    window's own buttons and has to stay reachable; on the phone it's only
    the version and the counts, and the panel scrolled up under it. */
 body.android .sheet{z-index:85}
+/* A phone on its side is under 400px tall, and the library laid out for a
+   PC spent most of it on the search row and the pager, fixed in place,
+   with one row of big posters between. Here the search row, the posters
+   and the pager scroll as one — the pager comes after the last poster,
+   the search row goes up out of the way — and the posters are smaller,
+   seven across instead of four. */
+@media (orientation:landscape) and (max-height:520px){
+  body.android #view-library{overflow-y:auto}
+  body.android #tiles-out{flex:none;overflow:visible;min-height:auto;padding-bottom:6px}
+  body.android .tiles{grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:10px}
+  body.android .searchrow{padding-top:2px;padding-bottom:8px}
+  body.android .pager{margin:4px 0 14px}
+}
 /* minmax(0,1fr), not 1fr: a plain `1fr` is `minmax(auto,1fr)`, so the track
    is never allowed narrower than its content's own minimum — and one flex
    row in there, an episode with a long name, has a minimum of its whole
@@ -16576,11 +16589,21 @@ $('#pagerprev').onclick = () => {
   libOffset = Math.max(0, libOffset - LIB_PAGE_SIZE);
   loadLibrary(true);
   $('#view-library').scrollIntoView({block:'start'});
+  /* Back to the top of the new page, whichever part is doing the
+     scrolling: the posters' own box, or the whole column on a phone held
+     sideways. */
+  $('#tiles-out').scrollTop = 0;
+  $('#view-library').scrollTop = 0;
 };
 $('#pagernext').onclick = () => {
   libOffset += LIB_PAGE_SIZE;
   loadLibrary(true);
   $('#view-library').scrollIntoView({block:'start'});
+  /* Back to the top of the new page, whichever part is doing the
+     scrolling: the posters' own box, or the whole column on a phone held
+     sideways. */
+  $('#tiles-out').scrollTop = 0;
+  $('#view-library').scrollTop = 0;
 };
 
 /* Re-scanning from the shelf you're standing at, rather than from Settings.
