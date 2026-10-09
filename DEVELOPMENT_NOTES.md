@@ -24,7 +24,7 @@ posters between, and the pager alone ~30px of the 384. Under
 `@media (orientation:landscape) and (max-height:520px)`, `body.android`
 only: #view-library scrolls as one (#tiles-out no longer its own scroll
 box), so the pager follows the last poster and the search row scrolls away;
-posters minmax(104px) — seven across. PREV/NEXT now also zero both
+posters repeat(6) — six across on any phone (seven, by size, was too many). PREV/NEXT now also zero both
 #tiles-out and #view-library's scrollTop, so a new page starts at its top
 whichever box scrolls. Portrait unchanged (checked in phone_serve at
 384x853 and 853x384, then on the S21).

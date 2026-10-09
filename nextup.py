@@ -14325,11 +14325,11 @@ body.android .sheet{z-index:85}
    with one row of big posters between. Here the search row, the posters
    and the pager scroll as one — the pager comes after the last poster,
    the search row goes up out of the way — and the posters are smaller,
-   seven across instead of four. */
+   six across instead of four, on any phone. */
 @media (orientation:landscape) and (max-height:520px){
   body.android #view-library{overflow-y:auto}
   body.android #tiles-out{flex:none;overflow:visible;min-height:auto;padding-bottom:6px}
-  body.android .tiles{grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:10px}
+  body.android .tiles{grid-template-columns:repeat(6,minmax(0,1fr));gap:10px}
   body.android .searchrow{padding-top:2px;padding-bottom:8px}
   body.android .pager{margin:4px 0 14px}
 }
