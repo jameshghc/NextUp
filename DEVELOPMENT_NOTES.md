@@ -16,6 +16,35 @@ at the top.
 
 ---
 
+## 2026-10-09 — v0.1.60, three coloured tags on every phone peek
+
+The user: drop TMDB from the peek, give every poster three coloured tags,
+underline DETAILS.
+
+- `tile_tags(genres, keywords, year, kind)`: genres first (TV's doubled
+  "Sci-Fi & Fantasy", "Action & Adventure", "War & Politics" split in
+  two), then TMDB keywords that are short and say what a thing is like
+  (<=16 chars, <=2 words, not "based on…", "sequel", "woman director"…),
+  then the decade, then "film"/"series". Browse rows carry it as `tags`;
+  the peek uses `item.tags`, colour from `genreHue` (keywords hash to a
+  steady hue of their own).
+- Of the library: films had 69 with one genre and 160 with two;
+  keywords fill 227 of those. Shows had 42 short and no keywords stored —
+  now `shows.keywords`, fetched with `credits,keywords` at matching and by
+  `backfill_show_details` (so the next scan fetches it for every show once).
+  TMDB puts a TV show's under `keywords.results`, a film's under
+  `keywords.keywords`; `keyword_names` reads both. Checked against TMDB:
+  every short show reaches three with keywords bar Weird Weekends, which
+  has none — "series" covers it. One film has no genre or keyword at all.
+- The phone's greyed posters come from the snapshot, so `snapshot_movies`
+  and `snapshot_shows` gained `keywords`, exported and imported.
+- TMDB pill gone from the peek; YOUR rating stays. DETAILS is paper-white
+  and underlined.
+- tests/tile_tags_test.py (12), in run_all.
+
+To reach the phone: restart Next Up on the PC, rescan (fetches the shows'
+keywords once), then SEND MY LIBRARY so the greyed posters get theirs.
+
 ## 2026-10-09 — v0.1.59, the phone peek redone: colour, and DETAILS
 
 "Too minimalistic now." The user asked for colour-coded genre tags, a

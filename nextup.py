@@ -108,7 +108,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.59"
+APP_VERSION = "0.1.60"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -1801,6 +1801,11 @@ CREATE INDEX IF NOT EXISTS hist_at ON history(at);
 LATER_COLUMNS = [
     ("movies", "cast_names", "TEXT"),
     ("movies", "keywords", "TEXT"),
+    # Keywords for shows, and in the catalogue copies a phone holds — the
+    # phone's peek tops a poster's genres up to three tags from them.
+    ("shows", "keywords", "TEXT"),
+    ("snapshot_movies", "keywords", "TEXT"),
+    ("snapshot_shows", "keywords", "TEXT"),
     ("movies", "tagline", "TEXT"),
     ("movies", "country", "TEXT"),
     ("shows", "cast_names", "TEXT"),
@@ -2805,7 +2810,9 @@ def crew_ids(detail, job="Director"):
 
 
 def keyword_names(detail, limit=14):
-    kws = (detail.get("keywords") or {}).get("keywords") or []
+    box = detail.get("keywords") or {}
+    # A film's list is under "keywords", a TV show's under "results".
+    kws = box.get("keywords") or box.get("results") or []
     return [k.get("name") for k in kws[:limit] if k.get("name")]
 
 
@@ -2887,7 +2894,9 @@ def enrich_local(conn, progress=None):
             conn.execute("UPDATE shows SET matched=-1 WHERE id=?", (row["id"],))
             continue
         best = results[0]
-        detail = tmdb("/tv/%s" % best["id"], {"append_to_response": "credits"}) or {}
+        detail = tmdb("/tv/%s" % best["id"], {"append_to_response": "credits,keywords"}) or {}
+        conn.execute("UPDATE shows SET keywords=? WHERE id=?",
+                     (as_text(keyword_names(detail)), row["id"]))
         conn.execute(
             "UPDATE shows SET tmdb_id=?,title=?,year=?,genres=?,plot=?,poster=?,"
             "tmdb_rating=?,country=?,cast_names=?,creators=?,backdrop=?,"
@@ -3012,12 +3021,15 @@ def backfill_show_details(conn, progress=None):
                         " WHERE matched=1 AND tmdb_id IS NOT NULL"
                         " AND (country IS NULL OR cast_names IS NULL"
                         " OR creators IS NULL OR backdrop IS NULL"
-                        " OR cast_profiles IS NULL OR cast_ids IS NULL)").fetchall()
+                        " OR cast_profiles IS NULL OR cast_ids IS NULL"
+                        " OR keywords IS NULL)").fetchall()
     done = 0
     for index, row in enumerate(rows):
         if progress:
             progress(index + 1, len(rows), "reading cast and crew")
-        detail = tmdb("/tv/%s" % row["tmdb_id"], {"append_to_response": "credits"}) or {}
+        detail = tmdb("/tv/%s" % row["tmdb_id"], {"append_to_response": "credits,keywords"}) or {}
+        conn.execute("UPDATE shows SET keywords=? WHERE id=?",
+                     (as_text(keyword_names(detail)), row["id"]))
         conn.execute(
             "UPDATE shows SET country=?,cast_names=?,creators=?,backdrop=?,"
             "cast_profiles=?,creator_profiles=?,status=?,networks=?,first_air=?,"
@@ -3285,7 +3297,7 @@ class LocalLibrary(object):
         return {
             "movieid": r["id"], "title": r["title"], "originaltitle": r["title"],
             "year": r["year"], "released": r["released"] or "",
-            "genre": as_list(r["genres"]),
+            "genre": as_list(r["genres"]), "keywords": as_list(r["keywords"]),
             "director": as_list(r["directors"]), "rating": r["tmdb_rating"] or 0,
             "userrating": r["userrating"] or 0, "runtime": r["runtime"] or 0,
             "playcount": r["playcount"] or 0, "dateadded": r["added"],
@@ -3312,7 +3324,8 @@ class LocalLibrary(object):
     def _show(self, r):
         return {
             "tvshowid": r["id"], "title": r["title"], "year": r["year"],
-            "genre": as_list(r["genres"]), "rating": r["tmdb_rating"] or 0,
+            "genre": as_list(r["genres"]), "keywords": as_list(r["keywords"]),
+            "rating": r["tmdb_rating"] or 0,
             "userrating": r["userrating"] or 0, "episode": 0,
             "plot": r["plot"] or "", "art": {"poster": local_art(r["poster"])},
             "backdrop": local_art(r["backdrop"]),
@@ -5109,6 +5122,7 @@ def browse_library(kind, query, sort, shelf, limit, offset):
                 "tmdb": round(s.get("rating") or 0, 1),
                 "userrating": s.get("userrating") or 0,
                 "genres": (s.get("genre") or [])[:3],
+                "tags": tile_tags(s.get("genre"), s.get("keywords"), s.get("year"), "tvshow"),
                 "plot": (s.get("plot") or "")[:300],
                 "episodes": s.get("episode") or 0,
                 "in_progress": bool(progress),
@@ -5137,6 +5151,7 @@ def browse_library(kind, query, sort, shelf, limit, offset):
                 "tmdb": round(m.get("rating") or 0, 1),
                 "userrating": m.get("userrating") or 0,
                 "genres": (m.get("genre") or [])[:3],
+                "tags": tile_tags(m.get("genre"), m.get("keywords"), m.get("year"), "movie"),
                 "plot": (m.get("plot") or "")[:300],
                 "runtime": minutes(m.get("runtime")),
                 "directors": directors[:2],
@@ -8593,10 +8608,10 @@ def build_library_snapshot():
     conn = db()
     movies = [dict(r) for r in conn.execute(
         "SELECT tmdb_id,title,year,genres,directors,cast_names,plot,poster,"
-        " tmdb_rating,runtime,userrating,playcount FROM movies"
+        " tmdb_rating,runtime,userrating,playcount,keywords FROM movies"
         " WHERE tmdb_id IS NOT NULL AND tmdb_id <> '' ORDER BY title")]
     shows = [dict(r) for r in conn.execute(
-        "SELECT tmdb_id,title,year,genres,plot,poster,tmdb_rating,userrating"
+        "SELECT tmdb_id,title,year,genres,plot,poster,tmdb_rating,userrating,keywords"
         " FROM shows WHERE tmdb_id IS NOT NULL AND tmdb_id <> '' ORDER BY title")]
     episodes = [dict(r) for r in conn.execute(
         "SELECT s.tmdb_id AS show_tmdb_id, e.season, e.episode, e.title"
@@ -8646,22 +8661,23 @@ def import_library_snapshot(payload, fetch_art=True):
         conn.execute(
             "INSERT OR REPLACE INTO snapshot_movies (tmdb_id,title,year,genres,"
             "directors,cast_names,plot,poster,tmdb_rating,runtime,userrating,"
-            "playcount) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "playcount,keywords) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (str(m.get("tmdb_id")), m.get("title"), m.get("year"),
              m.get("genres"), m.get("directors"), m.get("cast_names"),
              m.get("plot"), m.get("poster"), m.get("tmdb_rating"),
-             m.get("runtime"), m.get("userrating") or 0, m.get("playcount") or 0))
+             m.get("runtime"), m.get("userrating") or 0, m.get("playcount") or 0,
+             m.get("keywords")))
     for sh in shows:
         if not sh.get("tmdb_id"):
             continue
         conn.execute(
             "INSERT OR REPLACE INTO snapshot_shows (tmdb_id,title,year,genres,"
-            "plot,poster,tmdb_rating,userrating,episode_count)"
-            " VALUES (?,?,?,?,?,?,?,?,?)",
+            "plot,poster,tmdb_rating,userrating,episode_count,keywords)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
             (str(sh.get("tmdb_id")), sh.get("title"), sh.get("year"),
              sh.get("genres"), sh.get("plot"), sh.get("poster"),
              sh.get("tmdb_rating"), sh.get("userrating") or 0,
-             sh.get("episode_count") or 0))
+             sh.get("episode_count") or 0, sh.get("keywords")))
     for e in episodes:
         if not e.get("show_tmdb_id"):
             continue
@@ -9478,6 +9494,49 @@ def sync_state():
     }
 
 
+# TV's doubled genres, which read better as two tags than one long one.
+GENRE_SPLIT = {"Sci-Fi & Fantasy": ["Science Fiction", "Fantasy"],
+               "Action & Adventure": ["Action", "Adventure"],
+               "War & Politics": ["War", "Politics"]}
+# Keywords that say how a film was made or sold rather than what it's like.
+TAG_SKIP = ("based on", "woman director", "duringcreditsstinger", "aftercreditsstinger",
+            "remake", "sequel", "anime")
+
+
+def tile_tags(genres, keywords=(), year=None, kind=None, want=3):
+    """Three tags for a poster's peek on the phone: its genres first (TV's
+    doubled ones split in two), then TMDB's keywords — only the short ones
+    that say what a thing is like, "time travel", not "based on memoir or
+    autobiography" — then its decade, and last of all whether it's a film
+    or a series, so none goes short."""
+    tags, seen = [], set()
+
+    def add(tag):
+        key = tag.lower()
+        if key not in seen:
+            seen.add(key)
+            tags.append(tag)
+
+    for g in genres or []:
+        for part in GENRE_SPLIT.get(g, [g]):
+            add(part)
+    for kw in keywords or []:
+        if len(tags) >= want:
+            break
+        kw = (kw or "").strip()
+        if not kw or len(kw) > 16 or len(kw.split()) > 2 or kw.lower().startswith(TAG_SKIP):
+            continue
+        add(kw)
+    if len(tags) < want and year:
+        try:
+            add("%ds" % (int(year) // 10 * 10))
+        except (TypeError, ValueError):
+            pass
+    if len(tags) < want and kind:
+        add("series" if kind == "tvshow" else "film")
+    return tags[:want]
+
+
 def elsewhere_rows(kind, query):
     """Snapshot entries this machine hasn't got, shaped like browse rows.
 
@@ -9510,6 +9569,7 @@ def elsewhere_rows(kind, query):
                 "tmdb": round(r["tmdb_rating"] or 0, 1),
                 "userrating": r["userrating"] or 0,
                 "genres": genres[:3], "plot": (r["plot"] or "")[:300],
+                "tags": tile_tags(genres, as_list(r["keywords"]), r["year"], "movie"),
                 "runtime": minutes(r["runtime"]),
                 "directors": directors[:2], "cast": cast[:3],
                 "in_progress": False, "percent": 0, "identified": True,
@@ -9532,6 +9592,7 @@ def elsewhere_rows(kind, query):
                 "tmdb": round(r["tmdb_rating"] or 0, 1),
                 "userrating": r["userrating"] or 0,
                 "genres": genres[:3], "plot": (r["plot"] or "")[:300],
+                "tags": tile_tags(genres, as_list(r["keywords"]), r["year"], "tvshow"),
                 "episodes": r["episode_count"] or 0,
                 "in_progress": False, "progress_note": "", "percent": 0,
                 "sort_added": "", "watchlisted": False, "favourited": False,
@@ -14131,7 +14192,8 @@ body.android .tile .peek .peektop{display:flex;flex-direction:column;align-items
   border:1px solid hsl(var(--h) 70% 62% / .5)}
 body.android .tile .peek .peekplay{display:block;margin-top:0;padding:8px 18px;font-size:13px}
 body.android .tile .peek .peekdetails{display:block;margin-top:8px;padding:5px 14px;font-size:10.5px;
-  letter-spacing:.1em}
+  letter-spacing:.1em;color:var(--paper);text-decoration:underline;text-underline-offset:3px;
+  text-decoration-thickness:1px}
 body.android .tile.peeking .peek .peekplay,
 body.android .tile.peeking .peek .peekdetails{pointer-events:auto}
 
@@ -16833,9 +16895,9 @@ function tile(item){
   peek.append(el('div','line facts', facts.filter(Boolean)
     .map(f => '<span>' + esc(String(f)) + '</span>').join('<i>  ·  </i>')));
   /* The phone's peek, top half: the same facts set out to be taken in at a
-     glance — "Name (year)", the length small under it, the two scores as
-     coloured pills (TMDB's by how good, yours in marigold), and the genres
-     as tags, each genre its own colour so a shelf of them reads at a
+     glance — "Name (year)", the length small under it, your score as a
+     marigold pill, and three tags — genres, then keywords, then the decade
+     (tile_tags) — each its own colour so a shelf of them reads at a
      glance. Hidden on the PC, which shows the line above. */
   const top = el('div','peektop');
   top.append(el('div','pname', esc(item.title || '') + (item.year ? ' (' + esc(String(item.year)) + ')' : '')));
@@ -16844,13 +16906,11 @@ function tile(item){
   if(length) top.append(el('div','plen', esc(length)));
   if(item.progress_note) top.append(el('div','plen', 'up to ' + esc(item.progress_note)));
   const scores = el('div','pscores');
-  if(item.tmdb) scores.append(el('span','pscore ' + (item.tmdb >= 7.5 ? 'hi' : item.tmdb >= 6 ? 'mid' : 'lo'),
-    'TMDB<b>' + esc(String(item.tmdb)) + '</b>'));
   if(item.userrating) scores.append(el('span','pscore you',
     'YOU<b>' + (Math.round(item.userrating * 2) / 2) + '</b>'));
   if(scores.children.length) top.append(scores);
   const tags = el('div','ptags');
-  (item.genres || []).slice(0, 3).forEach(g => {
+  (item.tags || item.genres || []).slice(0, 3).forEach(g => {
     const t = el('span','ptag', esc(genreShort(g)));
     t.style.setProperty('--h', genreHue(g));
     tags.append(t);
