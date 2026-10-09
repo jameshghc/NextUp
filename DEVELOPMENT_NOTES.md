@@ -18,6 +18,12 @@ at the top.
 
 ## 2026-10-09 — v0.1.57, the library on a phone held sideways
 
+Then, asked for: poster names centred on the phone
+(`body.android .tile .cap`). Seen doing it: on a phone's narrow posters
+the greyed ones' "ON DESKTOP-…" strip wrapped to two lines over the year.
+`.elsewherebadge` is one line with an ellipsis everywhere now, and on the
+phone a greyed poster's caption has room under the year for it.
+
 A phone in landscape is ~853x384, past the 600px phone rules, so it got
 the PC's library: search row and pager fixed, one row of four 187px
 posters between, and the pager alone ~30px of the 384. Under

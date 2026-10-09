@@ -14225,6 +14225,9 @@ section:first-child{margin-top:0}
   position:absolute;bottom:0;left:0;right:0;font-family:var(--mono);font-size:9px;
   letter-spacing:.08em;padding:3px 7px;background:rgba(6,5,9,.82);
   color:rgba(244,241,236,.66);text-align:center;
+  /* One line, always: a long machine name wrapped to two on a narrow
+     poster — a phone's — and buried the year under it. */
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
 }
 .watchbadge{
   position:absolute;top:0;left:0;padding:5px 8px 4px;border-bottom-right-radius:4px;
@@ -14320,6 +14323,12 @@ section:first-child{margin-top:0}
    window's own buttons and has to stay reachable; on the phone it's only
    the version and the counts, and the panel scrolled up under it. */
 body.android .sheet{z-index:85}
+/* Posters' names centred under them on the phone, which the user prefers
+   there; the PC keeps them ranged left. */
+body.android .tile .cap{text-align:center}
+/* Room under the year for "on <PC>" on a greyed poster, so the strip sits
+   below the year instead of over it. */
+body.android .tile.elsewhere .cap{padding-bottom:26px}
 /* A phone on its side is under 400px tall, and the library laid out for a
    PC spent most of it on the search row and the pager, fixed in place,
    with one row of big posters between. Here the search row, the posters
