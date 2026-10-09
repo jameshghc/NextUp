@@ -14365,6 +14365,10 @@ body.android .tile.peeking .peek .peekdetails{pointer-events:auto}
    window's own buttons and has to stay reachable; on the phone it's only
    the version and the counts, and the panel scrolled up under it. */
 body.android .sheet{z-index:85}
+/* Android's web view flashes a blue box over whatever is tapped. Every tap
+   here already answers for itself (a peek opening, a button pressing), so
+   the flash is only noise. */
+body.android, body.android *{-webkit-tap-highlight-color:transparent}
 /* Posters' names centred under them on the phone, which the user prefers
    there; the PC keeps them ranged left. */
 body.android .tile .cap{text-align:center}
