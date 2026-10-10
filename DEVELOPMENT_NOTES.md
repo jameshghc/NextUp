@@ -16,6 +16,26 @@ at the top.
 
 ---
 
+## 2026-10-10 — v0.1.73, the chooser: several genres, the impossible greyed
+
+The user's notes on v0.1.72:
+
+- **Genres combine.** `chosenGenres` (several at once); `nowGenres()` sends
+  them comma-joined, and `build_tonight` keeps only what has ALL of them
+  (`genre_matches` per genre, TV's doubled genres counting as halves). The
+  old #genre box could only ever hold one.
+- **What can't be had is greyed.** GET /api/genres?kind=&with= →
+  `available_genres`: every genre, counted against the kind and the genres
+  chosen; a 0 is drawn `.gchip.off`, disabled. Film → Drama + Crime greyed 8
+  of 20 in the sandbox (pick: Fargo).
+- **Anything folds it away**: no kind, no genres, the genre row hidden;
+  only Film and TV open it. Anything shows as chosen when nothing is.
+- **The PC: the chooser moves to the right-hand column** above "Or instead"
+  (grid "cont cont" / "pick chooser" / "pick fits"), so the pick moves up
+  (318 → 257 at 1280x800); Back leads the kinds row; genres wrap there.
+- **NOT THIS is NEXT**, both.
+- rec_home_test +4. On the S21: TV, its 8 genres, NEXT, Anything folds.
+
 ## 2026-10-10 — v0.1.72, the PC's Now, from the phone's ideas
 
 Approved layout, built (`body:not(.android)`):

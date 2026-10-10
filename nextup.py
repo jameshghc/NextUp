@@ -109,7 +109,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.72"
+APP_VERSION = "0.1.73"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -923,6 +923,27 @@ def habit_bonus(plays):
     return min(HABIT_MAX, 0.5 * math.log(1 + plays, 2))
 
 
+def available_genres(kind, chosen):
+    """For the Now chooser: every genre in the library, with how many films
+    or shows ("film", "tv", or "any" for both) have it AND everything already
+    chosen. A count of 0 is a genre that would leave nothing — the page
+    greys it out."""
+    LIB.load()
+    rows = []
+    if kind != "tv":
+        rows += [m.get("genre") or [] for m in LIB.movies]
+    if kind != "film":
+        rows += [sh.get("genre") or [] for sh in LIB.shows]
+    every, counts = set(), Counter()
+    for genres in rows:
+        halves = set(part for g in genres for part in GENRE_SPLIT.get(g, [g]))
+        every |= halves
+        if all(c in halves for c in chosen):
+            for g in halves:
+                counts[g] += 1
+    return [{"name": g, "n": counts.get(g, 0)} for g in sorted(every, key=lambda g: -counts.get(g, 0))]
+
+
 def genre_matches(genre, genres):
     """Whether something filed under `genres` is `genre` — a show's "Action &
     Adventure" counts as Action, and as Adventure."""
@@ -968,7 +989,7 @@ def build_tonight(kind, mood, max_mins, genre, count=3, exclude=None,
             if ("movie:%s" % m["movieid"]) in exclude:
                 continue
             genres = m.get("genre") or []
-            if genre and not genre_matches(genre, genres):
+            if genre and not all(genre_matches(g, genres) for g in genre.split(",") if g):
                 continue
             if mood_cfg["genres"] and not set(genres) & set(mood_cfg["genres"]):
                 continue
@@ -1038,7 +1059,7 @@ def build_tonight(kind, mood, max_mins, genre, count=3, exclude=None,
             if 0 < (s.get("userrating") or 0) < 5:
                 continue
             genres = s.get("genre") or []
-            if genre and not genre_matches(genre, genres):
+            if genre and not all(genre_matches(g, genres) for g in genre.split(",") if g):
                 continue
             if mood_cfg["genres"] and not set(genres) & set(mood_cfg["genres"]):
                 continue
@@ -13248,6 +13269,10 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/movie":
                 return self.send_json(movie_detail_payload(one("id", "0")))
 
+            if route == "/api/genres":
+                chosen = [g for g in one("with", "").split(",") if g]
+                return self.send_json({"genres": available_genres(one("kind", "any"), chosen)})
+
             if route == "/api/recs/home":
                 return self.send_json(recs_home())
 
@@ -15268,19 +15293,22 @@ body.android .chooserback{display:none}
    the top, the chooser under it in one line, then the pick with its
    alternatives in a column beside it. The three boxes and the reason cards
    go — the card carries a short why of its own. */
-body:not(.android) #view-now:not(.hidden){display:grid;grid-template-columns:minmax(0,1fr) 236px;
-  grid-template-areas:"cont cont" "chooser chooser" "pick fits";column-gap:18px;align-content:start}
+body:not(.android) #view-now:not(.hidden){display:grid;grid-template-columns:minmax(0,1fr) 260px;
+  grid-template-areas:"cont cont" "pick chooser" "pick fits";grid-template-rows:auto auto 1fr;
+  column-gap:18px;align-content:start}
 body:not(.android) #view-now > #unfinished-sec{grid-area:cont;margin:6px 0 10px}
-body:not(.android) #view-now > .nowchooser{grid-area:chooser;display:flex;align-items:center;gap:10px;margin:0 0 14px;min-width:0}
+body:not(.android) #view-now > .nowchooser{grid-area:chooser;display:grid;grid-template-columns:auto minmax(0,1fr);
+  gap:8px;margin:0 0 14px;min-width:0;align-items:start}
+body:not(.android) .nowchooser #chooser-genre{grid-column:1 / -1}
 body:not(.android) #view-now > #tonight-out{grid-area:pick;min-width:0}
 body:not(.android) #view-now > .nowfits{grid-area:fits;display:block}
 body:not(.android) #view-now > .nowfits.hidden{display:none}
 body:not(.android) #view-now > .filters,body:not(.android) #view-now > #reasons-out{display:none}
-body:not(.android) .nowchooser .chooserow{display:flex;gap:8px;flex:none}
+body:not(.android) .nowchooser .chooserow{display:flex;gap:6px}
 body:not(.android) .nowchooser .chooserow.hidden{display:none}
-body:not(.android) .nowchooser .chooserow.genres{flex:1;min-width:0;overflow-x:auto;flex-wrap:nowrap;padding-bottom:2px}
-body:not(.android) .nowchooser .kchip{flex:none;padding:8px 18px;font-size:13px}
-body:not(.android) .chooserback{padding:8px 13px!important}
+body:not(.android) .nowchooser .chooserow.genres{flex-wrap:wrap}
+body:not(.android) .nowchooser .kchip{flex:1;padding:8px 0;font-size:13px}
+body:not(.android) .chooserback{padding:8px 12px!important;font-size:13px!important}
 body:not(.android) .chooserback:disabled{opacity:.35;cursor:default}
 body:not(.android) #unfinished-sec .sechead{margin-bottom:8px}
 body:not(.android) #unfinished-sec .sechead p{display:none}
@@ -15293,10 +15321,11 @@ body:not(.android) #unfinished-sec .alt p{font-size:11px;white-space:nowrap;over
 body:not(.android) #unfinished-sec .alt button{margin-top:3px;padding:2px 10px}
 body:not(.android) #unfinished-sec .alt p.empty:empty{display:none}
 body:not(.android) .nowfits .fitgrid{grid-template-columns:repeat(2,minmax(0,1fr))}
-/* A narrow window: the alternatives under the pick, not squeezing it. */
+/* A narrow window: the chooser and the alternatives under the pick, not
+   squeezing it. */
 @media (max-width:900px){
   body:not(.android) #view-now:not(.hidden){grid-template-columns:minmax(0,1fr);
-    grid-template-areas:"cont" "chooser" "pick" "fits"}
+    grid-template-areas:"cont" "chooser" "pick" "fits";grid-template-rows:none}
   body:not(.android) .nowfits .fitgrid{grid-template-columns:repeat(auto-fill,minmax(110px,1fr))}
 }
 body:not(.android) .pick .plot.clamp{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;cursor:pointer}
@@ -15325,6 +15354,7 @@ body.android .chooserow.genres{overflow-x:auto;flex-wrap:nowrap;padding-bottom:4
 .kchip.on{background:var(--paper);color:#17151c;border-color:var(--paper)}
 .ptag.gchip{flex:none;font-size:11px;padding:7px 13px;cursor:pointer;scroll-snap-align:start}
 .ptag.gchip.on{background:hsl(var(--h) 60% 45% / .6);color:#fff;border-color:hsl(var(--h) 75% 65%)}
+.ptag.gchip.off{opacity:.28;cursor:default;filter:grayscale(1)}
 /* What fits, under the chooser. */
 body.android .nowfits{display:block;margin:0 0 14px}
 body.android .nowfits.hidden{display:none}
@@ -16879,7 +16909,7 @@ let pickAhead = null;
 function tonightParams(exclude, peek){
   const q = new URLSearchParams({
     mood: $('#mood').value, kind: $('#kind').value,
-    genre: $('#genre').value, exclude: [...exclude].join(',')
+    genre: nowGenres(), exclude: [...exclude].join(',')
   });
   if(!document.body.classList.contains('android')) q.set('count', '7');
   else if(typeof chooserStep !== 'undefined' && chooserStep >= 2) q.set('count', '13');
@@ -16888,7 +16918,7 @@ function tonightParams(exclude, peek){
 }
 
 function aheadKey(exclude){
-  return [$('#mood').value, $('#kind').value, $('#genre').value,
+  return [$('#mood').value, $('#kind').value, nowGenres(),
           [...exclude].sort().join(',')].join('|');
 }
 
@@ -16945,9 +16975,12 @@ $('#spinback').onclick = () => {
   showPick(pickTrail[trailAt]);
 };
 
+/* The genres the pick is filtered to: the chooser's, several at once. */
+function nowGenres(){ return typeof chosenGenres === 'undefined' ? $('#genre').value : chosenGenres.join(','); }
+
 function currentGenreFilter(){
-  const g = $('#genre').value;
-  if(g) return {genres:[g], label:g};
+  const g = nowGenres();
+  if(g) return {genres: g.split(','), label: g.split(',').join(' + ')};
   const moodGenres = {
     bleak:['Comedy','Drama'],
     heavy:['Drama','War','History','Crime'],
@@ -17012,7 +17045,7 @@ function pickCard(p){
     play.textContent = 'Playing';
     pollPlaying();
   };
-  const skip = el('button','iconbtn','NOT THIS');
+  const skip = el('button','iconbtn','NEXT');
   skip.onclick = () => { rejected.add(p.type+':'+p.id); loadTonight(); };
 
   /* "Not tonight, but don't let me forget it." NOT THIS is the other half of
@@ -17136,19 +17169,22 @@ function phonePick(p, poster, right, btns, problem, meta, rateSlot){
   return card;
 }
 
-/* The phone's chooser. Step by step: Anything / Film / TV first; picking
-   one brings up the genres, sliding sideways in their tag colours; picking
-   a genre completes the choice, and what else fits appears under it. Each
-   step drives the same filters the PC's boxes do, so the pick above follows
-   it. No mood on the phone. */
+/* The chooser. Step by step: Anything / Film / TV first. Film or TV brings
+   up the genres in their tag colours, any number of which can be chosen
+   together — titles with ALL of them — and a genre that would leave nothing
+   is greyed out. Anything folds the whole thing away again: no kind, no
+   genre. Each step drives the pick, which follows it. No mood. */
 const CHOOSER_KINDS = [['any', 'Anything'], ['film', 'Film'], ['tv', 'TV']];
-let chooserStep = 0;            // 0 nothing chosen, 1 a kind, 2 a kind and a genre
+let chooserStep = 0;            // 0 nothing chosen, 1 a kind, 2 a kind and genres
+var chosenGenres = [];          // var: read by nowGenres before this line may run
+let genreAvail = null;          // [{name, n}] for the kind and genres chosen
 
 function drawChooser(){
   const kinds = $('#chooser-kind');
   kinds.innerHTML = '';
   CHOOSER_KINDS.forEach(([value, label]) => {
-    const b = el('button', 'kchip' + (chooserStep >= 1 && $('#kind').value === value ? ' on' : ''), label);
+    const on = value === 'any' ? chooserStep === 0 : chooserStep >= 1 && $('#kind').value === value;
+    const b = el('button', 'kchip' + (on ? ' on' : ''), label);
     b.type = 'button';
     b.onclick = () => chooserKind(value);
     kinds.append(b);
@@ -17157,27 +17193,53 @@ function drawChooser(){
   genres.classList.toggle('hidden', chooserStep < 1);
   genres.innerHTML = '';
   if(chooserStep < 1) return;
-  [''].concat(STATUS && STATUS.genres || []).forEach(name => {
-    const b = el('button', 'ptag gchip' + (chooserStep >= 2 && $('#genre').value === name ? ' on' : ''),
-                 esc(name ? genreShort(name) : 'Any genre'));
+  const list = genreAvail || (STATUS && STATUS.genres || []).map(name => ({name, n: null}));
+  const any = el('button', 'ptag gchip' + (chooserStep >= 2 && !chosenGenres.length ? ' on' : ''), 'Any genre');
+  any.type = 'button';
+  any.style.setProperty('--h', 40);
+  any.onclick = () => chooserGenre('');
+  genres.append(any);
+  list.forEach(({name, n}) => {
+    const on = chosenGenres.includes(name);
+    const none = n === 0 && !on;
+    const b = el('button', 'ptag gchip' + (on ? ' on' : '') + (none ? ' off' : ''), esc(genreShort(name)));
     b.type = 'button';
-    b.style.setProperty('--h', name ? genreHue(name) : 40);
+    b.disabled = none;
+    b.title = none ? 'Nothing with ' + [...chosenGenres, name].join(' + ') : name;
+    b.style.setProperty('--h', genreHue(name));
     b.onclick = () => chooserGenre(name);
     genres.append(b);
   });
 }
 
+/* Which genres are still possible with the kind and genres chosen. */
+async function chooserAvail(){
+  const r = await api('/api/genres?' + new URLSearchParams({kind: $('#kind').value, with: chosenGenres.join(',')}));
+  genreAvail = r && r.genres || null;
+  drawChooser();
+}
+
 function chooserKind(value){
   $('#kind').value = value;
-  $('#genre').value = '';
+  chosenGenres = [];
+  genreAvail = null;
+  if(value === 'any'){
+    chooserStep = 0;          // folded away: everything, any genre
+    chooserApply();
+    return;
+  }
   chooserStep = 1;
   chooserApply();
+  chooserAvail();
 }
 
 function chooserGenre(name){
-  $('#genre').value = name;
+  if(!name) chosenGenres = [];
+  else if(chosenGenres.includes(name)) chosenGenres = chosenGenres.filter(g => g !== name);
+  else chosenGenres = chosenGenres.concat([name]);
   chooserStep = 2;
   chooserApply();
+  chooserAvail();
 }
 
 async function chooserApply(){
@@ -17203,7 +17265,7 @@ function drawFits(data){
   box.innerHTML = '';
   if(!shown) return;
   const kind = (CHOOSER_KINDS.find(k => k[0] === $('#kind').value) || [0, 'Anything'])[1];
-  box.append(el('h3', null, esc('Or instead · ' + kind + ' · ' + ($('#genre').value || 'any genre'))));
+  box.append(el('h3', null, esc('Or instead · ' + kind + ' · ' + (chosenGenres.join(' + ') || 'any genre'))));
   const grid = el('div', 'fitgrid');
   rest.forEach(p => {
     const b = el('button', 'fitcard');

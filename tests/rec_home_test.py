@@ -137,6 +137,23 @@ n.CONFIG["tmdb_key"] = ""
 n.startup_check()
 check("without a TMDB key there's nothing to work out", ran["recs"] == 2, ran)
 
+# --- the Now chooser: genres combine, and what can't be had is greyed ------------------------
+n.LIB.load(force=True)
+both = n.build_tonight("film", "any", 0, "Drama,Crime", count=24)
+check("two genres at once: everything picked has both",
+      both and all(n.genre_matches("Animation", p["genres"] + ["?"]) or True for p in both)
+      and all({"Drama", "Crime"} <= set(
+          g2 for g in next(m.get("genre") or [] for m in n.LIB.movies if m["movieid"] == p["id"])
+          for g2 in n.GENRE_SPLIT.get(g, [g])) for p in both), [p["title"] for p in both][:5])
+# The rarest genre on its own leaves most others impossible.
+rare = min((g for g in n.available_genres("film", []) if g["n"]), key=lambda g: g["n"])["name"]
+avail = dict((g["name"], g["n"]) for g in n.available_genres("film", [rare]))
+check("the genres still possible are counted against what's chosen",
+      avail.get(rare, 0) > 0 and any(v == 0 for v in avail.values()), (rare, sorted(avail.items())[:8]))
+tv = dict((g["name"], g["n"]) for g in n.available_genres("tv", []))
+check("TV's doubled genres count as their halves there too",
+      "Action & Adventure" not in tv and tv.get("Action", 0) >= 0, sorted(tv)[:10])
+
 # --- the page --------------------------------------------------------------------------
 page = n.PAGE
 check("the page has the home, Refresh and the suggestion details",
@@ -146,6 +163,8 @@ check("the page has the home, Refresh and the suggestion details",
 check("the PC's Now: Continue on top, the chooser, the pick with its alternatives beside it",
       "body:not(.android) #view-now:not(.hidden){display:grid" in page and 'id="chooserback"' in page
       and "function shortWhy(" in page and "function pcCardOrder(" in page)
+check("the chooser: several genres, the impossible greyed, Anything folds it away, and NEXT not NOT THIS",
+      "/api/genres" in page and "chosenGenres" in page and "'NEXT'" in page and "'NOT THIS'" not in page)
 
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
