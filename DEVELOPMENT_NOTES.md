@@ -16,6 +16,29 @@ at the top.
 
 ---
 
+## 2026-10-10 — v0.1.74, the phone stops waking itself for nothing
+
+The user saw Next Up at 22.3% per hour in the phone's battery use. Measured
+on the S21 first: no wake locks of its own, ~0.5% of a core idle with the
+screen on — most of that figure is the screen (Samsung charges it to the app
+in front), poster loading, and a day of reinstalls. But three things kept
+it from sleeping in the background:
+
+- The page polled /api/playing every 9 s, forever — pointless on the phone,
+  where films play in mpv and nothing here is ever "playing". `pollPlaying`
+  returns at once on Android.
+- Toga never paused the WebView with the activity, so page timers ran on in
+  the background. app.py `pause_with_app` wraps the listener's onPause /
+  onResume (at the class: Chaquopy dispatches through it) to call
+  webview.onPause + pauseTimers, and resumeTimers + onResume.
+- `serve_forever` woke twice a second to look for a shutdown; on Android
+  `SERVE_POLL_SECONDS` (5). And `sync_loop` isn't started there — the phone
+  has no sharing folder; it swaps over the cable.
+
+Background CPU, a minute at a time (100 ticks = 1 s): before, 42 app + 17
+WebView soon after start, ~28 app settled; after, settled, 5 app + 0–1
+WebView. Brought back to the front, timers and the server answer at once.
+
 ## 2026-10-10 — v0.1.73, the chooser: several genres, the impossible greyed
 
 The user's notes on v0.1.72:

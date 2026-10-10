@@ -109,7 +109,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.73"
+APP_VERSION = "0.1.74"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -21313,6 +21313,10 @@ async function answerAsk(still){
 
 let playTimer = null;
 async function pollPlaying(){
+  /* PHONE_NO_PLAYING_POLL: on the phone a film plays in the mpv app, out of
+     sight, so there's never anything here to show as playing — and asking
+     every nine seconds kept the phone from sleeping for nothing. */
+  if(document.body.classList.contains('android')) return;
   const r = await api('/api/playing');
   renderPlaying(r.playing, r.queue);
   renderAsk(r.ask);
@@ -22722,6 +22726,9 @@ def prepare_app():
         log_problem("merging duplicate shows")
 
 
+SERVE_POLL_SECONDS = 5
+
+
 def serve_in_thread(port=None, host="127.0.0.1", tries=20):
     """Start the app's server and its background work, and return the port.
 
@@ -22750,12 +22757,20 @@ def serve_in_thread(port=None, host="127.0.0.1", tries=20):
     if server is None:
         raise last
     server.daemon_threads = True
-    threading.Thread(target=server.serve_forever, daemon=True, name="server").start()
+    # serve_forever wakes every poll_interval just to see whether it's been
+    # asked to stop. Twice a second is the default; on a phone, sitting in a
+    # pocket, that's a wake-up for nothing, so it looks far less often.
+    threading.Thread(target=server.serve_forever, daemon=True, name="server",
+                     kwargs={"poll_interval": SERVE_POLL_SECONDS if PLATFORM == "android"
+                             else 0.5}).start()
     if PLATFORM != "android":
         adopt_orphan_mpv()
         threading.Thread(target=playback_monitor, daemon=True,
                          name="playback monitor").start()
-    threading.Thread(target=sync_loop, daemon=True, name="sync").start()
+    # The phone has no sharing folder — it swaps over the cable — so the
+    # loop would only wake each minute to find nothing to do.
+    if PLATFORM != "android":
+        threading.Thread(target=sync_loop, daemon=True, name="sync").start()
     threading.Thread(target=refresh_watch_scores, daemon=True, name="watch scores").start()
     if CONFIG.get("startup_check", True):
         threading.Timer(8.0, startup_check).start()

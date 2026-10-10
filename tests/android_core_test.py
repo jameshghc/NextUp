@@ -140,9 +140,11 @@ check("serve picks another port when busy, and answers with the page",
       (out.get("port"), out.get("status")))
 check("no player monitor on android", out and "playback monitor" not in out.get("threads", []),
       out.get("threads"))
+check("no sharing loop on android: the phone swaps over the cable, there's no folder to watch",
+      out and "sync" not in out.get("threads", []), out.get("threads"))
 check("hidden suggestions are loaded at start-up", out.get("dismissed_loaded"))
 check("starting twice reuses the first server", out.get("again") == out.get("port")
-      and out.get("threads", []).count("server") == 1 and out.get("threads", []).count("sync") == 1,
+      and out.get("threads", []).count("server") == 1,
       (out.get("again"), out.get("threads")))
 check("no access to videos is said, not left as an empty library",
       "access to your videos" in json.dumps(out.get("status_payload") or {}),
@@ -283,6 +285,10 @@ check("phone Now: a step-by-step chooser — kind, then genres in their colours,
       and "function chooserGenre(" in page_src and 'id="nowfits"' in page_src)
 check("phone tile overlay: the heart and the bookmark in the corners their marks sit in",
       "body.android .tile .peek .peekmark.fav{" in page_src and "body.android .tile .peek .peekmark.watch{" in page_src)
+check("the phone doesn't poll for what's playing: playback is mpv's, out of sight",
+      "PHONE_NO_PLAYING_POLL" in page_src)
+check("and the server answers without waking twice a second to check for a stop",
+      "SERVE_POLL_SECONDS" in open(os.path.join(ROOT, "nextup.py"), encoding="utf-8").read())
 check("a details panel can be swiped down to close", "function sheetSwipe(" in page_src
       and "sheetSwipe(back" in page_src)
 

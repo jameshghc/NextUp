@@ -36,6 +36,7 @@ class NextUp(toga.App):
         self.main_window.show()
         dark_bars(self)
         handle_back(self)
+        pause_with_app(self)
         ask_for_videos(self)
 
 
@@ -203,6 +204,37 @@ def no_margins(app):
 
     ViewCompat.setOnApplyWindowInsetsListener(content, Edge())
     ViewCompat.requestApplyInsets(content)
+
+
+def pause_with_app(app):
+    """When Next Up goes into the background — the home button, another app,
+    mpv playing a film — its web view is paused too, page timers and all,
+    and started again when it comes back. Toga doesn't do this itself, so a
+    page left open in the background went on waking the phone."""
+    try:
+        webview = app.main_window.content._impl.native
+        cls = type(app._impl._listener)
+        paused, resumed = cls.onPause, cls.onResume
+
+        def onPause(self):
+            paused(self)
+            try:
+                webview.onPause()
+                webview.pauseTimers()
+            except Exception:
+                traceback.print_exc()
+
+        def onResume(self):
+            try:
+                webview.resumeTimers()
+                webview.onResume()
+            except Exception:
+                traceback.print_exc()
+            resumed(self)
+
+        cls.onPause, cls.onResume = onPause, onResume
+    except Exception:
+        traceback.print_exc()   # the app works without it, just less frugally
 
 
 def handle_back(app):
