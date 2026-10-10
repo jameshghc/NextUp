@@ -109,7 +109,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.68"
+APP_VERSION = "0.1.69"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -9193,6 +9193,7 @@ def import_library_snapshot(payload, fetch_art=True):
     stored = dict(
         (t, conn.execute("SELECT COUNT(*) FROM snapshot_%s" % t).fetchone()[0])
         for t in ("movies", "shows", "episodes"))
+    _reapply_own_marks(conn, payload.get("exported_at"))
     conn.execute("DELETE FROM snapshot_meta")
     conn.execute(
         "INSERT INTO snapshot_meta (id,device,exported_at,imported_at,"
@@ -9271,6 +9272,68 @@ def adopt_snapshot_marks():
         LOCAL.loaded_at = 0
         LIB.loaded_at = 0
     return changed
+
+
+_ELSEWHERE_MARKS = {"favourite": ("favourited_at", "favourited", "removed from favourites"),
+                    "watchlist": ("watchlisted_at", "watchlisted", "removed from watchlist")}
+
+
+def mark_elsewhere(kind, tmdb_id, what):
+    """Favourite — or watchlist — a film or show this device hasn't got: one
+    of the catalogue's greyed rows. There's no library row to mark, so the
+    mark goes on the catalogue's copy (the heart shows at once) and into this
+    device's own history as an event keyed by TMDB id — the form the PC
+    reads. The next swap over the cable carries it there; the PC applies it
+    to its own copy, the later of the two marks winning, as with ratings.
+    A second call takes it off. Returns whether it's now on."""
+    if kind not in ("movie", "tvshow") or what not in _ELSEWHERE_MARKS:
+        raise AppError("Can't mark that.")
+    field, on_event, off_event = _ELSEWHERE_MARKS[what]
+    table = "snapshot_movies" if kind == "movie" else "snapshot_shows"
+    conn = db()
+    try:
+        row = conn.execute("SELECT title, %s FROM %s WHERE tmdb_id=?" % (field, table),
+                           (str(tmdb_id),)).fetchone()
+        if not row:
+            raise AppError("That isn't in the catalogue here.")
+        on = not row[field]
+        utc = time.time()
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(utc))
+        conn.execute("UPDATE %s SET %s=? WHERE tmdb_id=?" % (table, field),
+                     (stamp if on else None, str(tmdb_id)))
+        conn.execute(
+            "INSERT INTO history (at,kind,item_id,title,event,uid,utc,tmdb_id)"
+            " VALUES (?,?,NULL,?,?,?,?,?)",
+            (stamp, kind, row["title"], on_event if on else off_event,
+             uuid.uuid4().hex, utc, str(tmdb_id)))
+        conn.commit()
+    finally:
+        conn.close()
+    LIB.loaded_at = 0
+    if CONFIG.get("sync_folder"):
+        _SYNC_WAKE.set()
+    return on
+
+
+def _reapply_own_marks(conn, exported_at):
+    """A catalogue replacing this one was built at `exported_at`. Marks made
+    here on greyed rows since then haven't reached the PC that built it, so
+    they'd vanish with the old copy; put them back on the new one. Anything
+    older the PC had already heard, and its word stands."""
+    since = stamp_seconds(exported_at) if exported_at else None
+    if not since:
+        return
+    events = {}
+    for field, on_event, off_event in _ELSEWHERE_MARKS.values():
+        for e in conn.execute(
+                "SELECT kind, tmdb_id, event, at FROM history WHERE origin IS NULL"
+                " AND item_id IS NULL AND tmdb_id IS NOT NULL AND utc > ?"
+                " AND event IN (?, ?) ORDER BY utc ASC, id ASC", (since, on_event, off_event)):
+            events[(e["kind"], e["tmdb_id"], field)] = (e["event"] == on_event, e["at"])
+    for (kind, tmdb_id, field), (on, at) in events.items():
+        table = "snapshot_movies" if kind == "movie" else "snapshot_shows"
+        conn.execute("UPDATE %s SET %s=? WHERE tmdb_id=?" % (table, field),
+                     (at if on else None, tmdb_id))
 
 
 def snapshot_forget():
@@ -13562,6 +13625,10 @@ class Handler(BaseHTTPRequestHandler):
                     {"ok": True, "device": device_rename(data.get("name")),
                      "state": profiles_state()})
 
+            if route == "/api/mark/elsewhere":
+                return self.send_json({"on": mark_elsewhere(
+                    data.get("kind"), data.get("tmdb_id"), data.get("what"))})
+
             if route == "/api/share/import":
                 if PLATFORM != "android":
                     return self.send_json({"error": "only on the phone"}, 404)
@@ -14881,7 +14948,14 @@ body.android .reccard{flex-basis:124px}
    half the facts (.peektop), set out to be read at a glance; then PLAY,
    then DETAILS. The names, the blurb and the toggles are on the details
    page. */
-.tile .peek .peekplay,.tile .peek .peekdetails,.tile .peek .peektop{display:none}
+.tile .peek .peekplay,.tile .peek .peekdetails,.tile .peek .peektop,.tile .peek .peekmarks{display:none}
+body.android .tile .peek .peekmarks{display:flex;gap:8px;margin-top:8px}
+body.android .tile.elsewhere .peek .peekmarks{margin-top:auto;margin-bottom:6px}
+body.android .tile .peek .peekmark{padding:5px 12px;font-size:15px;line-height:1;min-width:40px;
+  display:flex;align-items:center;justify-content:center}
+body.android .tile .peek .peekmark .mark{width:14px;height:14px}
+body.android .tile .peek .peekmark.on{color:var(--marigold);border-color:var(--marigold)}
+body.android .tile.peeking .peek .peekmark{pointer-events:auto}
 body.android .tile .peek{opacity:0;justify-content:flex-start;align-items:center;text-align:center;
   gap:0;padding:12px 8px}
 body.android .tile.peeking .peek{opacity:1}
@@ -17778,6 +17852,32 @@ function tile(item){
     };
     peek.append(more);
   }
+  /* The heart and the watchlist, on the phone: here a tap marks it in the
+     library; on a greyed tile, on the catalogue's copy — the PC hears at the
+     next swap. Hidden on the PC, whose hover panel has its own toggles. */
+  const marks = el('div', 'peekmarks');
+  [['favourite', () => item.favourited ? '♥' : '♡', 'favourited'],
+   ['watchlist', () => item.watchlisted ? BOOKMARK_ON : BOOKMARK_OFF, 'watchlisted']].forEach(([what, face, field]) => {
+    const m = el('button', 'iconbtn peekmark');
+    m.type = 'button';
+    const paint = () => { m.innerHTML = face(); m.classList.toggle('on', !!item[field]); };
+    paint();
+    m.title = what === 'favourite' ? 'Favourite' : 'Watchlist';
+    m.onclick = async (e) => {
+      e.stopPropagation();
+      m.disabled = true;
+      const r = item.elsewhere
+        ? await post('/api/mark/elsewhere', {kind: item.kind, tmdb_id: item.tmdb_id, what})
+        : await post(what === 'favourite' ? '/api/favourite' : '/api/watchlist', {type: item.kind, id: item.id});
+      m.disabled = false;
+      if(r.error) return;
+      item[field] = r.on;
+      paint();
+      syncMarks();
+    };
+    marks.append(m);
+  });
+  peek.append(marks);
   if(item.directors && item.directors.length)
     peek.append(el('div','line names', esc(item.directors.join(', '))));
   if(item.cast && item.cast.length)

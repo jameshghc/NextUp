@@ -16,6 +16,30 @@ at the top.
 
 ---
 
+## 2026-10-10 — v0.1.69, favourite (and watchlist) on the phone, until the PC hears
+
+"Is there a way we can handle adding favourites on mobile too?" Films on the
+phone could already be marked, and the cable swap carried it. The greyed ones
+couldn't: there's no library row on the phone to mark — they're the PC's
+catalogue. Agreed design, built:
+
+- `mark_elsewhere(kind, tmdb_id, what)` ("favourite" | "watchlist"): toggles
+  the catalogue copy's favourited_at / watchlisted_at (the heart shows at
+  once) and logs this device's own history event by TMDB id — "favourited",
+  "removed from favourites", "watchlisted", "removed from watchlist", item_id
+  NULL. `share_export` already hands those over; the PC applies them to its
+  own row through the sync families, later mark winning.
+- `_reapply_own_marks`, inside `import_library_snapshot`: a new catalogue
+  replaces the old copy, so marks made here after it was built (events
+  newer than its exported_at) go back on it; older ones the PC had heard,
+  and its word stands. Needed because SEND imports the catalogue before
+  the swap tells the PC.
+- POST /api/mark/elsewhere. The phone's tile overlay gains ♡ and the
+  watchlist (`.peekmarks`): the library's own routes for a film on the
+  phone, mark_elsewhere for a greyed one. Hidden on the PC.
+- usb_phone_test +9. Checked in phone_serve (10,000 BC on, in Favourites,
+  off again); on the S21 only by looking.
+
 ## 2026-10-10 — v0.1.68 (cont.), "no favourites in the library on mobile at all"
 
 Nothing was lost: the S21 had never had a favourite of its own, and its

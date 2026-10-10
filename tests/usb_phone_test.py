@@ -281,5 +281,39 @@ check("the PC's catalogue carries both marks",
 check("progress stays a mark of this device only",
       not any(i.get("elsewhere") for i in n.browse_library("all", "", "title", "progress", 2000, 0)["items"]))
 
+# --- marking a greyed film on the phone, until the PC hears ---------------------------------
+on = n.mark_elsewhere("movie", "wl-away", "favourite")
+favs = [i["title"] for i in n.browse_library("all", "", "title", "favourite", 2000, 0)["items"]]
+check("a greyed film can be favourited here, and shows at once", on and "Faraway Watchlist" in favs, favs[:6])
+_c = n.db()
+ev = _c.execute("SELECT * FROM history WHERE tmdb_id='wl-away' AND event='favourited'").fetchone()
+_c.close()
+check("as an event in this device's own history, by TMDB id — for the PC to hear",
+      ev and ev["origin"] is None and ev["item_id"] is None and ev["kind"] == "movie" and ev["uid"], dict(ev) if ev else None)
+shared = [json.loads(x) for x in n.share_export()["text"].splitlines() if x.strip()]
+check("and it goes in what the phone hands over", any(e["event"] == "favourited" and e["tmdb"] == "wl-away"
+                                                      for e in shared))
+check("the watchlist the same", n.mark_elsewhere("tvshow", "favshow-away", "watchlist") is True)
+off = n.mark_elsewhere("movie", "wl-away", "favourite")
+favs = [i["title"] for i in n.browse_library("all", "", "title", "favourite", 2000, 0)["items"]]
+check("and a second tap takes it off", off is False and "Faraway Watchlist" not in favs, favs[:6])
+n.mark_elsewhere("movie", "wl-away", "favourite")      # on again, for the next part
+
+# A new catalogue arrives from a PC that hasn't heard yet: built before the
+# mark was made, it hasn't got it, and the mark mustn't vanish.
+old = json.loads(json.dumps(fav_snap)); old["exported_at"] = "2026-01-01 00:00:00"
+n.import_library_snapshot(old, fetch_art=False)
+n.LIB.loaded_at = 0
+favs = [i["title"] for i in n.browse_library("all", "", "title", "favourite", 2000, 0)["items"]]
+check("a catalogue from before the mark doesn't wipe it", "Faraway Watchlist" in favs, favs[:6])
+# One built after it — the PC has heard, and its word stands (here: unfavourited there since).
+newer = json.loads(json.dumps(fav_snap)); newer["exported_at"] = "2099-01-01 00:00:00"
+n.import_library_snapshot(newer, fetch_art=False)
+n.LIB.loaded_at = 0
+favs = [i["title"] for i in n.browse_library("all", "", "title", "favourite", 2000, 0)["items"]]
+check("one from after it is the PC's word", "Faraway Watchlist" not in favs, favs[:6])
+check("the phone's tile overlay has the heart and the watchlist", "peekmark" in n.PAGE
+      and "/api/mark/elsewhere" in n.PAGE)
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
