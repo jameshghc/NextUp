@@ -143,5 +143,9 @@ check("the page has the home, Refresh and the suggestion details",
       'id="rechome"' in page and 'id="recrefresh"' in page and "function openSuggestion(" in page
       and "function seeAll(" in page)
 
+check("the PC's Now: Continue on top, the chooser, the pick with its alternatives beside it",
+      "body:not(.android) #view-now:not(.hidden){display:grid" in page and 'id="chooserback"' in page
+      and "function shortWhy(" in page and "function pcCardOrder(" in page)
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

@@ -109,7 +109,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.71"
+APP_VERSION = "0.1.72"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -15261,6 +15261,50 @@ body.android header.mast .offview{display:none}
    scrolling; then the filters folded to one line, and the reasons on
    request. The PC's Now is untouched. */
 .nowchooser,.nowfits{display:none}
+body.android .chooserback{display:none}
+
+/* ---- Now, on the PC ----
+   The phone's ideas, laid out for a wide window: Continue as a strip along
+   the top, the chooser under it in one line, then the pick with its
+   alternatives in a column beside it. The three boxes and the reason cards
+   go — the card carries a short why of its own. */
+body:not(.android) #view-now:not(.hidden){display:grid;grid-template-columns:minmax(0,1fr) 236px;
+  grid-template-areas:"cont cont" "chooser chooser" "pick fits";column-gap:18px;align-content:start}
+body:not(.android) #view-now > #unfinished-sec{grid-area:cont;margin:6px 0 10px}
+body:not(.android) #view-now > .nowchooser{grid-area:chooser;display:flex;align-items:center;gap:10px;margin:0 0 14px;min-width:0}
+body:not(.android) #view-now > #tonight-out{grid-area:pick;min-width:0}
+body:not(.android) #view-now > .nowfits{grid-area:fits;display:block}
+body:not(.android) #view-now > .nowfits.hidden{display:none}
+body:not(.android) #view-now > .filters,body:not(.android) #view-now > #reasons-out{display:none}
+body:not(.android) .nowchooser .chooserow{display:flex;gap:8px;flex:none}
+body:not(.android) .nowchooser .chooserow.hidden{display:none}
+body:not(.android) .nowchooser .chooserow.genres{flex:1;min-width:0;overflow-x:auto;flex-wrap:nowrap;padding-bottom:2px}
+body:not(.android) .nowchooser .kchip{flex:none;padding:8px 18px;font-size:13px}
+body:not(.android) .chooserback{padding:8px 13px!important}
+body:not(.android) .chooserback:disabled{opacity:.35;cursor:default}
+body:not(.android) #unfinished-sec .sechead{margin-bottom:8px}
+body:not(.android) #unfinished-sec .sechead p{display:none}
+body:not(.android) #unfinished-sec .sechead h2{font-size:16px}
+body:not(.android) #unfinished-sec .alts{display:flex;gap:10px;overflow-x:auto;padding-bottom:4px}
+body:not(.android) #unfinished-sec .alt{flex:0 0 250px;grid-template-columns:34px 1fr;gap:10px;padding:8px 10px}
+body:not(.android) #unfinished-sec .alt img,body:not(.android) #unfinished-sec .alt .noposter{width:34px!important}
+body:not(.android) #unfinished-sec .alt h3{font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+body:not(.android) #unfinished-sec .alt p{font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+body:not(.android) #unfinished-sec .alt button{margin-top:3px;padding:2px 10px}
+body:not(.android) #unfinished-sec .alt p.empty:empty{display:none}
+body:not(.android) .nowfits .fitgrid{grid-template-columns:repeat(2,minmax(0,1fr))}
+/* A narrow window: the alternatives under the pick, not squeezing it. */
+@media (max-width:900px){
+  body:not(.android) #view-now:not(.hidden){grid-template-columns:minmax(0,1fr);
+    grid-template-areas:"cont" "chooser" "pick" "fits"}
+  body:not(.android) .nowfits .fitgrid{grid-template-columns:repeat(auto-fill,minmax(110px,1fr))}
+}
+body:not(.android) .pick .plot.clamp{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;cursor:pointer}
+body:not(.android) .pick .ppwhy{max-width:62ch;margin:0 0 14px;padding:8px 12px;border-left:2px solid var(--marigold);
+  background:rgba(224,163,62,.07);font-size:13.5px;line-height:1.45;color:var(--paper)}
+body:not(.android) .pick .ppwhy:empty{display:none}
+body:not(.android) .pick .rowbtns{margin:0 0 14px}
+
 body.android #view-now:not(.hidden){display:flex;flex-direction:column}
 body.android #view-now > #unfinished-sec{order:1}
 body.android #view-now > #tonight-out{order:2}
@@ -16207,10 +16251,12 @@ header.mast .libplaces.offview{visibility:hidden}
 
 <!-- ================= NOW ================= -->
 <div id="view-now" class="hidden">
-  <!-- The phone's chooser, at the foot of the page: Anything / Film / TV,
-       then a sliding row of genres in their colours, then what fits.
-       Hidden on the PC, which keeps its three boxes. -->
+  <!-- The chooser: Anything / Film / TV, then a sliding row of genres in
+       their colours, then what fits. At the foot of the phone's page; along
+       the top of the PC's, beside a Back. -->
   <div class="nowchooser" id="nowchooser">
+    <button class="kchip chooserback" id="chooserback" type="button" disabled
+            title="Back to the one before">‹</button>
     <div class="chooserow" id="chooser-kind"></div>
     <div class="chooserow genres hidden" id="chooser-genre"></div>
   </div>
@@ -16800,6 +16846,8 @@ let offTrail = false;
 
 function paintBack(){
   $('#spinback').disabled = offTrail ? trailAt < 0 : trailAt <= 0;
+  const back = document.getElementById('chooserback');
+  if(back) back.disabled = $('#spinback').disabled;
 }
 
 function showPick(p){
@@ -16833,7 +16881,8 @@ function tonightParams(exclude, peek){
     mood: $('#mood').value, kind: $('#kind').value,
     genre: $('#genre').value, exclude: [...exclude].join(',')
   });
-  if(typeof chooserStep !== 'undefined' && chooserStep >= 2) q.set('count', '13');
+  if(!document.body.classList.contains('android')) q.set('count', '7');
+  else if(typeof chooserStep !== 'undefined' && chooserStep >= 2) q.set('count', '13');
   if(peek) q.set('peek', '1');
   return q;
 }
@@ -17005,7 +17054,36 @@ function pickCard(p){
   card.append(right);
   if(document.body.classList.contains('android'))
     return phonePick(p, card.querySelector('img.poster, .noposter'), right, btns, problem, meta, rateSlot);
+  pcCardOrder(p, right, btns, problem, meta, rateSlot);
   return card;
+}
+
+/* The PC's card in the phone's order: what it is and why, then PLAY at once;
+   then the facts, the plot (three lines, a click for the rest), the short
+   why, and your rating last. */
+function pcCardOrder(p, right, btns, problem, meta, rateSlot){
+  const plot = right.querySelector('.plot');
+  right.append(btns, problem, meta);
+  if(plot){
+    plot.classList.add('clamp');
+    plot.onclick = () => plot.classList.toggle('clamp');
+    right.append(plot);
+  }
+  right.append(shortWhy(p), rateSlot);
+}
+
+/* Why this, short and sharp: the first sentence of each of the two strongest
+   reasons — the cards the page used to show at length. */
+function shortWhy(p){
+  const why = el('p', 'ppwhy');
+  (p._why || api('/api/why?type=' + encodeURIComponent(p.type) + '&id=' + p.id))
+    .then(r => {
+      const cards = (r && r.cards || []).slice().sort((a, b) => (b.weight || 0) - (a.weight || 0));
+      const first = t => (String(t || '').match(/^.*?[.!?](\s|$)/) || [String(t || '')])[0].trim();
+      why.textContent = cards.slice(0, 2).map(c => first(c.body)).filter(Boolean).join(' ');
+    })
+    .catch(() => {});
+  return why;
 }
 
 /* The pick on a phone: the poster full width with the title and the reason
@@ -17051,18 +17129,8 @@ function phonePick(p, poster, right, btns, problem, meta, rateSlot){
     plot.onclick = () => plot.classList.toggle('clamp');
     info.append(plot);
   }
-  /* Why this, short and sharp: the strongest one or two of the reasons the
-     PC shows as cards, a sentence each, between the plot and your rating. */
-  const why = el('p', 'ppwhy');
-  info.append(why);
-  (p._why || api('/api/why?type=' + encodeURIComponent(p.type) + '&id=' + p.id))
-    .then(r => {
-      const cards = (r && r.cards || []).slice().sort((a, b) => (b.weight || 0) - (a.weight || 0));
-      const first = t => (String(t || '').match(/^.*?[.!?](\s|$)/) || [String(t || '')])[0].trim();
-      why.textContent = cards.slice(0, 2).map(c => first(c.body)).filter(Boolean).join(' ');
-      if(!why.textContent) why.remove();
-    })
-    .catch(() => why.remove());
+  /* Why this, short and sharp, between the plot and your rating. */
+  info.append(shortWhy(p));
   info.append(rateSlot);
   card.append(info);
   return card;
@@ -17118,17 +17186,22 @@ async function chooserApply(){
   drawChooser();
   await loadTonight();
   /* A finished choice: up to its suggestion, the alternatives under it. */
-  if(chooserStep >= 2) $('#view-now').scrollTo({top: 0, behavior: 'smooth'});
+  if(chooserStep >= 2 && document.body.classList.contains('android'))
+    $('#view-now').scrollTo({top: 0, behavior: 'smooth'});
 }
+
+$('#chooserback').onclick = () => $('#spinback').click();
 
 /* What else fits a completed choice: the picks after the first, as small
    posters; a tap makes one the pick. */
 function drawFits(data){
   const box = $('#nowfits');
   const rest = (data && data.picks || []).slice(1);
-  box.classList.toggle('hidden', !(chooserStep >= 2 && rest.length));
+  const phone = document.body.classList.contains('android');
+  const shown = rest.length && (!phone || chooserStep >= 2);
+  box.classList.toggle('hidden', !shown);
   box.innerHTML = '';
-  if(chooserStep < 2 || !rest.length) return;
+  if(!shown) return;
   const kind = (CHOOSER_KINDS.find(k => k[0] === $('#kind').value) || [0, 'Anything'])[1];
   box.append(el('h3', null, esc('Or instead · ' + kind + ' · ' + ($('#genre').value || 'any genre'))));
   const grid = el('div', 'fitgrid');
@@ -17211,7 +17284,7 @@ async function loadTonight(){
   reasons.classList.remove('swapping');
   if(data.error){ out.innerHTML = '<div class="notice bad"><h3>Something went wrong</h3><p>'+esc(data.error)+'</p></div>'; return; }
   if(data.reset) rejected.clear();
-  if(document.body.classList.contains('android')) drawFits(data);
+  drawFits(data);
   out.innerHTML = '';
   if(!data.picks.length){
     const f = currentGenreFilter();

@@ -16,6 +16,28 @@ at the top.
 
 ---
 
+## 2026-10-10 — v0.1.72, the PC's Now, from the phone's ideas
+
+Approved layout, built (`body:not(.android)`):
+
+- #view-now is a grid: Continue as a strip along the top ("cont"), the
+  chooser in one line under it ("chooser" — a ‹ Back (`#chooserback`,
+  mirroring #spinback), Anything / Film / TV, then the genres sliding
+  sideways), then the pick ("pick") with "Or instead" (`#nowfits`) in a
+  236px column beside it ("fits"). Under 900px wide the alternatives go
+  under the pick instead.
+- The Mood / Format / Genre boxes and the reason cards are gone on the PC
+  too; mood with them.
+- `pcCardOrder`: the card in the phone's order — what it is and why, then
+  PLAY at once; facts, the plot (three lines, a click for the rest), the
+  short why (`shortWhy`, now shared with the phone), your rating last.
+- The PC always asks for 7 and shows 6 alternatives; the phone still
+  waits for a completed choice.
+- At 1280x800 in the sandbox: Continue at 111, chooser 257, the pick
+  318–789 with PLAY at 483 and the rating at 722 — all on screen —
+  alternatives at x 927. (Measured; the pane is too narrow for a
+  readable full-size screenshot.) The phone checked unchanged on the S21.
+
 ## 2026-10-10 — v0.1.71, the phone's "why this" moves into the card
 
 "The 'why this' tiles at the bottom of the Now page is annoying." On the
