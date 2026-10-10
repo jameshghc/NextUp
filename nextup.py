@@ -109,7 +109,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.65"
+APP_VERSION = "0.1.66"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -131,6 +131,7 @@ BUDGET = {
     "tv_similar": 16,      # shows used as "more like this" seeds
     "tv_discover": 10,     # searches run from what you rate on TV
     "channels": 60,        # searches run on behalf of thin channels
+    "subjects": 12,        # searches for the home page's subject rows
 }
 
 # A title recommended this widely is one you've almost certainly already
@@ -1778,6 +1779,14 @@ CREATE TABLE IF NOT EXISTS snapshot_episodes (
 -- What plays after what's on. Kept in the database rather than in memory
 -- so a queue built on Friday is still there after the app is closed. pos
 -- is a REAL so something can go in front of the head without renumbering.
+-- The Recommendations home: the picks dealt into each row (so they stay put
+-- until Refresh), and every pick already shown (so Refresh deals new ones).
+CREATE TABLE IF NOT EXISTS rec_hand (
+  row TEXT, pos INTEGER, key TEXT, PRIMARY KEY (row, pos)
+);
+CREATE TABLE IF NOT EXISTS rec_seen (
+  key TEXT PRIMARY KEY, at TEXT
+);
 CREATE TABLE IF NOT EXISTS queue (
   id INTEGER PRIMARY KEY, pos REAL, kind TEXT, item_id INTEGER, added_at TEXT
 );
@@ -6089,6 +6098,336 @@ LIBSCAN = {"running": False, "step": "", "done": 0, "total": 0,
 
 
 # ===========================================================================
+# RECOMMENDATIONS HOME — rows dealt from the scan's pools
+# ===========================================================================
+#
+# The scan above fills deep pools — forty-odd films, forty shows, every
+# missing episode — and the home page deals a hand of eight from each into
+# a row. What's been shown is remembered, so REFRESH deals picks you haven't
+# seen, instantly, without a single TMDB call. When a row runs low it goes
+# round again and the scan is asked to fill the pools afresh, in the
+# background, so the page never waits on TMDB.
+
+REC_ROW_SIZE = 8
+REC_STALE_DAYS = 7          # suggestions older than this are worked out again at start-up
+REC_REFILL_GAP = 3600       # and a low row asks for a refill at most this often
+
+# TMDB files moods as keywords — "suspenseful", "audacious" — which are real
+# signals of taste but no subject for a row: "Because you like complex" says
+# nothing. Things — "heist", "space opera" — are subjects.
+TONE_WORDS = set("""
+absurd admiring adoring amused angry anxious appreciative approving ardent
+assertive audacious awestruck bewildered bold bravery callous candid
+cautionary celebratory cheerful comforting compassionate complex
+condescending courage curious defiant depressing desperate didactic
+disdainful dramatic earnest empathetic enchanting enthusiastic exhilarated
+factual familiar frantic frightened grim harsh hilarious hopeful horrified
+humorous informative inquisitive inspirational intense introspective
+ironic joyful joyous loving melancholy mischievous mysterious nostalgic
+ominous optimistic philosophical playful powerful provocative reflective
+relaxed respectful romantic sarcastic scary sentimental serious sincere
+somber straightforward suspenseful sympathetic tense thoughtful thrilling
+tragic urgent vibrant whimsical witty zealous gentle bittersweet uplifting
+heartwarming lighthearted wholesome dark gritty violent cynical
+""".split())
+
+
+def is_subject_keyword(name):
+    """A keyword that names a thing a row can be about, not a mood."""
+    word = (name or "").strip().lower()
+    return bool(word) and word not in TONE_WORDS
+
+
+def find_subjects(budget, owned, owned_shows, hide_obvious, profile, limit=3):
+    """The subjects you're into, each with films and shows about it you don't
+    have: the two strongest things among the keywords you rate highly, then
+    the genres you rate above your own average to make three."""
+    picks = []
+    keywords = sorted([(k, r) for k, r in profile["keywords"].items()
+                       if r["weight"] > 0.8 and r.get("n", 1) >= MIN_SUPPORT
+                       and is_subject_keyword(r["name"])], key=lambda kv: -kv[1]["weight"])
+    for key, row in keywords[:2]:
+        picks.append(("kw", str(key), row["name"]))
+    tmdb_genre_names([])            # fills TMDB_GENRES
+    genre_ids = dict((name, gid) for gid, name in TMDB_GENRES.items())
+    for _key, row in sorted(profile["genres"].items(), key=lambda kv: -kv[1]["weight"]):
+        if len(picks) >= limit:
+            break
+        if (row["weight"] > 0.4 and row.get("n", 1) >= MIN_SUPPORT
+                and row["name"] in genre_ids):
+            picks.append(("genre", str(genre_ids[row["name"]]), row["name"]))
+
+    out = []
+    for kind, key, name in picks[:limit]:
+        why = ["about %s" % name.lower()]
+        films, shows = [], []
+        for page in (1, 2):
+            if not budget.take("subjects"):
+                break
+            params = {"sort_by": "vote_average.desc", "vote_count.gte": 300,
+                      "include_adult": "false", "page": page}
+            params["with_keywords" if kind == "kw" else "with_genres"] = key
+            for film in (tmdb("/discover/movie", params) or {}).get("results") or []:
+                fid = str(film.get("id"))
+                votes = film.get("vote_count") or 0
+                if (fid in owned or not film.get("release_date")
+                        or (hide_obvious and votes > OBVIOUS_VOTES)
+                        or norm_title(film.get("title") or "") in owned):
+                    continue
+                films.append({
+                    "key": "subj:%s" % fid, "id": fid, "title": film.get("title"),
+                    "year": film["release_date"][:4], "rating": round(film.get("vote_average") or 0, 1),
+                    "votes": votes, "genres": tmdb_genre_names(film.get("genre_ids")),
+                    "overview": (film.get("overview") or "")[:240],
+                    "poster": POSTER + film["poster_path"] if film.get("poster_path") else None,
+                    "why": why})
+        # Shows have their own genre list, so only a keyword reaches them.
+        if kind == "kw" and budget.take("subjects"):
+            params = {"sort_by": "vote_average.desc", "vote_count.gte": 150, "with_keywords": key}
+            for show in (tmdb("/discover/tv", params) or {}).get("results") or []:
+                if str(show.get("id")) in owned_shows or norm_title(show.get("name") or "") in owned_shows:
+                    continue
+                if hide_obvious and (show.get("vote_count") or 0) > OBVIOUS_VOTES:
+                    continue
+                shows.append(dict(_tv_item(show, "subjtv"), why=why))
+        # A show every few films, so the row isn't all one or the other.
+        items = []
+        while films or shows:
+            items.extend(films[:3]); films = films[3:]
+            if shows:
+                items.append(shows.pop(0))
+        items = [i for i in items if i["key"] not in DISMISSED][:30]
+        if items:
+            out.append({"key": "subject:%s:%s" % (kind, key), "name": name, "kind": kind,
+                        "items": items})
+    return out
+
+
+def _rec_card(item, why=None, kind=None, **extra):
+    """One pick, in the shape every row draws."""
+    reason = why if why is not None else item.get("why")
+    if isinstance(reason, list):
+        reason = ", ".join(reason[:2])
+    kind = kind or ("tv" if item.get("kind") == "tv" else "movie")
+    card = {
+        "key": item["key"], "id": item.get("id"), "kind": kind,
+        "title": item.get("title"), "year": item.get("year"),
+        "poster": item.get("poster") or item.get("art"),
+        "rating": item.get("rating") or 0, "why": reason or "",
+        "overview": item.get("overview") or "",
+        "tags": tile_tags(item.get("genres") or [], item.get("keywords") or [],
+                          item.get("year"), "tvshow" if kind in ("tv", "gap") else "movie"),
+    }
+    card.update(extra)
+    return card
+
+
+def _rec_rows(result):
+    """Every row the home can show, each with its whole pool, best first."""
+    LIB.load()
+    owned = owned_movie_keys(LIB.movies)
+    owned_shows = owned_show_keys(LIB.shows)
+
+    def fresh(item, tv=False):
+        """Not hidden, and not something you've got since the scan."""
+        if item.get("key") in DISMISSED:
+            return False
+        ident = str(item.get("id") or "")
+        keys = owned_shows if tv else owned
+        return not (ident and ident in keys)
+
+    rows = []
+    # Finish what you have: a season a few episodes short before a series
+    # you own one film of.
+    gaps = sorted([g for g in result.get("gaps") or [] if g["key"] not in DISMISSED],
+                  key=lambda g: (not g.get("in_progress"), -(g.get("yours") or 0),
+                                 g.get("missing_total") or 99))
+    rest = []
+    for c in sorted(result.get("collections") or [],
+                    key=lambda c: -(c.get("have", 0) / float(c.get("total") or 1))):
+        for f in c.get("missing") or []:
+            m = dict(f, key="collm:%s" % f.get("id"))
+            if fresh(m):
+                rest.append(_rec_card(m, why="the rest of %s — you have %d of %d"
+                                      % (c["name"], c.get("have", 0), c.get("total", 0))))
+                break               # one from each series: the next one to get
+    finish = []
+    gap_cards = [_rec_card(g, kind="gap", show_id=int(str(g["key"]).split(":")[1]),
+                           why="%d episode%s missing" % (g.get("missing_total") or 0,
+                                                         "" if g.get("missing_total") == 1 else "s"))
+                 for g in gaps]
+    while gap_cards or rest:
+        finish.extend(gap_cards[:2]); gap_cards = gap_cards[2:]
+        if rest:
+            finish.append(rest.pop(0))
+    rows.append({"id": "finish", "title": "Finish what you have", "see_all": "episodes",
+                 "pool": finish})
+    rows.append({"id": "films", "title": "Films for you", "see_all": "foryou",
+                 "pool": [_rec_card(f) for f in result.get("bangers") or [] if fresh(f)]})
+    rows.append({"id": "shows", "title": "Shows for you", "see_all": "shows",
+                 "pool": [_rec_card(sh, kind="tv") for sh in result.get("shows") or []
+                          if fresh(sh, tv=True)]})
+    for subj in result.get("subjects") or []:
+        # "artificial intelligence (a.i.)" reads better without its bracket.
+        name = re.sub(r"\s*\(.*?\)\s*", " ", subj["name"]).strip().lower()
+        rows.append({"id": subj["key"], "title": "Because you like %s" % name,
+                     "see_all": None,
+                     "pool": [_rec_card(i) for i in subj.get("items") or []
+                              if fresh(i, tv=i.get("kind") == "tv")]})
+    # Directors and actors in turn, the one you collect most of each first:
+    # sorted together, actors (in more films each) crowd directors out.
+    def most(rows):
+        return sorted(rows or [], key=lambda r: -(r.get("owned") or 0))
+    directors = [(d, "More from %s", "directors") for d in most(result.get("directors"))]
+    actors = [(a, "More with %s", "actors") for a in most(result.get("actors"))]
+    people = []
+    while directors or actors:
+        if directors:
+            people.append(directors.pop(0))
+        if actors:
+            people.append(actors.pop(0))
+    for person, title, section in people[:3]:
+        why = "you have %d of theirs" % (person.get("owned") or 0)
+        rows.append({"id": person["key"], "title": title % person["name"], "see_all": section,
+                     "pool": [_rec_card(dict(f, key="%s:%s" % (person["key"], f.get("id"))), why=why)
+                              for f in person.get("missing") or [] if fresh(f)]})
+    return [r for r in rows if r["pool"]]
+
+
+def _deal(conn, row_id, pool, refresh):
+    """This row's hand: kept as dealt until Refresh, which marks it seen and
+    deals the next picks not yet shown. A pool with too few left goes round
+    again rather than showing a short row. Returns (hand, unseen left, and
+    whether it had to go round again)."""
+    by_key = dict((c["key"], c) for c in pool)
+    current = [r[0] for r in conn.execute("SELECT key FROM rec_hand WHERE row=? ORDER BY pos",
+                                          (row_id,)) if r[0] in by_key]
+    seen = set(r[0] for r in conn.execute("SELECT key FROM rec_seen"))
+    want = min(REC_ROW_SIZE, len(pool))
+    wrapped = False
+    if not refresh and len(current) >= want:
+        hand = current
+    else:
+        now = now_stamp()
+        if refresh:
+            conn.executemany("INSERT OR REPLACE INTO rec_seen (key, at) VALUES (?,?)",
+                             [(k, now) for k in current])
+            seen |= set(current)
+        hand = [k for k in by_key if k not in seen and k not in current][:want]
+        if len(hand) < want:
+            # Round again: this row's picks count as unseen once more, the
+            # ones just shown last of all.
+            conn.executemany("DELETE FROM rec_seen WHERE key=?", [(k,) for k in by_key])
+            seen -= set(by_key)
+            wrapped = True
+            rest = [k for k in by_key if k not in hand and k not in current] + \
+                   [k for k in current if k not in hand]
+            hand += rest[:want - len(hand)]
+        conn.execute("DELETE FROM rec_hand WHERE row=?", (row_id,))
+        conn.executemany("INSERT INTO rec_hand (row, pos, key) VALUES (?,?,?)",
+                         [(row_id, i, k) for i, k in enumerate(hand)])
+    left = len([k for k in by_key if k not in seen and k not in hand])
+    return [by_key[k] for k in hand], left, wrapped
+
+
+def recs_home(refresh=False):
+    """The home page: a row per kind of suggestion, each with its hand.
+
+    refresh: deal new hands throughout. A row with fewer than a hand's worth
+    left unseen says so ("low"), and asks for the pools to be filled afresh
+    in the background — at most once an hour."""
+    result = SCAN.get("result")
+    state = {"worked_out": SCAN.get("finished_at") or 0, "scanning": bool(SCAN.get("running")),
+             "step": SCAN.get("step") or "", "has_key": bool(CONFIG.get("tmdb_key")),
+             "rows": [], "waiting": 0, "empty": not result}
+    if not result:
+        return state
+    conn = db()
+    try:
+        low = False
+        for row in _rec_rows(result):
+            hand, left, wrapped = _deal(conn, row["id"], row["pool"], refresh)
+            state["waiting"] += left
+            row_low = wrapped or (left < REC_ROW_SIZE and len(row["pool"]) > REC_ROW_SIZE)
+            low = low or row_low
+            state["rows"].append({"id": row["id"], "title": row["title"], "see_all": row["see_all"],
+                                  "total": len(row["pool"]), "items": hand, "low": row_low})
+        conn.commit()
+    finally:
+        conn.close()
+    if (refresh and low and not SCAN.get("running") and CONFIG.get("tmdb_key")
+            and time.time() - (SCAN.get("finished_at") or 0) > REC_REFILL_GAP):
+        threading.Thread(target=scan_worker, args=(bool(CONFIG.get("hide_obvious", True)),),
+                         daemon=True, name="recs refill").start()
+        state["scanning"] = True
+    return state
+
+
+def rec_row_all(row_id):
+    """Everything in one row's pool, for SEE ALL on a row with no list of its
+    own — a subject."""
+    for row in _rec_rows(SCAN.get("result") or {}):
+        if row["id"] == row_id:
+            return {"id": row_id, "title": row["title"], "items": row["pool"]}
+    return {"id": row_id, "title": "", "items": []}
+
+
+def suggestion_detail(tid, kind):
+    """A details page for something you don't own: what it is, who made it,
+    who's in it, how long, what TMDB thinks. Cached like every TMDB call."""
+    if kind == "tv":
+        d = tmdb("/tv/%s" % tid, {"append_to_response": "credits,keywords"}) or {}
+        seasons = d.get("number_of_seasons") or 0
+        episodes = d.get("number_of_episodes") or 0
+        made_by = [c.get("name") for c in d.get("created_by") or [] if c.get("name")]
+        title, date = d.get("name"), d.get("first_air_date") or ""
+        run = ("%d season%s · %d episodes" % (seasons, "" if seasons == 1 else "s", episodes)
+               if seasons else "")
+        runtime = 0
+    else:
+        d = movie_detail(tid) or {}
+        made_by = [c.get("name") for c in (d.get("credits") or {}).get("crew") or []
+                   if c.get("job") == "Director" and c.get("name")]
+        title, date = d.get("title"), d.get("release_date") or ""
+        run, runtime = "", d.get("runtime") or 0
+    cast = [{"name": c.get("name"), "character": c.get("character") or "",
+             "photo": PROFILE + c["profile_path"] if c.get("profile_path") else None}
+            for c in ((d.get("credits") or {}).get("cast") or [])[:8] if c.get("name")]
+    genres = [g.get("name") for g in d.get("genres") or [] if g.get("name")]
+    return {
+        "id": str(tid), "kind": "tv" if kind == "tv" else "movie",
+        "title": title or "", "year": date[:4], "tagline": d.get("tagline") or "",
+        "overview": d.get("overview") or "", "runtime": runtime, "run": run,
+        "status": d.get("status") or "",
+        "rating": round(d.get("vote_average") or 0, 1), "votes": d.get("vote_count") or 0,
+        "genres": genres, "directors": made_by[:3], "cast": cast,
+        "tags": tile_tags(genres, keyword_names(d), date[:4], "tvshow" if kind == "tv" else "movie"),
+        "poster": POSTER + d["poster_path"] if d.get("poster_path") else None,
+        "backdrop": BACKDROP + d["backdrop_path"] if d.get("backdrop_path") else None,
+    }
+
+
+def startup_check():
+    """Once, a little after start: look at the folders for anything new or
+    gone, then work the suggestions out again if the library changed or
+    they're over a week old. In the background throughout — the page
+    shows what it has until the new set is ready."""
+    try:
+        if not LIBSCAN.get("running"):
+            library_scan_worker()
+        r = LIBSCAN.get("result") or {}
+        changed = any((r.get(k) or 0) for k in ("movies", "episodes", "removed"))
+        if not CONFIG.get("tmdb_key") or SCAN.get("running"):
+            return
+        stale = (not SCAN.get("result")
+                 or time.time() - (SCAN.get("finished_at") or 0) > REC_STALE_DAYS * 86400)
+        if changed or stale:
+            scan_worker(bool(CONFIG.get("hide_obvious", True)))
+    except Exception:
+        log_problem("start-up check")
+
+
+# ===========================================================================
 # SORTING NEW DOWNLOADS
 # ===========================================================================
 #
@@ -6599,7 +6938,7 @@ def library_scan_worker():
 def scan_worker(hide_obvious):
     try:
         SCAN.update(running=True, error=None, step="Reading your library",
-                    done=0, total=9)
+                    done=0, total=10)
         LIB.load(force=True)
         budget = Budget(BUDGET)
         owned = owned_movie_keys(LIB.movies)
@@ -6630,6 +6969,10 @@ def scan_worker(hide_obvious):
         SCAN.update(step="Seeing what would fill your channels", done=8)
         channels = find_channel_fill(budget, owned, owned_shows, hide_obvious) if has_key else []
 
+        SCAN.update(step="Finding more on the subjects you're into", done=9)
+        subjects = (find_subjects(budget, owned, owned_shows, hide_obvious, profile)
+                    if has_key and profile else [])
+
         SCAN["result"] = {
             "has_key": has_key,
             "gaps": gaps,
@@ -6639,6 +6982,7 @@ def scan_worker(hide_obvious):
             "bangers": bangers,
             "shows": shows,
             "channels": channels,
+            "subjects": subjects,
             "profile": profile_summary(profile) if profile else None,
             "counts": {
                 "movies": len(LIB.movies),
@@ -12812,6 +13156,15 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/movie":
                 return self.send_json(movie_detail_payload(one("id", "0")))
 
+            if route == "/api/recs/home":
+                return self.send_json(recs_home())
+
+            if route == "/api/recs/row":
+                return self.send_json(rec_row_all(one("id", "")))
+
+            if route == "/api/suggestion":
+                return self.send_json(suggestion_detail(one("id", ""), one("kind", "movie")))
+
             if route == "/api/brief":
                 # Who made a film you DON'T own. Fetched one at a time as you
                 # hover rather than for all forty-five at once: each is a TMDB
@@ -12924,7 +13277,13 @@ class Handler(BaseHTTPRequestHandler):
                 phone_forget(str(data.get("id") or ""))
                 return self.send_json(phone_link_state())
 
+            if route == "/api/recs/refresh":
+                return self.send_json(recs_home(refresh=True))
+
             if route == "/api/scan":
+                # Kept for the start-up check and the background refills.
+                CONFIG["hide_obvious"] = bool(data.get("hide_obvious"))
+                save_json(CONFIG_PATH, CONFIG)
                 if SCAN["running"]:
                     return self.send_json({"ok": True, "already": True})
                 SCAN["result"] = None
@@ -14349,6 +14708,45 @@ section:first-child{margin-top:0}
 .seltray .selstatus .progress{margin-top:8px}
 .seltray .selstatus.bad{color:var(--rust)}
 .seltray .selstatus.good{color:var(--teal)}
+/* ---- the Recommendations home ---- */
+.rechead{display:flex;align-items:center;gap:14px;margin:0 0 18px}
+.rechead .play{padding:9px 22px;font-size:13px}
+.recrow{margin:0 0 26px}
+.recrow-head{display:flex;align-items:baseline;gap:12px;margin:0 0 10px}
+.recrow-head h2{font-family:var(--display);font-weight:800;font-size:20px;margin:0;letter-spacing:-.01em}
+.recrow-head .count{font-family:var(--mono);font-size:10.5px;color:var(--muted);letter-spacing:.08em}
+.recrow-head .seeall{margin-left:auto}
+.recstrip{display:flex;gap:12px;overflow-x:auto;padding:2px 2px 10px;scroll-snap-type:x proximity}
+.reccard{flex:0 0 152px;scroll-snap-align:start;text-align:left;padding:0;border-radius:6px;overflow:hidden;
+  background:var(--ink-2);border:1px solid var(--line);color:inherit;cursor:pointer;display:flex;flex-direction:column;
+  transition:border-color .15s ease,transform .15s ease}
+.reccard:hover{border-color:var(--muted);transform:translateY(-2px)}
+.reccard .art,.reccard .blank{width:100%;aspect-ratio:2/3;object-fit:cover;background:var(--ink-3);display:block}
+.reccard .blank{display:flex;align-items:center;justify-content:center;padding:10px;text-align:center;
+  font-family:var(--display);font-weight:700;font-size:13px;color:var(--muted)}
+.reccard .rcap{padding:8px 9px 10px;display:flex;flex-direction:column;gap:5px}
+.reccard .rcap b{font-family:var(--display);font-weight:700;font-size:13px;line-height:1.2;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.reccard .rcap small{font-family:var(--mono);font-size:10px;color:var(--muted)}
+.reccard .rwhy{font-size:11px;line-height:1.3;color:var(--paper);opacity:.8;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.reccard .ptags{display:flex;flex-wrap:wrap;gap:4px}
+.ptag{font-family:var(--mono);font-size:8.5px;letter-spacing:.05em;text-transform:uppercase;
+  padding:2px 6px;border-radius:999px;white-space:nowrap;
+  color:hsl(var(--h) 85% 78%);background:hsl(var(--h) 60% 45% / .22);
+  border:1px solid hsl(var(--h) 70% 62% / .5)}
+.recback{margin:0 0 14px}
+.recempty-home{max-width:620px}
+/* A suggestion's own page. */
+.sugwhy{font-size:13px;line-height:1.45;color:var(--marigold);margin:2px 0 10px}
+.sugfacts{font-family:var(--mono);font-size:11px;color:var(--muted);letter-spacing:.05em;margin:0 0 8px}
+.sugplot{font-size:14px;line-height:1.55;margin:10px 0 14px}
+.sugcast{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+.sugcast .who{display:flex;align-items:center;gap:8px;padding:5px 10px 5px 5px;border-radius:999px;
+  background:var(--ink-3);font-size:12px}
+.sugcast .who img,.sugcast .who span.ph{width:28px;height:28px;border-radius:50%;object-fit:cover;background:var(--ink-2)}
+.sugcast .who small{display:block;font-family:var(--mono);font-size:9.5px;color:var(--muted)}
+body.android .reccard{flex-basis:124px}
 /* Adding to a drive, from the library itself: the bar under the filters
    (the tray's own styles), the tick button lit while it's open, and ADD
    floating bottom right with what the ticked things come to. */
@@ -15760,6 +16158,18 @@ header.mast .libplaces.offview{visibility:hidden}
        parent, in CSS, rather than by toggling `hidden` on four elements —
        the pager owns its own `hidden` for paging and the two would fight. -->
   <div id="view-upnext">
+  <!-- The home: a row per kind of suggestion, dealt from the scan's pools.
+       REFRESH deals picks not shown before; SEE ALL opens the full lists
+       below, which are the page as it used to be. -->
+  <div id="rechome-wrap">
+    <div class="rechead">
+      <button class="play" id="recrefresh" title="Deal new picks you haven't been shown">REFRESH</button>
+      <span class="scanage" id="recage"></span>
+    </div>
+    <div id="rechome"></div>
+  </div>
+  <div id="reclist" class="hidden">
+  <button class="iconbtn recback" id="recback">‹ BACK TO RECOMMENDATIONS</button>
   <!-- One bar: the action, when it last ran, and the two switches that
        apply to every section. It used to be a full filters band under the
        hub, which put two rows of chrome between the tabs and the first
@@ -15777,6 +16187,7 @@ header.mast .libplaces.offview{visibility:hidden}
   <div id="carried"></div>
   <div id="scan-status"></div>
   <div id="more-out"></div>
+  </div>
   </div>
 
   <!-- ================= WATCH HISTORY =================
@@ -16583,11 +16994,14 @@ function applyLibSection(){
   /* Ticking is what tiles do while adding to a drive, on the shelves. */
   $('#view-library').classList.toggle('selecting', ticking());
   if(recs){
-    renderCarried(); drawHub(); paintMore();
-    /* The last scan is already on the server — written to disk when it
-       finished and read back at startup — so the shelf fills itself
-       instead of asking you to run it again to see what it found. */
-    if(!LAST_SCAN) pollScan();
+    if(recMode === 'home') loadRecHome();
+    else {
+      renderCarried(); drawHub(); paintMore();
+      /* The last scan is already on the server — written to disk when it
+         finished and read back at startup — so the shelf fills itself
+         instead of asking you to run it again to see what it found. */
+      if(!LAST_SCAN) pollScan();
+    }
   }
   if(hist) loadHistory();
 }
@@ -18386,6 +18800,176 @@ function episodeRow(ep, d){
   return row;
 }
 
+/* ================= RECOMMENDATIONS HOME =================
+   A row per kind of suggestion — finishing what you have, films, shows,
+   the subjects and people you're into — each a hand dealt by the server
+   from the scan's pools. REFRESH deals picks you haven't been shown. A tap
+   opens the suggestion's own page; SEE ALL, the full lists underneath. */
+var recMode = 'home';           // 'home' | 'list' — var: read before this line runs
+let recHomeTimer = null;
+
+function recAge(state){
+  const bits = [];
+  if(state.worked_out){
+    const d = (Date.now() / 1000 - state.worked_out) / 86400;
+    bits.push('Worked out ' + (d < 1 ? 'today' : d < 2 ? 'yesterday' : Math.round(d) + ' days ago'));
+  }
+  if(state.waiting) bits.push(state.waiting + ' more waiting');
+  if(state.scanning) bits.push((state.step || 'Finding more') + '…');
+  return bits.join('  ·  ');
+}
+
+function recCard(item){
+  const b = el('button', 'reccard');
+  b.type = 'button';
+  if(item.poster){ const i = el('img', 'art'); i.src = item.poster; i.alt = ''; i.loading = 'lazy'; b.append(i); }
+  else b.append(el('div', 'blank', esc(item.title || '')));
+  const cap = el('div', 'rcap');
+  cap.append(el('b', null, esc(item.title || '')));
+  const sub = [item.year, item.rating ? 'TMDB ' + item.rating : ''].filter(Boolean).join('  ·  ');
+  if(sub) cap.append(el('small', null, esc(String(sub))));
+  if(item.why) cap.append(el('div', 'rwhy', esc(item.why)));
+  const tags = el('div', 'ptags');
+  (item.tags || []).slice(0, 3).forEach(g => {
+    const t = el('span', 'ptag', esc(genreShort(g)));
+    t.style.setProperty('--h', genreHue(g));
+    tags.append(t);
+  });
+  if(tags.children.length) cap.append(tags);
+  b.append(cap);
+  b.onclick = () => item.kind === 'gap' ? openShow(item.show_id) : openSuggestion(item, b);
+  return b;
+}
+
+async function loadRecHome(refresh){
+  clearTimeout(recHomeTimer);
+  $('#rechome-wrap').classList.remove('hidden');
+  $('#reclist').classList.add('hidden');
+  const btn = $('#recrefresh');
+  if(refresh){ btn.disabled = true; btn.textContent = 'DEALING…'; }
+  const state = refresh ? await post('/api/recs/refresh', {}) : await api('/api/recs/home');
+  btn.disabled = false; btn.textContent = 'REFRESH';
+  if(!state || state.error) return;
+  $('#recage').textContent = recAge(state);
+  const out = $('#rechome');
+  out.innerHTML = '';
+  if(state.empty){
+    out.innerHTML = '<div class="recempty recempty-home"><h2>' + (state.scanning
+      ? 'Working out suggestions…</h2><p>Reading your library and your ratings, then asking TMDB. '
+        + 'The first time takes a minute or two; after that it\'s quick.</p>'
+      : state.has_key
+        ? 'Nothing worked out yet</h2><p>Next Up works these out by itself at start-up. '
+          + 'Or press <b>See all</b> below and <b>Find what\'s missing</b> to do it now.</p>'
+        : 'Suggestions need a TMDB key</h2><p>Add a free one on the Settings tab. Missing episodes '
+          + 'still work without it — under See all.</p>') + '</div>';
+    const all = el('button', 'iconbtn', 'SEE ALL');
+    all.onclick = () => seeAll({see_all: 'episodes'});
+    out.append(all);
+  }
+  state.rows.forEach(row => {
+    const sec = el('section', 'recrow');
+    const head = el('div', 'recrow-head');
+    head.append(el('h2', null, esc(row.title)));
+    head.append(el('span', 'count', row.total + (row.total === 1 ? ' PICK' : ' PICKS')));
+    const more = el('button', 'iconbtn seeall', 'SEE ALL');
+    more.onclick = () => seeAll(row);
+    head.append(more);
+    sec.append(head);
+    const strip = el('div', 'recstrip');
+    row.items.forEach(it => strip.append(recCard(it)));
+    sec.append(strip);
+    out.append(sec);
+  });
+  /* While suggestions are being worked out, look again now and then and
+     show them as soon as they're ready. */
+  if(state.scanning) recHomeTimer = setTimeout(() => { if(recMode === 'home') loadRecHome(); }, 4000);
+}
+$('#recrefresh').onclick = () => loadRecHome(true);
+
+/* The full list for a row: the section that already lists that kind, or —
+   for a subject, which has none — every pick in its pool. */
+function seeAll(row){
+  recMode = 'list';
+  section = row.see_all || ('row:' + row.id);
+  $('#rechome-wrap').classList.add('hidden');
+  $('#reclist').classList.remove('hidden');
+  renderCarried(); drawHub(); paintMore();
+  if(!LAST_SCAN) pollScan();
+  const panel = $('#view-upnext');
+  if(panel) panel.scrollTop = 0;
+}
+$('#recback').onclick = () => { recMode = 'home'; loadRecHome(); };
+
+async function renderRowAll(out){
+  const id = section.slice(4);
+  const d = await api('/api/recs/row?id=' + encodeURIComponent(id));
+  const s = el('section');
+  s.append(sechead(d.title || 'Suggestions', (d.items || []).length + ' PICKS'));
+  const grid = el('div', 'recstrip recgridall');
+  (d.items || []).forEach(it => grid.append(recCard(it)));
+  s.append(grid);
+  out.append(s);
+}
+
+/* A suggestion's own page: what it is, who made it and who's in it, how
+   long, what TMDB thinks — and why it's here at all. */
+async function openSuggestion(item, cardEl){
+  const body = sheet();
+  body.append(el('p', 'empty', 'Looking it up…'));
+  const d = await api('/api/suggestion?' + new URLSearchParams({id: item.id, kind: item.kind === 'tv' ? 'tv' : 'movie'}));
+  body.innerHTML = '';
+  const x = el('button', 'closex', 'CLOSE ✕');
+  x.onclick = () => body.closest('.sheet').remove();
+  body.append(x);
+  if(!d || d.error || !d.title){
+    body.append(el('p', 'empty', 'TMDB had nothing more on this one.'));
+    return;
+  }
+  if(d.backdrop){
+    body.classList.add('hashero');
+    const hero = el('div', 'hero');
+    hero.style.backgroundImage = 'url("' + d.backdrop + '")';
+    body.append(hero);
+  }
+  if(d.poster){ const i = el('img'); i.src = d.poster; i.alt = ''; body.append(i); }
+  else body.append(el('div'));
+  const right = el('div');
+  right.append(el('h2', null, esc(d.title) + (d.year ? ' <span class="yr">(' + esc(d.year) + ')</span>' : '')));
+  if(d.tagline) right.append(el('p', 'tagline', esc(d.tagline)));
+  const facts = [d.runtime ? d.runtime + ' min' : '', d.run, d.rating ? 'TMDB ' + d.rating : '',
+                 d.votes ? d.votes.toLocaleString() + ' votes' : '', d.status && d.kind === 'tv' ? d.status : '']
+                .filter(Boolean);
+  if(facts.length) right.append(el('div', 'sugfacts', esc(facts.join('  ·  '))));
+  const tags = el('div', 'ptags');
+  (d.tags || []).forEach(g => { const t = el('span', 'ptag', esc(genreShort(g))); t.style.setProperty('--h', genreHue(g)); tags.append(t); });
+  if(tags.children.length) right.append(tags);
+  if(item.why) right.append(el('p', 'sugwhy', 'Why it\'s here: ' + esc(item.why)));
+  if(d.overview) right.append(el('p', 'sugplot', esc(d.overview)));
+  if(d.directors.length) right.append(el('div', 'sugfacts',
+    esc((d.kind === 'tv' ? 'Created by ' : 'Directed by ') + d.directors.join(', '))));
+  if(d.cast.length){
+    const cast = el('div', 'sugcast');
+    d.cast.forEach(c => {
+      const who = el('div', 'who');
+      if(c.photo){ const i = el('img'); i.src = c.photo; i.alt = ''; i.loading = 'lazy'; who.append(i); }
+      else who.append(el('span', 'ph'));
+      who.append(el('div', null, esc(c.name) + (c.character ? '<small>' + esc(c.character) + '</small>' : '')));
+      cast.append(who);
+    });
+    right.append(cast);
+  }
+  const btns = el('div', 'rowbtns');
+  const hide = el('button', 'iconbtn', 'NOT FOR ME — HIDE');
+  hide.onclick = async () => {
+    await post('/api/dismiss', {key: item.key});
+    body.closest('.sheet').remove();
+    if(cardEl) cardEl.remove();
+  };
+  btns.append(hide);
+  right.append(btns);
+  body.append(right);
+}
+
 /* ================= UP NEXT ================= */
 let LAST_SCAN = null;
 let section = 'episodes';
@@ -18519,6 +19103,7 @@ function paintMore(){
       '<h3>Running without a TMDB key</h3><p>Only Missing episodes works without one, and only for holes inside seasons you already own. '+
       'Add a free TMDB key on the Settings tab for the rest.</p>'));
   }
+  if(section.startsWith('row:')){ renderRowAll(out); return; }
   const f = filtered();
   ({episodes:renderEpisodes, series:renderSeries,
     directors:renderDirectors, actors:renderActors, foryou:renderForYou,
@@ -21654,6 +22239,8 @@ def serve_in_thread(port=None, host="127.0.0.1", tries=20):
                          name="playback monitor").start()
     threading.Thread(target=sync_loop, daemon=True, name="sync").start()
     threading.Thread(target=refresh_watch_scores, daemon=True, name="watch scores").start()
+    if CONFIG.get("startup_check", True):
+        threading.Timer(8.0, startup_check).start()
     _SERVER[0] = server
     _SERVING[0] = server.server_address[1]
     return _SERVING[0]

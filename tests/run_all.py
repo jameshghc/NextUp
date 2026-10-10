@@ -17,6 +17,7 @@ SUITES = [
     ("audio delay per file", "audio_delay_test.py"),
     ("three tags per poster", "tile_tags_test.py"),
     ("one show per TMDB id", "show_merge_test.py"),
+    ("recommendations home", "rec_home_test.py"),
     ("are you still watching", "afk_test.py"),
     ("port release", "port_test.py"),
     ("port release, end to end", "port_e2e.py"),

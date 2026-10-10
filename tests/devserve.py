@@ -39,7 +39,12 @@ def isolate(n, sandbox):
     n.CONFIG["sync_folder"] = ""
     with open(n.CONFIG_PATH, "w", encoding="utf-8") as fh:
         json.dump(n.CONFIG, fh)
-    n.RECS_PATH = os.path.join(sandbox, "nextup_recs.json")
+    # The last suggestions, copied in so the Recommendations page has
+    # something to show without a scan. Written back only in the sandbox.
+    recs = os.path.join(sandbox, "nextup_recs.json")
+    if os.path.isfile(n.RECS_PATH):
+        shutil.copyfile(n.RECS_PATH, recs)
+    n.RECS_PATH = recs
     n.PLAY_STATE_PATH = os.path.join(sandbox, "nextup_playing.json")
     n.WATCH_LATER = os.path.join(sandbox, "nextup_resume")
     n.ERROR_LOG = os.path.join(sandbox, "nextup_errors.log")

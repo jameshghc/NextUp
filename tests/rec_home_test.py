@@ -1,0 +1,147 @@
+"""The Recommendations home: rows dealt from the scan's pools, Refresh dealing
+picks not shown before, a details page for things you don't own, and the
+start-up check. TMDB is faked; the library is a sandboxed copy."""
+import sys, os, json, tempfile, time, threading, urllib.request
+sys.path.insert(0, r"X:\NextUp"); os.chdir(r"X:\NextUp"); sys.argv = ["nextup.py"]
+import nextup as n
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+here = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, here)
+from devserve import isolate
+isolate(n, os.path.join(tempfile.gettempdir(), "nextup_rechome"))
+# No real TMDB from here: a refill the home might ask for would otherwise run.
+n.CONFIG["tmdb_key"] = ""
+
+results = []
+def check(name, ok, detail=""):
+    ok = bool(ok); results.append(ok)
+    print("%s  %s%s" % ("PASS" if ok else "FAIL", name, ("  -- %s" % (detail,)) if detail != "" else ""))
+
+# --- what counts as a subject ---------------------------------------------------------
+check("a mood isn't a subject", not any(n.is_subject_keyword(w) for w in
+      ("suspenseful", "complex", "audacious", "intense", "dramatic", "inspirational")))
+check("a thing is", all(n.is_subject_keyword(w) for w in
+      ("space opera", "heist", "artificial intelligence (a.i.)", "time travel", "world war ii")))
+
+# --- a pretend scan result -------------------------------------------------------------
+def film(i, prefix="banger", **kw):
+    d = {"key": "%s:%d" % (prefix, i), "id": str(900000 + i), "title": "Film %d" % i, "year": "2001",
+         "rating": 7.5, "votes": 900, "genres": ["Drama"], "poster": None, "overview": "",
+         "why": ["heists"]}
+    d.update(kw)
+    return d
+def show(i):
+    return dict(film(i, "tvrec", title="Show %d" % i), kind="tv")
+n.LIB.load(force=True)
+owned_tmdb = next(str(m["uniqueid"]["tmdb"]) for m in n.LIB.movies if (m.get("uniqueid") or {}).get("tmdb"))
+films = [film(i) for i in range(20)]
+films[3]["id"] = owned_tmdb                      # bought since the scan
+n.DISMISSED.add("banger:5")                      # hidden by you
+RESULT = {
+    "has_key": True,
+    "gaps": [{"key": "show:%d" % (100 + i), "title": "Gap Show %d" % i, "year": 2010, "art": None,
+              "missing_total": 2 + i, "seasons": [], "in_progress": True, "yours": 8,
+              "genres": ["Comedy"], "rating": 8.0, "source": "tmdb"} for i in range(3)],
+    "collections": [{"key": "coll:%d" % i, "name": "Saga %d" % i, "have": 2, "total": 4,
+                     "missing": [film(50 + i * 2, "collm"), film(51 + i * 2, "collm")]} for i in range(2)],
+    # As the scan writes them: a person's missing films carry no key of their own.
+    "directors": [{"key": "dir:1", "name": "Ridley Scott", "owned": 12, "owned_titles": [],
+                   "missing": [dict((k, v) for k, v in film(70 + i).items() if k != "key") for i in range(5)]}],
+    "actors": [{"key": "act:2", "name": "Florence Pugh", "owned": 4, "owned_titles": [],
+                "missing": [dict((k, v) for k, v in film(80 + i).items() if k != "key") for i in range(3)]}],
+    "bangers": films,
+    "shows": [show(i) for i in range(12)],
+    "channels": [],
+    "subjects": [{"key": "subject:kw:1", "name": "Heists", "items": [film(200 + i, "subj") for i in range(10)]},
+                 {"key": "subject:genre:36", "name": "History", "items": [film(300 + i, "subj") for i in range(6)]}],
+}
+n.SCAN["result"] = RESULT
+n.SCAN["finished_at"] = time.time()
+
+home = n.recs_home()
+ids = [r["id"] for r in home["rows"]]
+check("rows in order: finish, films, shows, subjects, people",
+      ids == ["finish", "films", "shows", "subject:kw:1", "subject:genre:36", "dir:1", "act:2"], ids)
+films_row = next(r for r in home["rows"] if r["id"] == "films")
+check("eight to a row", len(films_row["items"]) == 8, len(films_row["items"]))
+check("each pick carries its reason and three tags",
+      all(it.get("why") and len(it.get("tags") or []) == 3 for it in films_row["items"]),
+      films_row["items"][0])
+keys1 = [it["key"] for it in films_row["items"]]
+check("nothing you've hidden", "banger:5" not in keys1, keys1)
+check("nothing you own now", "banger:3" not in keys1, keys1)
+finish = next(r for r in home["rows"] if r["id"] == "finish")
+check("finishing what you have mixes missing episodes and the rest of a series",
+      any(it["key"].startswith("show:") for it in finish["items"])
+      and any(it["key"].startswith("collm:") for it in finish["items"]), [i["key"] for i in finish["items"]])
+check("a missing-episodes pick opens the show you have", all(it.get("show_id") for it in finish["items"]
+                                                          if it["key"].startswith("show:")))
+check("the people rows say whose", next(r for r in home["rows"] if r["id"] == "dir:1")["title"]
+      == "More from Ridley Scott", [r["title"] for r in home["rows"]])
+
+again = n.recs_home()
+check("what's dealt stays put until Refresh",
+      [it["key"] for it in next(r for r in again["rows"] if r["id"] == "films")["items"]] == keys1)
+
+ref = n.recs_home(refresh=True)
+keys2 = [it["key"] for it in next(r for r in ref["rows"] if r["id"] == "films")["items"]]
+check("Refresh deals films not shown before", len(keys2) == 8 and not set(keys1) & set(keys2), (keys1, keys2))
+# 20 films, less the hidden one and the owned one, is 18: two hands of 8 leave 2.
+ref2 = n.recs_home(refresh=True)
+row3 = next(r for r in ref2["rows"] if r["id"] == "films")
+check("a row that runs dry starts round again, still full", len(row3["items"]) == 8, len(row3["items"]))
+check("and says it's running low", row3.get("low"), row3.get("low"))
+check("the page knows when it was worked out and how many wait", ref2.get("worked_out") and "waiting" in ref2)
+
+# --- with nothing scanned yet -----------------------------------------------------------
+n.SCAN["result"] = None
+empty = n.recs_home()
+check("nothing scanned yet: no rows, and it says so", empty["rows"] == [] and empty.get("empty"), empty)
+n.SCAN["result"] = RESULT
+
+# --- a details page for something you don't own -------------------------------------------
+def fake_tmdb(path, params=None, **k):
+    if path.startswith("/movie/"):
+        return {"id": 900001, "title": "Film 1", "release_date": "2001-05-01", "overview": "A heist.",
+                "tagline": "Steal it.", "runtime": 118, "vote_average": 7.6, "vote_count": 1200,
+                "genres": [{"id": 80, "name": "Crime"}], "poster_path": "/p.jpg", "backdrop_path": "/b.jpg",
+                "credits": {"cast": [{"name": "A Actor", "character": "Thief", "profile_path": "/a.jpg"}],
+                            "crew": [{"job": "Director", "name": "D Director"}]},
+                "keywords": {"keywords": [{"name": "heist"}]}}
+    return {}
+n.tmdb = fake_tmdb
+d = n.suggestion_detail("900001", "movie")
+check("a suggestion's details: plot, cast, who made it, how long, the score",
+      d["title"] == "Film 1" and d["overview"] == "A heist." and d["cast"][0]["name"] == "A Actor"
+      and d["directors"] == ["D Director"] and d["runtime"] == 118 and d["rating"] == 7.6, d)
+
+# --- the start-up check ------------------------------------------------------------------
+ran = {"lib": 0, "recs": 0}
+lib_result = {"value": {"movies": 0, "episodes": 0, "unmatched": 0, "removed": 0}}
+n.library_scan_worker = lambda: (ran.__setitem__("lib", ran["lib"] + 1),
+                                 n.LIBSCAN.update(result=lib_result["value"]))
+n.scan_worker = lambda hide_obvious: ran.__setitem__("recs", ran["recs"] + 1)
+n.CONFIG["tmdb_key"] = "k"
+n.SCAN["finished_at"] = time.time()
+n.startup_check()
+check("start-up looks at the folders", ran["lib"] == 1, ran)
+check("an unchanged library and fresh suggestions: no new scan", ran["recs"] == 0, ran)
+lib_result["value"] = {"movies": 2, "episodes": 0, "unmatched": 0, "removed": 0}
+n.startup_check()
+check("new files: suggestions worked out again", ran["recs"] == 1, ran)
+lib_result["value"] = {"movies": 0, "episodes": 0, "unmatched": 0, "removed": 0}
+n.SCAN["finished_at"] = time.time() - 8 * 86400
+n.startup_check()
+check("a week old: worked out again", ran["recs"] == 2, ran)
+n.CONFIG["tmdb_key"] = ""
+n.startup_check()
+check("without a TMDB key there's nothing to work out", ran["recs"] == 2, ran)
+
+# --- the page --------------------------------------------------------------------------
+page = n.PAGE
+check("the page has the home, Refresh and the suggestion details",
+      'id="rechome"' in page and 'id="recrefresh"' in page and "function openSuggestion(" in page
+      and "function seeAll(" in page)
+
+print("\n%d/%d passed" % (sum(results), len(results)))
+sys.exit(0 if all(results) else 1)

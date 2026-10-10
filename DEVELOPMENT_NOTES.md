@@ -16,6 +16,52 @@ at the top.
 
 ---
 
+## 2026-10-10 — v0.1.66, a home for Recommendations
+
+Asked for: a home page with key picks across films, TV and the user's other
+interests (chosen: subjects, people, finishing what you have), a details page
+on tap, a quiet library check at start-up, and REFRESH dealing new picks.
+Approach A of three — pools dealt from — chosen; the user skipped the written
+spec ("I'll need to see it so let's just build") and judged it on screen.
+
+- **Pools.** The scan is unchanged except for a tenth step, `find_subjects`:
+  the two strongest keywords you rate highly that name a THING
+  (`is_subject_keyword` — TMDB files moods like "suspenseful", "complex",
+  "audacious" as keywords; `TONE_WORDS` keeps them out), then genres you
+  rate above your middle, to make three. Each: discover/movie two pages, plus
+  discover/tv for a keyword (TV has its own genre list). Budget "subjects": 12.
+- **Rows.** `_rec_rows` builds, best first: Finish what you have (missing
+  episodes, in progress and best-rated first, with the next film of each
+  series you've started, two gaps to one film), Films for you (bangers),
+  Shows for you, a row per subject, then three people — directors and actors
+  in turn (sorted together, actors crowd directors out). Each pick is checked
+  again: not hidden, not owned since the scan. Cards carry `why` and
+  `tile_tags`.
+- **Dealing.** `_deal` keeps a hand of 8 per row in `rec_hand` until REFRESH,
+  which marks it in `rec_seen` and deals the next unseen. A pool short of a
+  hand goes round again (its seen keys forgotten, the hand just shown last)
+  and is "low"; a low row on REFRESH starts a refill scan in the background,
+  at most hourly. No TMDB on any REFRESH.
+- **Start-up.** `startup_check`, 8 s after serving: `library_scan_worker`,
+  then `scan_worker` if files came or went, or the suggestions are over
+  `REC_STALE_DAYS` (7) old — background, the page shows what it has. The
+  "hide the obvious" choice is now kept in config for it.
+- **Details.** `suggestion_detail` (cached TMDB): title, tagline, plot,
+  length or run, score and votes, tags, director or creators, cast with
+  photos. The page: `openSuggestion` — hero, poster, why it's here, NOT FOR
+  ME — HIDE. A missing-episodes pick opens your own show instead.
+- **The page.** `#rechome-wrap` (REFRESH, "Worked out today · 166 more
+  waiting", the rows as sideways strips) over `#reclist`, which is the old
+  page whole — hub cards, Find what's missing, score filter, Hide the
+  obvious — reached by SEE ALL and left by BACK TO RECOMMENDATIONS. A
+  subject's SEE ALL lists its whole pool (`/api/recs/row`).
+- Checked in the sandbox on the real library after a fresh scan: nine rows
+  (AI, space opera, crime; Ridley Scott, Brad Pitt, Martin Scorsese), 166
+  more waiting; REFRESH changed six rows (the people rows hold exactly one
+  hand), details for The Informer, SEE ALL and back.
+- tests/rec_home_test.py (23), in run_all. devserve copies the saved
+  suggestions into the sandbox.
+
 ## 2026-10-10 — v0.1.65, one show per TMDB id: X-Men '97, for good
 
 Two X-Men '97 tiles. The cause, from the files: a 2024 release folder
