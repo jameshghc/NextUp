@@ -109,7 +109,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.70"
+APP_VERSION = "0.1.71"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -5940,8 +5940,10 @@ def reason_reception(item, kind):
                     "Scores %.1f on TMDB." % rating, chips, 3)
 
     if pct >= 98:
-        body = ("At %.1f it's the best-rated thing in your entire library, and "
-                "and you still haven't rated it." % rating)
+        mine = item.get("userrating") or 0
+        body = ("At %.1f it's the best-rated thing in your entire library, %s."
+                % (rating, "and you gave it %s yourself" % (round(mine * 2) / 2.0)
+                   if mine else "and you still haven't rated it"))
         weight = 11
     elif pct >= 75:
         body = ("Scores %.1f on TMDB, better than %d%% of everything else you "
@@ -15258,7 +15260,7 @@ body.android header.mast .offview{display:none}
    width, with its title on the poster and PLAY under it — on screen without
    scrolling; then the filters folded to one line, and the reasons on
    request. The PC's Now is untouched. */
-.nowchooser,.nowfits,.whythis{display:none}
+.nowchooser,.nowfits{display:none}
 body.android #view-now:not(.hidden){display:flex;flex-direction:column}
 body.android #view-now > #unfinished-sec{order:1}
 body.android #view-now > #tonight-out{order:2}
@@ -15266,7 +15268,6 @@ body.android #view-now > #tonight-out{order:2}
    that produced them. */
 body.android #view-now > .nowfits{order:3}
 body.android #view-now > .nowchooser{order:4}
-body.android #view-now > .whythis{order:5}
 body.android #view-now > #reasons-out{order:6}
 body.android #view-now > .filters{display:none}
 /* The chooser: one row of three, then the genres sliding sideways, each in
@@ -15293,9 +15294,7 @@ body.android .nowfits.hidden{display:none}
 .fitcard b{display:block;font-family:var(--display);font-size:11.5px;line-height:1.2;padding:5px 5px 6px;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 body.android #view-now .spin{display:none}
-body.android .whythis{display:block;align-self:flex-start;margin:0 0 10px}
 body.android #view-now > #reasons-out{display:none}
-body.android #view-now.why-open > #reasons-out{display:block}
 /* The Continue strip: sideways, compact. */
 body.android #unfinished-sec{margin:4px 0 12px}
 body.android #unfinished-sec .sechead{margin-bottom:8px}
@@ -15326,6 +15325,10 @@ body.android #unfinished-sec .alt p.empty:empty{display:none}
 .phonepick .ppinfo .meta{margin:4px 0 8px}
 .phonepick .plot{margin:0 0 10px;cursor:pointer}
 .phonepick .plot.clamp{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.phonepick .ppwhy{margin:0 0 12px;padding:8px 11px;border-left:2px solid var(--marigold);
+  background:rgba(224,163,62,.07);font-size:13px;line-height:1.4;color:var(--paper);
+  display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.phonepick .ppwhy:empty{display:none}
 .phonepick .pptop.swiping{transition:none}
 /* Posters' names centred under them on the phone, which the user prefers
    there; the PC keeps them ranged left. */
@@ -16240,7 +16243,6 @@ header.mast .libplaces.offview{visibility:hidden}
   </div>
 
   <div id="tonight-out"><p class="empty">Loading your library…</p></div>
-  <button class="iconbtn whythis" id="whythis" type="button">WHY THIS? ▾</button>
   <div id="reasons-out"></div>
 
   <section id="unfinished-sec" class="hidden">
@@ -17049,6 +17051,18 @@ function phonePick(p, poster, right, btns, problem, meta, rateSlot){
     plot.onclick = () => plot.classList.toggle('clamp');
     info.append(plot);
   }
+  /* Why this, short and sharp: the strongest one or two of the reasons the
+     PC shows as cards, a sentence each, between the plot and your rating. */
+  const why = el('p', 'ppwhy');
+  info.append(why);
+  (p._why || api('/api/why?type=' + encodeURIComponent(p.type) + '&id=' + p.id))
+    .then(r => {
+      const cards = (r && r.cards || []).slice().sort((a, b) => (b.weight || 0) - (a.weight || 0));
+      const first = t => (String(t || '').match(/^.*?[.!?](\s|$)/) || [String(t || '')])[0].trim();
+      why.textContent = cards.slice(0, 2).map(c => first(c.body)).filter(Boolean).join(' ');
+      if(!why.textContent) why.remove();
+    })
+    .catch(() => why.remove());
   info.append(rateSlot);
   card.append(info);
   return card;
@@ -17134,10 +17148,6 @@ function drawFits(data){
   box.append(grid);
 }
 
-$('#whythis').onclick = () => {
-  const open = $('#view-now').classList.toggle('why-open');
-  $('#whythis').textContent = open ? 'WHY THIS? ▴' : 'WHY THIS? ▾';
-};
 drawChooser();
 
 function altCard(p){

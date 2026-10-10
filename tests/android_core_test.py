@@ -273,8 +273,8 @@ check("phone: a tap shows the peek — facts and colour-coded genres up top, PLA
       and "function genreHue(" in page_src and "peektop" in page_src)
 check("phone: a second tap on the poster closes the peek rather than opening details",
       "if(b.classList.contains('peeking')){ closePeeks(); return; }" in page_src)
-check("phone Now: the pick in its own layout, Why this? on request",
-      "function phonePick(" in page_src and 'id="whythis"' in page_src
+check("phone Now: the pick in its own layout, a short why between the plot and the rating",
+      "function phonePick(" in page_src and "'ppwhy'" in page_src and 'id="whythis"' not in page_src
       and "body.android #view-now:not(.hidden)" in page_src)
 check("phone Favourites shows every favourite, not just the ones on the phone",
       "favWidened = true" in page_src)

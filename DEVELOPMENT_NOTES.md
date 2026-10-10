@@ -16,6 +16,20 @@ at the top.
 
 ---
 
+## 2026-10-10 — v0.1.71, the phone's "why this" moves into the card
+
+"The 'why this' tiles at the bottom of the Now page is annoying." On the
+phone the WHY THIS? button and its reason cards are gone; `phonePick` puts a
+short why (`.ppwhy`) between the plot and your rating, now the card's last
+thing: the first sentence of each of the two strongest /api/why cards, by
+weight ("You own 22 episodes of this series. Led by Dan Castellaneta…"),
+three lines at most, edged in marigold.
+
+Also in the reception reason: "the best-rated thing in your entire library,
+and and you still haven't rated it" — doubled "and", and said whether you'd
+rated it or not (Parasite, rated 9, got it). Now "and you gave it 9
+yourself" when you have.
+
 ## 2026-10-10 — v0.1.70, the phone's Now: a chooser, corner marks, smaller Continue
 
 The user's feedback on v0.1.68–69, phone only:
