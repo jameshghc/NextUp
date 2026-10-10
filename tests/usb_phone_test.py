@@ -239,5 +239,47 @@ c = n.db(); after = c.execute("SELECT COUNT(*) FROM history").fetchone()[0]; c.c
 check("copied ratings aren't new ratings: nothing added to your history", after == events_before,
       (events_before, after))
 
+# --- favourites and the watchlist travel with the catalogue --------------------------------
+fav_snap = {"kind": "nextup-library-snapshot", "version": 1, "device": "DESKTOP-TEST",
+            "exported_at": "2026-10-10 12:00:00", "app_version": n.APP_VERSION,
+            "movies": [{"tmdb_id": "fav-away", "title": "Faraway Favourite", "year": 1999, "genres": "",
+                        "directors": "", "cast_names": "", "plot": "", "poster": None, "tmdb_rating": 7,
+                        "runtime": 100, "userrating": 0, "playcount": 0,
+                        "favourited_at": "2026-10-01 20:00:00", "watchlisted_at": None},
+                       {"tmdb_id": "wl-away", "title": "Faraway Watchlist", "year": 2001, "genres": "",
+                        "directors": "", "cast_names": "", "plot": "", "poster": None, "tmdb_rating": 7,
+                        "runtime": 100, "userrating": 0, "playcount": 0,
+                        "favourited_at": None, "watchlisted_at": "2026-10-01 20:00:00"},
+                       {"tmdb_id": "fav-here", "title": "Here Favourite", "year": 2003, "genres": "",
+                        "directors": "", "cast_names": "", "plot": "", "poster": None, "tmdb_rating": 7,
+                        "runtime": 100, "userrating": 0, "playcount": 0,
+                        "favourited_at": "2026-10-02 20:00:00", "watchlisted_at": None}],
+            "shows": [{"tmdb_id": "favshow-away", "title": "Faraway Fav Show", "year": 2010, "genres": "",
+                       "plot": "", "poster": None, "tmdb_rating": 8, "userrating": 0, "episode_count": 3,
+                       "favourited_at": "2026-10-03 20:00:00", "watchlisted_at": None}],
+            "episodes": []}
+_c = n.db()
+here_id = _c.execute("INSERT INTO movies (path,title,year,tmdb_id) VALUES (?,?,?,?)",
+                     ("/phone/here-fav.mkv", "Here Favourite", 2003, "fav-here")).lastrowid
+_c.commit(); _c.close()
+n.import_library_snapshot(fav_snap, fetch_art=False)
+n.LOCAL.loaded_at = 0; n.LIB.loaded_at = 0
+favs = [i["title"] for i in n.browse_library("all", "", "title", "favourite", 2000, 0)["items"]]
+check("Favourites shows a favourite that isn't on this device", "Faraway Favourite" in favs, favs[:8])
+check("shows too", "Faraway Fav Show" in favs, favs[:8])
+wl = [i["title"] for i in n.browse_library("all", "", "title", "watchlist", 2000, 0)["items"]]
+check("and the Watchlist, what's on it elsewhere", "Faraway Watchlist" in wl, wl[:8])
+away = [i for i in n.browse_library("film", "faraway favourite", "title", "all", 50, 0)["items"]]
+check("a greyed favourite wears its heart", away and away[0].get("favourited") and away[0].get("elsewhere"),
+      away[:1])
+_c = n.db()
+check("a favourite that is on this device takes the mark too",
+      _c.execute("SELECT favourited_at FROM movies WHERE id=?", (here_id,)).fetchone()[0])
+_c.close()
+check("the PC's catalogue carries both marks",
+      all(k in (n.build_library_snapshot()["movies"] or [{}])[0] for k in ("favourited_at", "watchlisted_at")))
+check("progress stays a mark of this device only",
+      not any(i.get("elsewhere") for i in n.browse_library("all", "", "title", "progress", 2000, 0)["items"]))
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

@@ -16,6 +16,24 @@ at the top.
 
 ---
 
+## 2026-10-10 — v0.1.67, favourites and the watchlist are the whole library's
+
+"The mobile app doesn't bring along the favourites… I want it to see the
+whole library even if it's not available locally — including favourites."
+Two causes: the catalogue never carried favourited_at / watchlisted_at, and
+browse_library dropped greyed (elsewhere) rows from the Favourites and
+Watchlist shelves on purpose, as marks "this device keeps".
+
+- snapshot_movies / snapshot_shows gain favourited_at and watchlisted_at;
+  exported, imported, and worn by elsewhere rows (the heart shows).
+- The Favourites and Watchlist shelves keep greyed rows; Part way through
+  ("progress") still doesn't — how far you got is this device's own.
+- `adopt_snapshot_marks` also gives films and shows on the phone the PC's
+  favourite and watchlist marks where they have none (as with ratings).
+- A favourite made on the phone reaches the PC through the cable swap
+  (v0.1.64); one on a film the phone hasn't got can't be made there.
+- usb_phone_test +7.
+
 ## 2026-10-10 — v0.1.66, a home for Recommendations
 
 Asked for: a home page with key picks across films, TV and the user's other

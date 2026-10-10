@@ -109,7 +109,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.66"
+APP_VERSION = "0.1.67"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -1816,6 +1816,12 @@ LATER_COLUMNS = [
     ("shows", "keywords", "TEXT"),
     ("snapshot_movies", "keywords", "TEXT"),
     ("snapshot_shows", "keywords", "TEXT"),
+    # Favourites and the watchlist are the whole library's, not one
+    # device's: a phone shows them on the films it hasn't got as well.
+    ("snapshot_movies", "favourited_at", "TEXT"),
+    ("snapshot_movies", "watchlisted_at", "TEXT"),
+    ("snapshot_shows", "favourited_at", "TEXT"),
+    ("snapshot_shows", "watchlisted_at", "TEXT"),
     ("movies", "tagline", "TEXT"),
     ("movies", "country", "TEXT"),
     ("shows", "cast_names", "TEXT"),
@@ -5338,11 +5344,13 @@ def browse_library(kind, query, sort, shelf, limit, offset):
     for name in shelves:
         if name in tests:
             rows = [r for r in rows if tests[name](r)]
-    # Progress, the watchlist and favourites are marks this device keeps, so
-    # a greyed row from elsewhere never belongs on them. (Once an `if` in the
-    # middle of a chain of elifs, which made the two after it unreachable:
-    # both shelves showed the whole library from v0.1.20 until noticed.)
-    if shelves & {"progress", "watchlist", "favourite"}:
+    # Progress is this device's own — how far you got here — so a greyed row
+    # from elsewhere never belongs on it. Favourites and the watchlist are
+    # the whole library's and come with the catalogue, so they do: a phone
+    # shows your favourites whether the file is on it or not. (Once an `if`
+    # in the middle of a chain of elifs, which made the shelves after it
+    # unreachable: they showed the whole library from v0.1.20 until noticed.)
+    if "progress" in shelves:
         rows = [r for r in rows if not r.get("elsewhere")]
 
     if query:
@@ -9098,11 +9106,11 @@ def build_library_snapshot():
     conn = db()
     movies = [dict(r) for r in conn.execute(
         "SELECT tmdb_id,title,year,genres,directors,cast_names,plot,poster,"
-        " tmdb_rating,runtime,userrating,playcount,keywords FROM movies"
+        " tmdb_rating,runtime,userrating,playcount,keywords,favourited_at,watchlisted_at FROM movies"
         " WHERE tmdb_id IS NOT NULL AND tmdb_id <> '' ORDER BY title")]
     shows = [dict(r) for r in conn.execute(
-        "SELECT tmdb_id,title,year,genres,plot,poster,tmdb_rating,userrating,keywords"
-        " FROM shows WHERE tmdb_id IS NOT NULL AND tmdb_id <> '' ORDER BY title")]
+        "SELECT tmdb_id,title,year,genres,plot,poster,tmdb_rating,userrating,keywords,"
+        "favourited_at,watchlisted_at FROM shows WHERE tmdb_id IS NOT NULL AND tmdb_id <> '' ORDER BY title")]
     episodes = [dict(r) for r in conn.execute(
         "SELECT s.tmdb_id AS show_tmdb_id, e.season, e.episode, e.title"
         " FROM episodes e JOIN shows s ON s.id = e.show_id"
@@ -9151,23 +9159,25 @@ def import_library_snapshot(payload, fetch_art=True):
         conn.execute(
             "INSERT OR REPLACE INTO snapshot_movies (tmdb_id,title,year,genres,"
             "directors,cast_names,plot,poster,tmdb_rating,runtime,userrating,"
-            "playcount,keywords) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "playcount,keywords,favourited_at,watchlisted_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (str(m.get("tmdb_id")), m.get("title"), m.get("year"),
              m.get("genres"), m.get("directors"), m.get("cast_names"),
              m.get("plot"), m.get("poster"), m.get("tmdb_rating"),
              m.get("runtime"), m.get("userrating") or 0, m.get("playcount") or 0,
-             m.get("keywords")))
+             m.get("keywords"), m.get("favourited_at"), m.get("watchlisted_at")))
     for sh in shows:
         if not sh.get("tmdb_id"):
             continue
         conn.execute(
             "INSERT OR REPLACE INTO snapshot_shows (tmdb_id,title,year,genres,"
-            "plot,poster,tmdb_rating,userrating,episode_count,keywords)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "plot,poster,tmdb_rating,userrating,episode_count,keywords,"
+            "favourited_at,watchlisted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (str(sh.get("tmdb_id")), sh.get("title"), sh.get("year"),
              sh.get("genres"), sh.get("plot"), sh.get("poster"),
              sh.get("tmdb_rating"), sh.get("userrating") or 0,
-             sh.get("episode_count") or 0, sh.get("keywords")))
+             sh.get("episode_count") or 0, sh.get("keywords"),
+             sh.get("favourited_at"), sh.get("watchlisted_at")))
     for e in episodes:
         if not e.get("show_tmdb_id"):
             continue
@@ -9242,6 +9252,13 @@ def adopt_snapshot_marks():
                 " WHERE COALESCE(userrating, 0) = 0 AND tmdb_id IS NOT NULL AND tmdb_id <> ''"
                 " AND EXISTS (SELECT 1 FROM %s s WHERE s.tmdb_id = %s.tmdb_id AND s.userrating > 0)"
                 % (table, snap, table, snap, table), (when,)).rowcount
+        for table, snap in (("movies", "snapshot_movies"), ("shows", "snapshot_shows")):
+            for col in ("favourited_at", "watchlisted_at"):
+                changed += conn.execute(
+                    "UPDATE {t} SET {c} = (SELECT s.{c} FROM {s} s WHERE s.tmdb_id = {t}.tmdb_id)"
+                    " WHERE {c} IS NULL AND tmdb_id IS NOT NULL AND tmdb_id <> ''"
+                    " AND EXISTS (SELECT 1 FROM {s} s WHERE s.tmdb_id = {t}.tmdb_id"
+                    " AND s.{c} IS NOT NULL)".format(t=table, s=snap, c=col)).rowcount
         changed += conn.execute(
             "UPDATE movies SET playcount = (SELECT s.playcount FROM snapshot_movies s WHERE s.tmdb_id = movies.tmdb_id)"
             " WHERE COALESCE(playcount, 0) = 0 AND tmdb_id IS NOT NULL AND tmdb_id <> ''"
@@ -10065,7 +10082,8 @@ def elsewhere_rows(kind, query):
                 "runtime": minutes(r["runtime"]),
                 "directors": directors[:2], "cast": cast[:3],
                 "in_progress": False, "percent": 0, "identified": True,
-                "sort_added": "", "watchlisted": False, "favourited": False,
+                "sort_added": "", "watchlisted": bool(r["watchlisted_at"]),
+                "favourited": bool(r["favourited_at"]),
             })
     if kind in ("tv", "all"):
         for r in conn.execute("SELECT * FROM snapshot_shows"):
@@ -10087,7 +10105,8 @@ def elsewhere_rows(kind, query):
                 "tags": tile_tags(genres, as_list(r["keywords"]), r["year"], "tvshow"),
                 "episodes": r["episode_count"] or 0,
                 "in_progress": False, "progress_note": "", "percent": 0,
-                "sort_added": "", "watchlisted": False, "favourited": False,
+                "sort_added": "", "watchlisted": bool(r["watchlisted_at"]),
+                "favourited": bool(r["favourited_at"]),
             })
     conn.close()
     return rows
