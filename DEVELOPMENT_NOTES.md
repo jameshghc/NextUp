@@ -16,6 +16,31 @@ at the top.
 
 ---
 
+## 2026-10-10 — v0.1.70, the phone's Now: a chooser, corner marks, smaller Continue
+
+The user's feedback on v0.1.68–69, phone only:
+
+- **Continue tiles a third smaller**: 169x63 (was ~250x95) — a 24px poster,
+  smaller type, and the cards' empty error line no longer holding space.
+- **The tile overlay's ♡ and bookmark** sit in the corners their marks wear
+  on a closed tile: the bookmark top left, the heart top right (`.peekmark.watch`
+  / `.fav`, round, over the poster).
+- **A step-by-step chooser** replaces the three boxes and the folded line:
+  Anything / Film / TV (`#chooser-kind`, `.kchip`); picking one brings up the
+  genres sliding sideways (`#chooser-genre`, `.ptag.gchip` in their tile-tag
+  colours, "Any genre" first); picking a genre completes it. Each step sets
+  the same #kind / #genre the PC's boxes use, so the pick follows; no mood on
+  the phone. A completed choice asks /api/tonight for 13 (`count`, new, 3–24)
+  and the rest show as "Or instead" posters (`#nowfits`) — at the user's
+  correction, right UNDER the suggestion, with the chooser after them, and
+  the page scrolls up to the suggestion when a choice completes.
+- **One Action, not two**: TV's doubled genres count as their halves in the
+  genre list (status) and in the pick's filter (`genre_matches`) — the
+  chooser showed Action and "action" (Action & Adventure, shortened) side by
+  side. The PC's genre box benefits too.
+- Checked on the S21: kinds, then 11 genres with no repeats, Animation → The
+  Simpsons, back at the top.
+
 ## 2026-10-10 — v0.1.69, favourite (and watchlist) on the phone, until the PC hears
 
 "Is there a way we can handle adding favourites on mobile too?" Films on the

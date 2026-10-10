@@ -27,6 +27,9 @@ check("still short, the decade fills in", got[:2] == ["Drama", "1990s"], got)
 got = t(["Documentary"], [], 1998, "tvshow")
 check("and last, film or series: Weird Weekends has no keywords on TMDB at all",
       got == ["Documentary", "1990s", "series"], got)
+check("a show's doubled genre counts as either half when choosing",
+      n.genre_matches("Action", ["Action & Adventure"]) and n.genre_matches("Fantasy", ["Sci-Fi & Fantasy"])
+      and not n.genre_matches("Comedy", ["Action & Adventure"]))
 check("never a tag twice", t(["Action", "Action & Adventure"], ["action"], 2000).count("Action") == 1,
       t(["Action", "Action & Adventure"], ["action"], 2000))
 

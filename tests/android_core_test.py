@@ -273,11 +273,16 @@ check("phone: a tap shows the peek — facts and colour-coded genres up top, PLA
       and "function genreHue(" in page_src and "peektop" in page_src)
 check("phone: a second tap on the poster closes the peek rather than opening details",
       "if(b.classList.contains('peeking')){ closePeeks(); return; }" in page_src)
-check("phone Now: the pick in its own layout, filters folded to a line, Why this? on request",
-      "function phonePick(" in page_src and 'id="nowfilters"' in page_src and 'id="whythis"' in page_src
+check("phone Now: the pick in its own layout, Why this? on request",
+      "function phonePick(" in page_src and 'id="whythis"' in page_src
       and "body.android #view-now:not(.hidden)" in page_src)
 check("phone Favourites shows every favourite, not just the ones on the phone",
       "favWidened = true" in page_src)
+check("phone Now: a step-by-step chooser — kind, then genres in their colours, then what fits",
+      'id="nowchooser"' in page_src and "function chooserKind(" in page_src
+      and "function chooserGenre(" in page_src and 'id="nowfits"' in page_src)
+check("phone tile overlay: the heart and the bookmark in the corners their marks sit in",
+      "body.android .tile .peek .peekmark.fav{" in page_src and "body.android .tile .peek .peekmark.watch{" in page_src)
 check("a details panel can be swiped down to close", "function sheetSwipe(" in page_src
       and "sheetSwipe(back" in page_src)
 

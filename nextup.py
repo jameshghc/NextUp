@@ -109,7 +109,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.69"
+APP_VERSION = "0.1.70"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -923,6 +923,12 @@ def habit_bonus(plays):
     return min(HABIT_MAX, 0.5 * math.log(1 + plays, 2))
 
 
+def genre_matches(genre, genres):
+    """Whether something filed under `genres` is `genre` — a show's "Action &
+    Adventure" counts as Action, and as Adventure."""
+    return any(genre == g or genre in GENRE_SPLIT.get(g, ()) for g in genres)
+
+
 def build_tonight(kind, mood, max_mins, genre, count=3, exclude=None,
                   avoid_shows=()):
     LIB.load()
@@ -962,7 +968,7 @@ def build_tonight(kind, mood, max_mins, genre, count=3, exclude=None,
             if ("movie:%s" % m["movieid"]) in exclude:
                 continue
             genres = m.get("genre") or []
-            if genre and genre not in genres:
+            if genre and not genre_matches(genre, genres):
                 continue
             if mood_cfg["genres"] and not set(genres) & set(mood_cfg["genres"]):
                 continue
@@ -1032,7 +1038,7 @@ def build_tonight(kind, mood, max_mins, genre, count=3, exclude=None,
             if 0 < (s.get("userrating") or 0) < 5:
                 continue
             genres = s.get("genre") or []
-            if genre and genre not in genres:
+            if genre and not genre_matches(genre, genres):
                 continue
             if mood_cfg["genres"] and not set(genres) & set(mood_cfg["genres"]):
                 continue
@@ -13008,6 +13014,8 @@ class Handler(BaseHTTPRequestHandler):
                     mood=one("mood", "any"),
                     max_mins=int(one("max", "0") or 0),
                     genre=one("genre", ""),
+                    # The phone's chooser shows what else fits under the pick.
+                    count=max(3, min(int(one("count", "3") or 3), 24)),
                 )
                 # Two constraints, given up in the order that costs least.
                 # The cooldown goes first, by halves rather than all at once
@@ -13852,12 +13860,16 @@ class Handler(BaseHTTPRequestHandler):
                     "version": APP_VERSION,
                     "config": self.safe_config()}
         genres = Counter()
+        # TV's doubled genres — "Action & Adventure" — count as their halves,
+        # so the list has one Action, not Action and Action & Adventure.
         for m in LIB.movies:
             for g in (m.get("genre") or []):
-                genres[g] += 1
+                for part in GENRE_SPLIT.get(g, [g]):
+                    genres[part] += 1
         for s in LIB.shows:
             for g in (s.get("genre") or []):
-                genres[g] += 1
+                for part in GENRE_SPLIT.get(g, [g]):
+                    genres[part] += 1
         unrated = sum(1 for m in LIB.movies if not m.get("userrating"))
         favourites = (sum(1 for m in LIB.movies if m.get("favourited"))
                       + sum(1 for s in LIB.shows if s.get("favourited")))
@@ -14949,10 +14961,14 @@ body.android .reccard{flex-basis:124px}
    then DETAILS. The names, the blurb and the toggles are on the details
    page. */
 .tile .peek .peekplay,.tile .peek .peekdetails,.tile .peek .peektop,.tile .peek .peekmarks{display:none}
-body.android .tile .peek .peekmarks{display:flex;gap:8px;margin-top:8px}
-body.android .tile.elsewhere .peek .peekmarks{margin-top:auto;margin-bottom:6px}
-body.android .tile .peek .peekmark{padding:5px 12px;font-size:15px;line-height:1;min-width:40px;
-  display:flex;align-items:center;justify-content:center}
+body.android .tile .peek .peekmarks{display:block;position:absolute;inset:0;pointer-events:none;margin:0}
+body.android .tile .peek .peekmark{position:absolute;top:6px;width:32px;height:32px;padding:0;
+  font-size:15px;line-height:1;display:flex;align-items:center;justify-content:center;
+  border-radius:50%;background:rgba(6,5,9,.7)}
+/* Where the marks sit on a closed tile: the bookmark top left, the heart
+   top right under your score. */
+body.android .tile .peek .peekmark.watch{left:6px}
+body.android .tile .peek .peekmark.fav{right:6px}
 body.android .tile .peek .peekmark .mark{width:14px;height:14px}
 body.android .tile .peek .peekmark.on{color:var(--marigold);border-color:var(--marigold)}
 body.android .tile.peeking .peek .peekmark{pointer-events:auto}
@@ -15242,20 +15258,40 @@ body.android header.mast .offview{display:none}
    width, with its title on the poster and PLAY under it — on screen without
    scrolling; then the filters folded to one line, and the reasons on
    request. The PC's Now is untouched. */
-.nowfilters,.whythis{display:none}
+.nowchooser,.nowfits,.whythis{display:none}
 body.android #view-now:not(.hidden){display:flex;flex-direction:column}
 body.android #view-now > #unfinished-sec{order:1}
 body.android #view-now > #tonight-out{order:2}
-body.android #view-now > .nowfilters{order:3}
-body.android #view-now > .filters{order:4}
+/* The suggestion, then its alternatives right under it, then the chooser
+   that produced them. */
+body.android #view-now > .nowfits{order:3}
+body.android #view-now > .nowchooser{order:4}
 body.android #view-now > .whythis{order:5}
 body.android #view-now > #reasons-out{order:6}
-body.android .nowfilters{display:flex;align-items:center;gap:8px;width:100%;margin:2px 0 12px;
-  padding:10px 14px;border-radius:999px;background:var(--ink-2);border:1px solid var(--line);
-  color:var(--paper);font-family:var(--mono);font-size:11px;letter-spacing:.04em;text-align:left;cursor:pointer}
-body.android .nowfilters span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 body.android #view-now > .filters{display:none}
-body.android #view-now.filters-open > .filters{display:flex;margin-bottom:12px}
+/* The chooser: one row of three, then the genres sliding sideways, each in
+   the colour its tag wears on a library tile. */
+body.android .nowchooser{display:flex;flex-direction:column;gap:10px;margin:4px 0 12px}
+body.android .chooserow{display:flex;gap:8px}
+body.android .chooserow.hidden{display:none}
+body.android .chooserow.genres{overflow-x:auto;flex-wrap:nowrap;padding-bottom:4px;scroll-snap-type:x proximity}
+.kchip{flex:1;padding:10px 0;border-radius:999px;background:var(--ink-2);border:1px solid var(--line);
+  color:var(--paper);font-family:var(--display);font-weight:700;font-size:14px;cursor:pointer}
+.kchip.on{background:var(--paper);color:#17151c;border-color:var(--paper)}
+.ptag.gchip{flex:none;font-size:11px;padding:7px 13px;cursor:pointer;scroll-snap-align:start}
+.ptag.gchip.on{background:hsl(var(--h) 60% 45% / .6);color:#fff;border-color:hsl(var(--h) 75% 65%)}
+/* What fits, under the chooser. */
+body.android .nowfits{display:block;margin:0 0 14px}
+body.android .nowfits.hidden{display:none}
+.nowfits h3{font-family:var(--mono);font-size:10.5px;font-weight:400;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--muted);margin:0 0 8px}
+.nowfits .fitgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.fitcard{padding:0;border:1px solid var(--line);border-radius:6px;overflow:hidden;background:var(--ink-2);
+  color:inherit;text-align:center;cursor:pointer}
+.fitcard img,.fitcard .blank{width:100%;aspect-ratio:2/3;object-fit:cover;display:block;background:var(--ink-3)}
+.fitcard .blank{display:flex;align-items:center;justify-content:center;font-size:11px;padding:6px;color:var(--muted)}
+.fitcard b{display:block;font-family:var(--display);font-size:11.5px;line-height:1.2;padding:5px 5px 6px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 body.android #view-now .spin{display:none}
 body.android .whythis{display:block;align-self:flex-start;margin:0 0 10px}
 body.android #view-now > #reasons-out{display:none}
@@ -15266,11 +15302,12 @@ body.android #unfinished-sec .sechead{margin-bottom:8px}
 body.android #unfinished-sec .sechead p{display:none}
 body.android #unfinished-sec .sechead h2{font-size:15px}
 body.android #unfinished-sec .alts{display:flex;gap:10px;overflow-x:auto;padding-bottom:4px;flex-wrap:nowrap}
-body.android #unfinished-sec .alt{flex:0 0 240px;margin:0;grid-template-columns:36px 1fr;gap:10px;padding:8px 10px}
-body.android #unfinished-sec .alt img,body.android #unfinished-sec .alt .noposter{width:36px!important}
-body.android #unfinished-sec .alt h3{font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-body.android #unfinished-sec .alt p{font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-body.android #unfinished-sec .alt button{margin-top:4px;padding:3px 10px}
+body.android #unfinished-sec .alt{flex:0 0 160px;margin:0;grid-template-columns:24px 1fr;gap:7px;padding:5px 7px}
+body.android #unfinished-sec .alt img,body.android #unfinished-sec .alt .noposter{width:24px!important}
+body.android #unfinished-sec .alt h3{font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+body.android #unfinished-sec .alt p{font-size:9.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+body.android #unfinished-sec .alt button{margin-top:2px;padding:1px 8px;font-size:9.5px}
+body.android #unfinished-sec .alt p.empty:empty{display:none}
 /* The pick. */
 .pick.phonepick{display:flex;flex-direction:column;gap:0;padding:0;min-height:0}
 .phonepick .pptop{position:relative;cursor:pointer;touch-action:pan-y}
@@ -16167,9 +16204,14 @@ header.mast .libplaces.offview{visibility:hidden}
 
 <!-- ================= NOW ================= -->
 <div id="view-now" class="hidden">
-  <!-- The phone's folded filters: one line saying what's chosen; a tap
-       opens the three of them. Hidden on the PC. -->
-  <button class="nowfilters" id="nowfilters" type="button"></button>
+  <!-- The phone's chooser, at the foot of the page: Anything / Film / TV,
+       then a sliding row of genres in their colours, then what fits.
+       Hidden on the PC, which keeps its three boxes. -->
+  <div class="nowchooser" id="nowchooser">
+    <div class="chooserow" id="chooser-kind"></div>
+    <div class="chooserow genres hidden" id="chooser-genre"></div>
+  </div>
+  <div class="nowfits hidden" id="nowfits"></div>
   <div class="filters">
     <label class="f"><span>Mood</span>
       <select id="mood">
@@ -16789,6 +16831,7 @@ function tonightParams(exclude, peek){
     mood: $('#mood').value, kind: $('#kind').value,
     genre: $('#genre').value, exclude: [...exclude].join(',')
   });
+  if(typeof chooserStep !== 'undefined' && chooserStep >= 2) q.set('count', '13');
   if(peek) q.set('peek', '1');
   return q;
 }
@@ -17011,19 +17054,91 @@ function phonePick(p, poster, right, btns, problem, meta, rateSlot){
   return card;
 }
 
-/* The folded filters' line, and opening it. */
-function nowFilterLine(){
-  const pickTxt = id => { const o = $(id).selectedOptions[0]; return o ? o.textContent : ''; };
-  $('#nowfilters').innerHTML = '<span>' + esc([pickTxt('#mood'), pickTxt('#kind'), pickTxt('#genre')].join('  ·  '))
-    + '</span>' + ($('#view-now').classList.contains('filters-open') ? '▴' : '▾');
+/* The phone's chooser. Step by step: Anything / Film / TV first; picking
+   one brings up the genres, sliding sideways in their tag colours; picking
+   a genre completes the choice, and what else fits appears under it. Each
+   step drives the same filters the PC's boxes do, so the pick above follows
+   it. No mood on the phone. */
+const CHOOSER_KINDS = [['any', 'Anything'], ['film', 'Film'], ['tv', 'TV']];
+let chooserStep = 0;            // 0 nothing chosen, 1 a kind, 2 a kind and a genre
+
+function drawChooser(){
+  const kinds = $('#chooser-kind');
+  kinds.innerHTML = '';
+  CHOOSER_KINDS.forEach(([value, label]) => {
+    const b = el('button', 'kchip' + (chooserStep >= 1 && $('#kind').value === value ? ' on' : ''), label);
+    b.type = 'button';
+    b.onclick = () => chooserKind(value);
+    kinds.append(b);
+  });
+  const genres = $('#chooser-genre');
+  genres.classList.toggle('hidden', chooserStep < 1);
+  genres.innerHTML = '';
+  if(chooserStep < 1) return;
+  [''].concat(STATUS && STATUS.genres || []).forEach(name => {
+    const b = el('button', 'ptag gchip' + (chooserStep >= 2 && $('#genre').value === name ? ' on' : ''),
+                 esc(name ? genreShort(name) : 'Any genre'));
+    b.type = 'button';
+    b.style.setProperty('--h', name ? genreHue(name) : 40);
+    b.onclick = () => chooserGenre(name);
+    genres.append(b);
+  });
 }
-$('#nowfilters').onclick = () => { $('#view-now').classList.toggle('filters-open'); nowFilterLine(); };
-['mood', 'kind', 'genre'].forEach(id => $('#' + id).addEventListener('change', nowFilterLine));
+
+function chooserKind(value){
+  $('#kind').value = value;
+  $('#genre').value = '';
+  chooserStep = 1;
+  chooserApply();
+}
+
+function chooserGenre(name){
+  $('#genre').value = name;
+  chooserStep = 2;
+  chooserApply();
+}
+
+async function chooserApply(){
+  $('#mood').value = 'any';
+  rejected.clear(); currentTop = null; resetTrail();
+  drawChooser();
+  await loadTonight();
+  /* A finished choice: up to its suggestion, the alternatives under it. */
+  if(chooserStep >= 2) $('#view-now').scrollTo({top: 0, behavior: 'smooth'});
+}
+
+/* What else fits a completed choice: the picks after the first, as small
+   posters; a tap makes one the pick. */
+function drawFits(data){
+  const box = $('#nowfits');
+  const rest = (data && data.picks || []).slice(1);
+  box.classList.toggle('hidden', !(chooserStep >= 2 && rest.length));
+  box.innerHTML = '';
+  if(chooserStep < 2 || !rest.length) return;
+  const kind = (CHOOSER_KINDS.find(k => k[0] === $('#kind').value) || [0, 'Anything'])[1];
+  box.append(el('h3', null, esc('Or instead · ' + kind + ' · ' + ($('#genre').value || 'any genre'))));
+  const grid = el('div', 'fitgrid');
+  rest.forEach(p => {
+    const b = el('button', 'fitcard');
+    b.type = 'button';
+    if(p.art){ const i = el('img'); i.src = p.art; i.alt = ''; i.loading = 'lazy'; b.append(i); }
+    else b.append(el('div', 'blank', esc(p.title || '')));
+    b.append(el('b', null, esc(p.title || '')));
+    b.onclick = () => {
+      post('/api/offered', {key: p.type + ':' + p.id});
+      showPick(p);
+      $('#view-now').scrollTop = 0;
+    };
+    grid.append(b);
+  });
+  box.append(grid);
+}
+
 $('#whythis').onclick = () => {
   const open = $('#view-now').classList.toggle('why-open');
   $('#whythis').textContent = open ? 'WHY THIS? ▴' : 'WHY THIS? ▾';
 };
-nowFilterLine();
+drawChooser();
 
 function altCard(p){
   const a = el('div','alt');
@@ -17086,6 +17201,7 @@ async function loadTonight(){
   reasons.classList.remove('swapping');
   if(data.error){ out.innerHTML = '<div class="notice bad"><h3>Something went wrong</h3><p>'+esc(data.error)+'</p></div>'; return; }
   if(data.reset) rejected.clear();
+  if(document.body.classList.contains('android')) drawFits(data);
   out.innerHTML = '';
   if(!data.picks.length){
     const f = currentGenreFilter();
@@ -17858,7 +17974,7 @@ function tile(item){
   const marks = el('div', 'peekmarks');
   [['favourite', () => item.favourited ? '♥' : '♡', 'favourited'],
    ['watchlist', () => item.watchlisted ? BOOKMARK_ON : BOOKMARK_OFF, 'watchlisted']].forEach(([what, face, field]) => {
-    const m = el('button', 'iconbtn peekmark');
+    const m = el('button', 'iconbtn peekmark ' + (what === 'favourite' ? 'fav' : 'watch'));
     m.type = 'button';
     const paint = () => { m.innerHTML = face(); m.classList.toggle('on', !!item[field]); };
     paint();
