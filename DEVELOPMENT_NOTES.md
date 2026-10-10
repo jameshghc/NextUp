@@ -16,6 +16,29 @@ at the top.
 
 ---
 
+## 2026-10-10 — v0.1.68, the phone's Now tab, rebuilt for the space
+
+Measured on a 384x832 phone before: titlebar + tabs 133, the three filter
+boxes and Pick something 207 (a quarter of the screen), the pick from 380
+and 778 tall with PLAY near 1,100; "How it landed" and "Continue" under
+that; content 323 of 384 wide. The user approved a layout; built phone-only
+(`body.android`), the PC's Now untouched:
+
+- Order (flex `order`): Continue where you left off first, as a sideways
+  strip of compact cards; then the pick; then the filters folded to one
+  line (`#nowfilters`, "Anything · Film or episode · Any genre ▾", a tap
+  opens the three); then WHY THIS? (`#whythis`) over the reasons, shut.
+- `phonePick()`: the PC card's own parts re-laid: the poster full width
+  (44vh, cropped) with eyebrow, title, subline and why over a fade; PLAY /
+  NOT THIS / WATCHLIST under it; facts, the plot clamped to three lines (a
+  tap opens it), your rating. A tap on the poster opens its page; a swipe
+  left is NOT THIS. Pick something is hidden: NOT THIS is the phone's.
+- Margins 24px → 12px on the phone, every tab.
+- The Library's own row (`.offview`) folds away on the other tabs on the
+  phone — on the PC it's only made invisible so the tabs don't jump.
+- On the S21: the pick at 103 (was 380), PLAY at 491 of 853, the whole
+  card and the filter line on the first screen.
+
 ## 2026-10-10 — v0.1.67, favourites and the watchlist are the whole library's
 
 "The mobile app doesn't bring along the favourites… I want it to see the

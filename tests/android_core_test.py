@@ -273,6 +273,9 @@ check("phone: a tap shows the peek — facts and colour-coded genres up top, PLA
       and "function genreHue(" in page_src and "peektop" in page_src)
 check("phone: a second tap on the poster closes the peek rather than opening details",
       "if(b.classList.contains('peeking')){ closePeeks(); return; }" in page_src)
+check("phone Now: the pick in its own layout, filters folded to a line, Why this? on request",
+      "function phonePick(" in page_src and 'id="nowfilters"' in page_src and 'id="whythis"' in page_src
+      and "body.android #view-now:not(.hidden)" in page_src)
 check("a details panel can be swiped down to close", "function sheetSwipe(" in page_src
       and "sheetSwipe(back" in page_src)
 

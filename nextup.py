@@ -109,7 +109,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.67"
+APP_VERSION = "0.1.68"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -15156,6 +15156,66 @@ body.android .sheet{z-index:85}
    the flash is only noise. */
 body.android, body.android *{-webkit-tap-highlight-color:transparent}
 body.android #libadd,body.android #addbar,body.android #addfab{display:none}
+/* A phone's width is precious: narrow margins throughout. */
+body.android .wrap{padding:0 12px}
+/* The Library's own row (Films · TV · Favourites, and its places) is only
+   made invisible on the other tabs, so the PC's tabs don't jump about when
+   you switch. A phone would rather have the space. */
+body.android header.mast .offview{display:none}
+
+/* ---- Now, on the phone ----
+   What you're part way through first, as a strip; then the pick, full
+   width, with its title on the poster and PLAY under it — on screen without
+   scrolling; then the filters folded to one line, and the reasons on
+   request. The PC's Now is untouched. */
+.nowfilters,.whythis{display:none}
+body.android #view-now:not(.hidden){display:flex;flex-direction:column}
+body.android #view-now > #unfinished-sec{order:1}
+body.android #view-now > #tonight-out{order:2}
+body.android #view-now > .nowfilters{order:3}
+body.android #view-now > .filters{order:4}
+body.android #view-now > .whythis{order:5}
+body.android #view-now > #reasons-out{order:6}
+body.android .nowfilters{display:flex;align-items:center;gap:8px;width:100%;margin:2px 0 12px;
+  padding:10px 14px;border-radius:999px;background:var(--ink-2);border:1px solid var(--line);
+  color:var(--paper);font-family:var(--mono);font-size:11px;letter-spacing:.04em;text-align:left;cursor:pointer}
+body.android .nowfilters span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+body.android #view-now > .filters{display:none}
+body.android #view-now.filters-open > .filters{display:flex;margin-bottom:12px}
+body.android #view-now .spin{display:none}
+body.android .whythis{display:block;align-self:flex-start;margin:0 0 10px}
+body.android #view-now > #reasons-out{display:none}
+body.android #view-now.why-open > #reasons-out{display:block}
+/* The Continue strip: sideways, compact. */
+body.android #unfinished-sec{margin:4px 0 12px}
+body.android #unfinished-sec .sechead{margin-bottom:8px}
+body.android #unfinished-sec .sechead p{display:none}
+body.android #unfinished-sec .sechead h2{font-size:15px}
+body.android #unfinished-sec .alts{display:flex;gap:10px;overflow-x:auto;padding-bottom:4px;flex-wrap:nowrap}
+body.android #unfinished-sec .alt{flex:0 0 240px;margin:0;grid-template-columns:36px 1fr;gap:10px;padding:8px 10px}
+body.android #unfinished-sec .alt img,body.android #unfinished-sec .alt .noposter{width:36px!important}
+body.android #unfinished-sec .alt h3{font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+body.android #unfinished-sec .alt p{font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+body.android #unfinished-sec .alt button{margin-top:4px;padding:3px 10px}
+/* The pick. */
+.pick.phonepick{display:flex;flex-direction:column;gap:0;padding:0;min-height:0}
+.phonepick .pptop{position:relative;cursor:pointer;touch-action:pan-y}
+.pick.phonepick .pptop img.poster,.pick.phonepick .pptop .noposter{width:100%;height:min(44vh,400px);aspect-ratio:auto;
+  object-fit:cover;object-position:center 22%;border-radius:0;display:block}
+.phonepick .ppover{position:absolute;left:0;right:0;bottom:0;padding:60px 16px 14px;
+  background:linear-gradient(to bottom,rgba(6,5,9,0),rgba(6,5,9,.88) 55%,rgba(6,5,9,.96))}
+.phonepick .ppover .eyebrow{margin-bottom:6px}
+.phonepick .ppover h2{font-size:28px;margin:0 0 2px}
+.phonepick .ppover .subline{margin-bottom:6px}
+.phonepick .ppover .why{font-size:13.5px;margin:0;line-height:1.35}
+.phonepick > .rowbtns{padding:12px 14px 4px;flex-wrap:nowrap}
+.phonepick > .rowbtns .play{flex:1;padding:12px 18px;font-size:16px}
+.phonepick > .rowbtns .iconbtn{padding:11px 14px}
+.phonepick .ppinfo{padding:6px 14px 14px}
+.phonepick .ppinfo .meta{margin:4px 0 8px}
+.phonepick .plot{margin:0 0 10px;cursor:pointer}
+.phonepick .plot.clamp{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.phonepick .pptop.swiping{transition:none}
 /* Posters' names centred under them on the phone, which the user prefers
    there; the PC keeps them ranged left. */
 body.android .tile .cap{text-align:center}
@@ -16033,6 +16093,9 @@ header.mast .libplaces.offview{visibility:hidden}
 
 <!-- ================= NOW ================= -->
 <div id="view-now" class="hidden">
+  <!-- The phone's folded filters: one line saying what's chosen; a tap
+       opens the three of them. Hidden on the PC. -->
+  <button class="nowfilters" id="nowfilters" type="button"></button>
   <div class="filters">
     <label class="f"><span>Mood</span>
       <select id="mood">
@@ -16061,6 +16124,7 @@ header.mast .libplaces.offview{visibility:hidden}
   </div>
 
   <div id="tonight-out"><p class="empty">Loading your library…</p></div>
+  <button class="iconbtn whythis" id="whythis" type="button">WHY THIS? ▾</button>
   <div id="reasons-out"></div>
 
   <section id="unfinished-sec" class="hidden">
@@ -16820,8 +16884,72 @@ function pickCard(p){
   right.append(btns);
   right.append(problem);
   card.append(right);
+  if(document.body.classList.contains('android'))
+    return phonePick(p, card.querySelector('img.poster, .noposter'), right, btns, problem, meta, rateSlot);
   return card;
 }
+
+/* The pick on a phone: the poster full width with the title and the reason
+   on it, PLAY and NOT THIS right under — on screen without scrolling — then
+   the facts, the plot (three lines; a tap for the rest) and your rating.
+   Built from the same parts as the PC's card, so they behave the same.
+   A tap on the poster opens its page; a swipe left is NOT THIS. */
+function phonePick(p, poster, right, btns, problem, meta, rateSlot){
+  const card = el('div', 'pick phonepick' + (p.type === 'episode' ? ' tv' : ''));
+  const top = el('div', 'pptop');
+  if(poster) top.append(poster);
+  const over = el('div', 'ppover');
+  ['.eyebrow', 'h2', '.subline', '.why'].forEach(sel => {
+    const node = right.querySelector(sel);
+    if(node) over.append(node);
+  });
+  top.append(over);
+  let x0 = null, dx = 0;
+  top.addEventListener('touchstart', e => { x0 = e.touches[0].clientX; dx = 0; top.classList.add('swiping'); },
+                       {passive: true});
+  top.addEventListener('touchmove', e => {
+    if(x0 === null) return;
+    dx = e.touches[0].clientX - x0;
+    if(dx < 0) top.style.transform = 'translateX(' + Math.round(dx * 0.6) + 'px)';
+  }, {passive: true});
+  top.addEventListener('touchend', () => {
+    top.classList.remove('swiping');
+    top.style.transform = '';
+    const swiped = dx < -80;
+    x0 = null;
+    if(swiped){ rejected.add(p.type + ':' + p.id); loadTonight(); }
+  });
+  top.onclick = () => {
+    if(Math.abs(dx) > 10) return;       // the end of a swipe, not a tap
+    p.type === 'episode' ? openShow(p.rate_id) : openFilm(p.id);
+  };
+  card.append(top, btns, problem);
+  const info = el('div', 'ppinfo');
+  info.append(meta);
+  const plot = right.querySelector('.plot');
+  if(plot){
+    plot.classList.add('clamp');
+    plot.onclick = () => plot.classList.toggle('clamp');
+    info.append(plot);
+  }
+  info.append(rateSlot);
+  card.append(info);
+  return card;
+}
+
+/* The folded filters' line, and opening it. */
+function nowFilterLine(){
+  const pickTxt = id => { const o = $(id).selectedOptions[0]; return o ? o.textContent : ''; };
+  $('#nowfilters').innerHTML = '<span>' + esc([pickTxt('#mood'), pickTxt('#kind'), pickTxt('#genre')].join('  ·  '))
+    + '</span>' + ($('#view-now').classList.contains('filters-open') ? '▴' : '▾');
+}
+$('#nowfilters').onclick = () => { $('#view-now').classList.toggle('filters-open'); nowFilterLine(); };
+['mood', 'kind', 'genre'].forEach(id => $('#' + id).addEventListener('change', nowFilterLine));
+$('#whythis').onclick = () => {
+  const open = $('#view-now').classList.toggle('why-open');
+  $('#whythis').textContent = open ? 'WHY THIS? ▴' : 'WHY THIS? ▾';
+};
+nowFilterLine();
 
 function altCard(p){
   const a = el('div','alt');
