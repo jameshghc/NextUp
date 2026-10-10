@@ -16,6 +16,39 @@ at the top.
 
 ---
 
+## 2026-10-10 — v0.1.65, one show per TMDB id: X-Men '97, for good
+
+Two X-Men '97 tiles. The cause, from the files: a 2024 release folder
+`E:\Torrents\MOVIES\X-Men '97 (2024)` held S01E01–E04 as dotted release
+names, read as show "x-men 97"; the tidy `E:\Torrents\TV\X-Men '97 (2024)`
+read as "x-men '97". The scan keyed shows on `show.lower()`, so two shows,
+both matched to TMDB 138502 — the user's 8.5 on the four-episode half. The
+TV folder had since gained E02/E03 (2026-10-09), so all four in the films
+folder were copies: sampled SHA-256 (start, middle, end) identical to the TV
+files, sizes to the byte.
+
+- Files: the four copies to the Recycle Bin (`send_to_trash`), the empty
+  folder removed. Database backed up first (SQLite online backup) to
+  `nextup_library.before-xmen-merge-2026-10-10.db`; `.gitignore` now keeps
+  `nextup_library.before-*.db` out of commits.
+- `show_key()`: letters and digits only ("x-men 97" = "x-men '97" =
+  "X-Men: '97"); the scan looks shows up by it.
+- `merge_duplicate_shows(conn)`, after every scan's enrichment and once at
+  start-up: one show per TMDB id — the one with most episodes kept, the
+  others' rating / watchlist / favourite carried where the kept one has
+  none, episodes, history and queue repointed. Then one of each episode:
+  the same SxxEyy from files in DIFFERENT folders are copies, the bigger
+  kept, the other's watch point (the later), plays, rating and audio delay
+  carried, its path into `ignored_files` so a rescan doesn't re-add it. In
+  ONE folder they're parts, not copies — all 19 repeated codes in the
+  library were SpongeBob's A/B segments, which stay. Nothing on disk.
+- The 2026-08-04 lesson (an over-eager fix took out BoJack's rows) is why
+  the rule is narrow and the run was rehearsed: on a sandboxed copy of the
+  live library, start-up merge (1 show, 4 episodes) then a full rescan —
+  one X-Men '97, S1 E01–E10 and S2 E01–E09 once each, 8.5 kept, rescan
+  merging nothing more, SpongeBob's 39 S1 parts intact.
+- tests/show_merge_test.py (16), in run_all.
+
 ## 2026-10-09 — v0.1.64, the phone and the PC swap history over the cable
 
 Asked for: one history, ratings, favourites and watch points between the

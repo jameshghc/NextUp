@@ -216,25 +216,10 @@ were asked to be kept. The two safe wins when the time comes:
 
 ## Decisions waiting on you
 
-### X-Men '97 is in the library twice
+### ~~X-Men '97 is in the library twice~~ — done, 2026-10-10 (v0.1.65)
 
-Two show rows share TMDB id 138502 and split twelve episodes between them:
-`x-men 97` (id 1) holds S01E01–E04 from a dotted release name and carries
-**your 8.5 rating**; `x-men '97` (id 48) holds S01E01 and E04–E10 from
-apostrophe-named files and is unrated. E01 and E04 exist on both.
-
-The cost is quiet but real: neither row knows the full run, so "next
-episode" and series progress are wrong for it, and Binge #12 — which
-filters on your own rating — sees only the four-episode fragment. The
-451-second resume position on S01E05 sits on the half with no rating. It is
-also why an audit of the picking algorithm reported a show repeating two
-presses apart: measured by title those are one show, measured by id they
-are two.
-
-Merging is a data change on a library that has been hurt by a bad merge
-before (see 2026-08-04, where an over-eager fix deleted all twelve BoJack
-episodes), so it waits for a decision rather than being done in passing.
-With a database backup first, it is a small job.
+Decided by the user ("solve it for good"). Merged with a backup first; see
+DEVELOPMENT_NOTES 2026-10-10 for how, and what stops it coming back.
 
 ---
 

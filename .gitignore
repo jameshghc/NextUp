@@ -45,3 +45,5 @@ Old versions and extras/
 
 # --- this machine only ----------------------------------------------------------
 *.lnk
+# Database backups taken before a data change
+nextup_library.before-*.db

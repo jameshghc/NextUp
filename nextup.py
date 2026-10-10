@@ -109,7 +109,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.64"
+APP_VERSION = "0.1.65"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -2660,6 +2660,119 @@ MASS_DELETE_SHARE = 0.5
 MASS_DELETE_FLOOR = 20     # tiny libraries legitimately swing by large shares
 
 
+def show_key(name):
+    """A show's name reduced to letters and digits, for telling whether two
+    folder names are the same show: "x-men 97", "x-men '97" and "X-Men: '97"
+    all come to "xmen97"."""
+    text = unicodedata.normalize("NFKD", str(name or "")).lower()
+    return re.sub(r"[^a-z0-9]+", "", text)
+
+
+def _file_size(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return -1
+
+
+def merge_duplicate_shows(conn):
+    """One show per TMDB id, and one of each episode in it.
+
+    X-Men '97 was two shows: a dotted release in the films folder read as
+    "x-men 97", the TV folder as "x-men '97", both matched to TMDB 138502.
+    Neither knew the whole run, and the rating was on the four-episode half.
+
+    Shows: the one with the most episodes is kept (the lowest id on a tie);
+    the others' episodes move to it, and so does anything you'd marked on
+    them — a rating, the watchlist, a favourite — where the kept one has
+    none. History and the queue follow.
+
+    Episodes: the same season and episode from files in DIFFERENT folders
+    are copies of one episode, and the bigger file is kept. In one folder
+    they're not copies: SpongeBob's S01E17A and S01E17B share a number and
+    are two stories. The other copy's progress comes across, and its path
+    goes into ignored_files, so the next scan doesn't add it back; the file
+    itself is left where it is.
+
+    Nothing is deleted from disk. Returns what it did."""
+    done = {"shows": 0, "episodes": 0}
+    groups = defaultdict(list)
+    for r in conn.execute("SELECT * FROM shows WHERE matched=1 AND tmdb_id IS NOT NULL"
+                          " AND tmdb_id<>'' ORDER BY id"):
+        groups[str(r["tmdb_id"])].append(r)
+    for tmdb_id, rows in groups.items():
+        if len(rows) < 2:
+            continue
+        counts = dict((r["id"], conn.execute("SELECT COUNT(*) FROM episodes WHERE show_id=?",
+                                             (r["id"],)).fetchone()[0]) for r in rows)
+        keep = sorted(rows, key=lambda r: (-counts[r["id"]], r["id"]))[0]
+        for other in rows:
+            if other["id"] == keep["id"]:
+                continue
+            fresh = conn.execute("SELECT * FROM shows WHERE id=?", (keep["id"],)).fetchone()
+            if not (fresh["userrating"] or 0) and (other["userrating"] or 0):
+                conn.execute("UPDATE shows SET userrating=?, rated_at=? WHERE id=?",
+                             (other["userrating"], other["rated_at"], keep["id"]))
+            for col in ("watchlisted_at", "favourited_at"):
+                if not fresh[col] and other[col]:
+                    conn.execute("UPDATE shows SET %s=? WHERE id=?" % col, (other[col], keep["id"]))
+            conn.execute("UPDATE shows SET watch_seconds=MAX(COALESCE(watch_seconds,0),?) WHERE id=?",
+                         (other["watch_seconds"] or 0, keep["id"]))
+            conn.execute("UPDATE episodes SET show_id=? WHERE show_id=?", (keep["id"], other["id"]))
+            for table in ("history", "queue"):
+                conn.execute("UPDATE %s SET item_id=? WHERE kind='tvshow' AND item_id=?" % table,
+                             (keep["id"], other["id"]))
+            conn.execute("DELETE FROM shows WHERE id=?", (other["id"],))
+            done["shows"] += 1
+
+    # One of each episode: copies in different folders, wherever they came from.
+    for g in conn.execute("SELECT show_id, season, episode FROM episodes"
+                          " GROUP BY show_id, season, episode HAVING COUNT(*) > 1").fetchall():
+        eps = conn.execute("SELECT * FROM episodes WHERE show_id=? AND season=? AND episode=?",
+                           (g["show_id"], g["season"], g["episode"])).fetchall()
+        by_folder = defaultdict(list)
+        for e in eps:
+            by_folder[os.path.normcase(os.path.dirname(e["path"] or ""))].append(e)
+        if len(by_folder) < 2 or any(len(v) > 1 for v in by_folder.values()):
+            continue        # part-episodes in one folder, not copies
+        best = max(eps, key=lambda e: (_file_size(e["path"]), -e["id"]))
+        for e in eps:
+            if e["id"] == best["id"]:
+                continue
+            # Its marks come across where the kept copy has none, and the
+            # later of the two watch points wins.
+            cur = conn.execute("SELECT * FROM episodes WHERE id=?", (best["id"],)).fetchone()
+            sets, vals = [], []
+            if (e["resume_pos"] or 0) and (not (cur["resume_pos"] or 0)
+                                           or (e["last_played"] or "") > (cur["last_played"] or "")):
+                sets += ["resume_pos=?", "resume_total=?"]
+                vals += [e["resume_pos"], e["resume_total"] or 0]
+            if (e["playcount"] or 0) > (cur["playcount"] or 0):
+                sets.append("playcount=?"); vals.append(e["playcount"])
+            if (e["last_played"] or "") > (cur["last_played"] or ""):
+                sets.append("last_played=?"); vals.append(e["last_played"])
+            if (e["userrating"] or 0) and not (cur["userrating"] or 0):
+                sets += ["userrating=?", "rated_at=?"]
+                vals += [e["userrating"], e["rated_at"]]
+            if e["audio_delay"] is not None and cur["audio_delay"] is None:
+                sets.append("audio_delay=?"); vals.append(e["audio_delay"])
+            if sets:
+                conn.execute("UPDATE episodes SET %s WHERE id=?" % ",".join(sets), vals + [best["id"]])
+            for table in ("history", "queue"):
+                conn.execute("UPDATE %s SET item_id=? WHERE kind='episode' AND item_id=?" % table,
+                             (best["id"], e["id"]))
+            conn.execute("INSERT OR REPLACE INTO ignored_files (path,why,at) VALUES (?,?,?)",
+                         (e["path"], "a copy of %s, which is bigger" % best["path"], now_stamp()))
+            conn.execute("DELETE FROM episodes WHERE id=?", (e["id"],))
+            done["episodes"] += 1
+    conn.commit()
+    if done["shows"] or done["episodes"]:
+        ignored_paths(force=True)
+        LOCAL.loaded_at = 0
+        LIB.loaded_at = 0
+    return done
+
+
 def scan_local_library(progress=None):
     """Walk the folders, work out what each file is, then fill in the
     metadata from TMDB. Files already in the database are left alone, so a
@@ -2692,6 +2805,12 @@ def scan_local_library(progress=None):
 
     found = list(walk_media(folders))
     fresh = [p for p in found if p not in known and not is_staging_path(p)]
+    # "x-men 97" from a dotted release and "x-men '97" from a tidy folder are
+    # one show: matched on letters and digits alone, so punctuation can't
+    # split a show in two.
+    show_ids = {}
+    for r in conn.execute("SELECT id, name FROM shows ORDER BY id"):
+        show_ids.setdefault(show_key(r["name"]), r["id"])
     added = {"movies": 0, "episodes": 0, "unmatched": 0}
     now = now_stamp()
 
@@ -2709,13 +2828,12 @@ def scan_local_library(progress=None):
             elif kind == "episode":
                 show, season, episode = parts
                 key = show.lower()
-                row = conn.execute("SELECT id FROM shows WHERE name=?", (key,)).fetchone()
-                if row:
-                    show_id = row["id"]
-                else:
+                show_id = show_ids.get(show_key(key))
+                if show_id is None:
                     cur = conn.execute(
                         "INSERT INTO shows (name,title) VALUES (?,?)", (key, show))
                     show_id = cur.lastrowid
+                    show_ids[show_key(key)] = show_id
                 conn.execute(
                     "INSERT OR IGNORE INTO episodes (path,show_id,season,episode,added)"
                     " VALUES (?,?,?,?,?)", (path, show_id, season, episode, now))
@@ -2765,6 +2883,12 @@ def scan_local_library(progress=None):
     conn.commit()
 
     enriched = enrich_local(conn, progress)
+    # Two folders TMDB says are the same show — however differently named —
+    # end up as one, with one of each episode.
+    try:
+        added["merged"] = merge_duplicate_shows(conn)
+    except Exception:
+        log_problem("merging duplicate shows")
     conn.close()
     added["enriched"] = enriched
     added["removed"] = condemned
@@ -21485,6 +21609,14 @@ def prepare_app():
         repair_android_resume()
     except Exception:
         log_problem("repairing the phone's watch points")
+    try:
+        conn = db()
+        try:
+            merge_duplicate_shows(conn)
+        finally:
+            conn.close()
+    except Exception:
+        log_problem("merging duplicate shows")
 
 
 def serve_in_thread(port=None, host="127.0.0.1", tries=20):
