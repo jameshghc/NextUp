@@ -16,6 +16,19 @@ at the top.
 
 ---
 
+## 2026-10-10 — v0.1.68 (cont.), "no favourites in the library on mobile at all"
+
+Nothing was lost: the S21 had never had a favourite of its own, and its
+catalogue was last sent 2026-10-08, before favourites travelled with it — the
+PC was still running 0.1.66. Sent with the current code (the button's own
+`usb_send_library`): 72 favourites (67 films, 5 shows) and 28 on the
+watchlist arrived, two of them on the phone. One more catch: the phone opens
+its shelves on "On this device", and Favourites combines with that, so it
+would have shown 2. Favourites now widens Show to all for itself on the
+phone (`favWidened`), and Films / TV put "On this device" back after; a
+Show picked by hand is left alone. On the S21: 72 tiles in Favourites, and
+Films back on "On this device".
+
 ## 2026-10-10 — v0.1.68, the phone's Now tab, rebuilt for the space
 
 Measured on a 384x832 phone before: titlebar + tabs 133, the three filter

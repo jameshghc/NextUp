@@ -17098,6 +17098,7 @@ $('#spin').onclick = () => { if(currentTop) rejected.add(currentTop); loadTonigh
 /* The phone opens on what it can play — what's on it — with everything
    else a tap away under Show all. The PC opens on everything. */
 function defaultShelf(){ return document.body.classList.contains('android') ? 'here' : 'all'; }
+var favWidened = false;         // Favourites opened Show all for itself (the phone)
 $('#shelf').value = defaultShelf();
 let libKind = 'film';
 let libOffset = 0;
@@ -17181,6 +17182,15 @@ function drawLibNav(){
         /* Favourites holds films and shows alike — the same 'all' the
            Shelf dropdown's Favourites has always used. */
         libKind = id === 'tv' ? 'tv' : id === 'fav' ? 'all' : 'film';
+        /* The phone opens its shelves on "On this device", but Favourites
+           is every favourite, here or not: it shows all, and leaving it
+           puts the phone's usual Show back. A Show picked by hand stays. */
+        if(id === 'fav' && defaultShelf() !== 'all' && $('#shelf').value === defaultShelf()){
+          $('#shelf').value = 'all'; favWidened = true;
+        } else if(id !== 'fav' && favWidened){
+          if($('#shelf').value === 'all') $('#shelf').value = defaultShelf();
+          favWidened = false;
+        }
       }
       drawLibNav(); applyLibSection();
       if(!LIB_PANELS[id]){ loadLibrary(); paintResumeRow(); }

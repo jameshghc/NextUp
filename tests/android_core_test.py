@@ -276,6 +276,8 @@ check("phone: a second tap on the poster closes the peek rather than opening det
 check("phone Now: the pick in its own layout, filters folded to a line, Why this? on request",
       "function phonePick(" in page_src and 'id="nowfilters"' in page_src and 'id="whythis"' in page_src
       and "body.android #view-now:not(.hidden)" in page_src)
+check("phone Favourites shows every favourite, not just the ones on the phone",
+      "favWidened = true" in page_src)
 check("a details panel can be swiped down to close", "function sheetSwipe(" in page_src
       and "sheetSwipe(back" in page_src)
 
