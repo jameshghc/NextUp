@@ -112,8 +112,9 @@ New on `PhoneHandler`:
   same `media_file_check` as `/phone/file`, so a sleeping drive gets 503).
   It returns:
   - `url`: `/phone/stream/<ticket>`
-  - `subs`: `[/phone/stream/<ticket>/sub/<n>, …]`, the subtitle files beside
-    the video that the PC's own player would load
+  - `subs`: `[/phone/stream/<ticket>/sub/<n>, …]`, the `.srt`/`.ass` files
+    beside the video whose names start with its base name (the
+    `subtitle_sidecar` pattern, `<base>.<lang>.srt`, included)
   - `title`
   - `resume`: the PC's own resume position for that file, in seconds
 - **GET `/phone/stream/<ticket>`**, and `/sub/<n>`. These need no Bearer
