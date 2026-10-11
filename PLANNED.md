@@ -9,6 +9,27 @@ summarised away and files don't.
 
 ---
 
+## To check first, 2026-10-12: "Continue where you left off" with Wi-Fi streaming
+
+The user wants to see how Continue behaves for streamed films and episodes.
+Likely gap, from reading the code (not yet confirmed):
+- Streamed watch points live only in history, by tmdb identity
+  (`elsewhere_progress`), because there's no local row.
+- Continue and the "progress" shelf are built from local rows'
+  `in_progress` (`nextup.py` ~5366, ~5384), and elsewhere rows always
+  have `in_progress: False`.
+- So a film stopped halfway over Wi-Fi probably doesn't show in Continue
+  on the phone. The tile's peek PLAY does resume from the right point.
+
+Check on the S24, and with `tests/phone_serve.py --with-pc`:
+- stream a film, stop halfway, and look at Continue on the phone;
+- check the same film on the PC's Continue after the Wi-Fi swap;
+- check a streamed episode, and what "next episode" Continue offers.
+
+If it's missing, fill `in_progress` and `percent` on streamable elsewhere
+rows from `elsewhere_progress`, and let Continue include them while the PC
+is up.
+
 ## Streaming from the PC over Wi-Fi — built (v0.1.75, 2026-10-11)
 
 Built; see DEVELOPMENT_NOTES v0.1.75. Still to do: the user to restart the
