@@ -12728,6 +12728,138 @@ def phone_link_stop():
 # anybody should be able to press by accident.
 
 USB_PHONE_PACKAGE = "app.nextup.mobile"
+# --- the PC, from the phone ------------------------------------------------------
+#
+# The phone's half of the Wi-Fi link. SEND MY LIBRARY left it a token and
+# the PC's addresses (CONFIG["pc_link"]); from those it finds out whether
+# the PC is there right now, which is what lets a greyed film play. It only
+# looks when asked — the app opening, coming back to the front, a PLAY —
+# never on a timer: a phone in a pocket shouldn't be calling out to a PC
+# that's switched off.
+
+PC_LINK = {"up": False, "base": None, "pc": None, "needs_pairing": False,
+           "checked": 0.0, "synced": 0.0}
+PC_LINK_FRESH = 60              # seconds a check is good for
+PC_LINK_TIMEOUT = 1.5           # each address, and the call-out, get this long
+PC_LINK_CALL_TO = "255.255.255.255"
+_PC_LINK_LOCK = threading.Lock()
+
+
+def _pc_hello(ip, port, token):
+    """The PC's hello at one address: its reply, "unpaired" for a 401, or
+    None for no answer."""
+    req = urllib.request.Request("http://%s:%d/phone/hello" % (ip, port),
+                                 headers={"Authorization": "Bearer " + token})
+    try:
+        with urllib.request.urlopen(req, timeout=PC_LINK_TIMEOUT) as r:
+            return json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as exc:
+        return "unpaired" if exc.code == 401 else None
+    except (OSError, ValueError):
+        return None
+
+
+def _pc_call_out(port):
+    """Ask the whole home network "NEXTUP?" and return the IP that answers."""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    except OSError:
+        return None
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.settimeout(PC_LINK_TIMEOUT)
+        sock.sendto(b"NEXTUP?", (PC_LINK_CALL_TO, port))
+        deadline = time.time() + PC_LINK_TIMEOUT
+        while time.time() < deadline:
+            data, sender = sock.recvfrom(512)
+            try:
+                if json.loads(data.decode("utf-8")).get("nextup") == 1:
+                    return sender[0]
+            except (ValueError, AttributeError):
+                continue
+    except OSError:
+        return None
+    finally:
+        sock.close()
+    return None
+
+
+def pc_link_check(force=False):
+    """Is the PC there? Asks at most once a minute unless forced. Tries the
+    address that answered last time, then every address the PC gave over
+    the cable (a PC with a VPN has several, and some lead nowhere), then
+    calls out across the network."""
+    cfg = CONFIG.get("pc_link") or {}
+    if not cfg.get("token"):
+        PC_LINK.update(up=False, base=None, needs_pairing=False, checked=time.time())
+        return PC_LINK
+    with _PC_LINK_LOCK:
+        if not force and time.time() - PC_LINK["checked"] < PC_LINK_FRESH:
+            return PC_LINK
+        port = int(cfg.get("port") or PHONE_PORT)
+        tried, found, unpaired = [], None, False
+        for ip in [cfg.get("last_ip")] + list(cfg.get("addresses") or []):
+            if not ip or ip in tried:
+                continue
+            tried.append(ip)
+            hello = _pc_hello(ip, port, cfg["token"])
+            if hello == "unpaired":
+                unpaired = True
+            elif hello:
+                found = (ip, hello)
+                break
+        if not found and not unpaired:
+            ip = _pc_call_out(port)
+            if ip:
+                hello = _pc_hello(ip, port, cfg["token"])
+                if hello == "unpaired":
+                    unpaired = True
+                elif hello:
+                    found = (ip, hello)
+        if found:
+            ip, hello = found
+            PC_LINK.update(up=True, base="http://%s:%d" % (ip, port),
+                           pc=hello.get("pc") or cfg.get("pc"), needs_pairing=False)
+            if cfg.get("last_ip") != ip or (hello.get("device_id") and not cfg.get("pc_id")):
+                cfg["last_ip"] = ip
+                cfg["pc_id"] = cfg.get("pc_id") or hello.get("device_id")
+                save_json(CONFIG_PATH, CONFIG)
+        else:
+            PC_LINK.update(up=False, base=None, pc=cfg.get("pc"), needs_pairing=unpaired)
+        PC_LINK["checked"] = time.time()
+    return PC_LINK
+
+
+def pc_link_call(method, path, body=None, timeout=10):
+    """(status, reply) from the PC: JSON as a dict, anything else as bytes.
+    No answer at all is status 0, and means the PC has gone."""
+    cfg = CONFIG.get("pc_link") or {}
+    if not PC_LINK["base"] or not cfg.get("token"):
+        return 0, {"error": "the PC isn't there"}
+    req = urllib.request.Request(
+        PC_LINK["base"] + path, method=method,
+        data=json.dumps(body).encode("utf-8") if body is not None else None,
+        headers={"Authorization": "Bearer " + cfg["token"], "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            status, raw, kind = r.status, r.read(), r.headers.get("Content-Type") or ""
+    except urllib.error.HTTPError as exc:
+        status, raw, kind = exc.code, exc.read(), exc.headers.get("Content-Type") or ""
+    except OSError as exc:
+        PC_LINK.update(up=False, base=None, checked=time.time())
+        return 0, {"error": str(exc)}
+    if "json" in kind:
+        try:
+            return status, json.loads(raw or b"{}")
+        except ValueError:
+            pass
+    return status, raw
+
+
+def pc_link_public():
+    return {"up": PC_LINK["up"], "pc": PC_LINK["pc"], "needs_pairing": PC_LINK["needs_pairing"]}
+
+
 USB_PHONE_PORTS = range(8770, 8776)     # where the phone app may be serving
 USB_SEND = {"running": False, "step": "", "result": None, "error": None}
 _USB_LOCK = threading.Lock()
@@ -13228,7 +13360,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(remote_state())
 
             if route == "/api/status":
-                return self.send_json(self.status_payload())
+                payload = self.status_payload()
+                if PLATFORM == "android":
+                    payload["pc_link"] = pc_link_public()
+                return self.send_json(payload)
 
             if route == "/api/tonight":
                 exclude = [x for x in one("exclude", "").split(",") if x]
@@ -13863,6 +13998,15 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/mark/elsewhere":
                 return self.send_json({"on": mark_elsewhere(
                     data.get("kind"), data.get("tmdb_id"), data.get("what"))})
+
+            if route == "/api/link/check":
+                # Answered at once with what's known; the asking happens
+                # behind it, and the page looks again a moment later.
+                if PLATFORM != "android":
+                    return self.send_json({"error": "only on the phone"}, 404)
+                threading.Thread(target=pc_link_check, kwargs={"force": True},
+                                 daemon=True, name="pc link check").start()
+                return self.send_json(pc_link_public())
 
             if route == "/api/link/pair":
                 # From the PC, over the cable: how to reach it on the Wi-Fi.

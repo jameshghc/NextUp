@@ -151,6 +151,60 @@ again = n.phone_pair_direct(PHONE, "S24 Ultra")
 check("re-pairing replaces the old token", call("GET", "/phone/hello", direct)[0] == 401
       and call("GET", "/phone/hello", again)[0] == 200)
 token = again
+# --- Task 3: the phone finds the PC ---------------------------------------------------
+# This process now plays the phone too: same library, but it looks for the
+# PC's link on loopback, where the PC half above is listening.
+n.PLATFORM = "android"
+def link_cfg(addresses):
+    n.CONFIG["pc_link"] = {"token": token, "pc": "Test PC", "pc_id": n.sync_device_id(),
+                           "port": PORT, "addresses": addresses, "last_ip": None}
+link_cfg(["127.0.0.1"])
+st = n.pc_link_check(force=True)
+check("finds the PC at a stored address", st["up"] and st["pc"] and st["base"] == BASE, st)
+link_cfg(["10.255.255.1", "127.0.0.1"])
+t0 = time.time()
+st = n.pc_link_check(force=True)
+check("a dead first address is skipped", st["up"] and n.CONFIG["pc_link"]["last_ip"] == "127.0.0.1",
+      (st, n.CONFIG["pc_link"]["last_ip"], round(time.time() - t0, 1)))
+link_cfg([])
+n.PC_LINK_CALL_TO = "127.0.0.1"
+st = n.pc_link_check(force=True)
+check("finds it by calling out", st["up"] and n.CONFIG["pc_link"]["last_ip"] == "127.0.0.1", st)
+n.phone_forget(PHONE)
+st = n.pc_link_check(force=True)
+check("forgotten reads as needs pairing", not st["up"] and st["needs_pairing"], st)
+token = n.phone_pair_direct(PHONE, "S24 Ultra")
+link_cfg(["127.0.0.1"])
+check("paired again, it's up", n.pc_link_check(force=True)["up"])
+n.phone_link_stop()
+t0 = time.time()
+st = n.pc_link_check(force=True)
+took = time.time() - t0
+check("PC off reads as down within 4 s", not st["up"] and took < 4, (st, round(took, 2)))
+n.phone_link_start(PORT, "127.0.0.1")
+n.pc_link_check(force=True)
+asked = []
+_real_hello = n._pc_hello
+n._pc_hello = lambda *a, **k: asked.append(a) or _real_hello(*a, **k)
+n.pc_link_check()
+n._pc_hello = _real_hello
+check("a recent check is reused", not asked, asked)
+st, body = n.pc_link_call("GET", "/phone/hello")
+check("calls to the PC carry the token", st == 200 and body.get("ok"), (st, body))
+
+desk = n.ThreadingHTTPServer(("127.0.0.1", 8795), n.Handler)
+import threading
+threading.Thread(target=desk.serve_forever, daemon=True).start()
+with urllib.request.urlopen("http://127.0.0.1:8795/api/status", timeout=10) as r:
+    status = json.loads(r.read())
+check("status carries pc_link", (status.get("pc_link") or {}).get("up") is True
+      and status["pc_link"].get("pc"), status.get("pc_link"))
+with urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:8795/api/link/check",
+                                                   data=b"{}", method="POST"), timeout=10) as r:
+    checked = json.loads(r.read())
+check("the page can ask for a check", "up" in checked, checked)
+desk.shutdown()
+
 n.phone_link_stop()
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
