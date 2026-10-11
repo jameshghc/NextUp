@@ -94,8 +94,11 @@ shows nothing more than greyed tiles.
   `snapshot_episodes`, are "streamable".
 - The tile isn't greyed, and carries a small Wi-Fi mark where the "on this
   device" state would show.
-- The peek overlay's PLAY works on them, and so do the details page's
-  episode rows.
+- The peek overlay's PLAY works on them. For a show it plays the next
+  episode after the last one watched (from history), else S1E1.
+- Elsewhere shows have no details page today, so DETAILS on a streamable
+  show opens a light episode sheet: seasons and episodes from
+  `snapshot_episodes`, each with play and a watched tick.
 - "On this device" stays the default shelf and still means files on the
   phone. Show all is where streamable items appear.
 - When the PC stops answering (a failed play, or the next check), they go
