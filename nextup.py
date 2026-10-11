@@ -10166,42 +10166,42 @@ def elsewhere_progress(kind, tmdb_id, season=None, episode=None):
 def elsewhere_episodes(tmdb_id):
     """A greyed show's episodes, from the PC's catalogue, with what's been
     seen of each — for the phone's episode sheet, and to know which one
-    PLAY means: the one after the last seen to the end."""
+    PLAY means: the one after the last seen to the end. One pass over the
+    show's history, however long the show: a long-running one has hundreds
+    of episodes, and this is waited on by PLAY."""
     conn = db()
     try:
         show = conn.execute("SELECT title FROM snapshot_shows WHERE tmdb_id=?", (str(tmdb_id),)).fetchone()
         rows = conn.execute("SELECT season, episode, title FROM snapshot_episodes WHERE show_tmdb_id=?"
                             " ORDER BY season, episode", (str(tmdb_id),)).fetchall()
-        last = conn.execute(
-            "SELECT season, episode FROM history WHERE kind='episode' AND tmdb_id=? AND event='watched'"
-            " ORDER BY utc DESC, id DESC LIMIT 1", (str(tmdb_id),)).fetchone()
+        events = conn.execute(
+            "SELECT season, episode, event, position FROM history WHERE kind='episode' AND tmdb_id=?"
+            " AND event IN ('stopped', 'watched') ORDER BY utc ASC, id ASC", (str(tmdb_id),)).fetchall()
     finally:
         conn.close()
+    latest, ever, last = {}, set(), None
+    for e in events:
+        key = (e["season"], e["episode"])
+        latest[key] = e
+        if e["event"] == "watched":
+            ever.add(key)
+            last = key
     seasons, order = {}, []
     for r in rows:
-        seen = elsewhere_progress("episode", tmdb_id, r["season"], r["episode"])
-        watched = seen["watched"] or bool(_ever_watched(tmdb_id, r["season"], r["episode"]))
+        key = (r["season"], r["episode"])
+        end = latest.get(key)
+        position = int(end["position"] or 0) if end is not None and end["event"] == "stopped" else 0
         seasons.setdefault(r["season"], []).append({
             "episode": r["episode"], "title": r["title"] or "",
-            "watched": watched, "position": seen["position"]})
-        order.append((r["season"], r["episode"]))
+            "watched": key in ever, "position": position})
+        order.append(key)
     nxt = order[0] if order else None
-    if last and (last["season"], last["episode"]) in order:
-        at = order.index((last["season"], last["episode"]))
+    if last in order:
+        at = order.index(last)
         nxt = order[at + 1] if at + 1 < len(order) else None
     return {"title": show["title"] if show else "",
             "seasons": [{"season": k, "episodes": v} for k, v in sorted(seasons.items())],
             "next": {"season": nxt[0], "episode": nxt[1]} if nxt else None}
-
-
-def _ever_watched(tmdb_id, season, episode):
-    conn = db()
-    try:
-        return conn.execute("SELECT 1 FROM history WHERE kind='episode' AND tmdb_id=? AND season=?"
-                            " AND episode=? AND event='watched' LIMIT 1",
-                            (str(tmdb_id), season, episode)).fetchone()
-    finally:
-        conn.close()
 
 
 def elsewhere_rows(kind, query):
@@ -12685,6 +12685,21 @@ def phone_addresses():
     fallback when a phone can't find it by calling out."""
     found = []
     try:
+        # The address the PC would reach the rest of the network from —
+        # its Wi-Fi or cable, not a VPN's or a virtual machine's — first, so
+        # a phone trying them in order wastes no time on the others. A UDP
+        # "connect" sends nothing; it only asks which way out it would take.
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect(("192.168.255.255", 9))
+            ip = probe.getsockname()[0]
+            if ipaddress.ip_address(ip).is_private and not ipaddress.ip_address(ip).is_loopback:
+                found.append(ip)
+        finally:
+            probe.close()
+    except (OSError, ValueError):
+        pass
+    try:
         for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
             ip = info[4][0]
             addr = ipaddress.ip_address(ip)
@@ -12815,7 +12830,7 @@ USB_PHONE_PACKAGE = "app.nextup.mobile"
 # that's switched off.
 
 PC_LINK = {"up": False, "base": None, "pc": None, "needs_pairing": False,
-           "checked": 0.0, "synced": 0.0}
+           "checked": 0.0, "synced": 0.0, "checking": False}
 PC_LINK_FRESH = 60              # seconds a check is good for
 PC_LINK_TIMEOUT = 1.5           # each address, and the call-out, get this long
 PC_LINK_CALL_TO = "255.255.255.255"
@@ -12873,37 +12888,46 @@ def pc_link_check(force=False):
     with _PC_LINK_LOCK:
         if not force and time.time() - PC_LINK["checked"] < PC_LINK_FRESH:
             return PC_LINK
-        port = int(cfg.get("port") or PHONE_PORT)
-        tried, found, unpaired = [], None, False
-        for ip in [cfg.get("last_ip")] + list(cfg.get("addresses") or []):
-            if not ip or ip in tried:
-                continue
-            tried.append(ip)
+        PC_LINK["checking"] = True
+        try:
+            return _pc_link_find(cfg)
+        finally:
+            PC_LINK["checking"] = False
+
+
+def _pc_link_find(cfg):
+    """pc_link_check's asking, under its lock."""
+    port = int(cfg.get("port") or PHONE_PORT)
+    tried, found, unpaired = [], None, False
+    for ip in [cfg.get("last_ip")] + list(cfg.get("addresses") or []):
+        if not ip or ip in tried:
+            continue
+        tried.append(ip)
+        hello = _pc_hello(ip, port, cfg["token"])
+        if hello == "unpaired":
+            unpaired = True
+        elif hello:
+            found = (ip, hello)
+            break
+    if not found and not unpaired:
+        ip = _pc_call_out(port)
+        if ip:
             hello = _pc_hello(ip, port, cfg["token"])
             if hello == "unpaired":
                 unpaired = True
             elif hello:
                 found = (ip, hello)
-                break
-        if not found and not unpaired:
-            ip = _pc_call_out(port)
-            if ip:
-                hello = _pc_hello(ip, port, cfg["token"])
-                if hello == "unpaired":
-                    unpaired = True
-                elif hello:
-                    found = (ip, hello)
-        if found:
-            ip, hello = found
-            PC_LINK.update(up=True, base="http://%s:%d" % (ip, port),
-                           pc=hello.get("pc") or cfg.get("pc"), needs_pairing=False)
-            if cfg.get("last_ip") != ip or (hello.get("device_id") and not cfg.get("pc_id")):
-                cfg["last_ip"] = ip
-                cfg["pc_id"] = cfg.get("pc_id") or hello.get("device_id")
-                save_json(CONFIG_PATH, CONFIG)
-        else:
-            PC_LINK.update(up=False, base=None, pc=cfg.get("pc"), needs_pairing=unpaired)
-        PC_LINK["checked"] = time.time()
+    if found:
+        ip, hello = found
+        PC_LINK.update(up=True, base="http://%s:%d" % (ip, port),
+                       pc=hello.get("pc") or cfg.get("pc"), needs_pairing=False)
+        if cfg.get("last_ip") != ip or (hello.get("device_id") and not cfg.get("pc_id")):
+            cfg["last_ip"] = ip
+            cfg["pc_id"] = cfg.get("pc_id") or hello.get("device_id")
+            save_json(CONFIG_PATH, CONFIG)
+    else:
+        PC_LINK.update(up=False, base=None, pc=cfg.get("pc"), needs_pairing=unpaired)
+    PC_LINK["checked"] = time.time()
     return PC_LINK
 
 
@@ -13040,12 +13064,14 @@ def pc_stream_play(stream, resume=False):
     android_play(base + reply["url"], start, subs=[base + x for x in reply.get("subs") or []])
     log_event(kind, None, title, "played", ident=ident)
     _ANDROID_SITTING.clear()
-    _ANDROID_SITTING.update(kind=kind, id=None, stream=ident, title=title, started_at=time.time())
+    _ANDROID_SITTING.update(kind=kind, id=None, stream=ident, title=title, started_at=time.time(),
+                            start=start)
     return {"ok": True}
 
 
 def pc_link_public():
-    return {"up": PC_LINK["up"], "pc": PC_LINK["pc"], "needs_pairing": PC_LINK["needs_pairing"]}
+    return {"up": PC_LINK["up"], "pc": PC_LINK["pc"], "needs_pairing": PC_LINK["needs_pairing"],
+            "checking": PC_LINK["checking"]}
 
 
 USB_PHONE_PORTS = range(8770, 8776)     # where the phone app may be serving
@@ -15650,6 +15676,8 @@ body.android .tile.elsewhere.streamable .cap{padding-bottom:26px}
 .epsheet .erow .ename{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .epsheet .erow .eseen{color:var(--marigold);flex:none;width:14px;text-align:center}
 .epsheet .erow button{flex:none;padding:6px 12px}
+.epsheet .erow{flex-wrap:wrap}
+.streamproblem{flex-basis:100%;font-size:12px;line-height:1.35;color:#ff8f7a;margin-top:6px;text-align:center}
 .elsewhereline{color:var(--marigold);opacity:.85;}
 /* The picker covers everything below the title bar. Not the bar itself —
    being unable to close a window because nobody has been chosen yet is the
@@ -18710,7 +18738,7 @@ function tile(item){
       go.textContent = '…';
       const r = await withWaking(go, () => playStream(item));
       go.textContent = r && r.error ? 'FAILED' : 'PLAYING';
-      if(r && r.error) go.title = r.error;
+      streamProblem(peek, r && r.error);
     };
     peek.append(go);
     if(item.kind === 'tvshow'){
@@ -18866,6 +18894,15 @@ const WIFI_GLYPH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" s
   'stroke-linecap="round"><path d="M2 8.5a15 15 0 0 1 20 0"/><path d="M5.5 12.5a10 10 0 0 1 13 0"/>' +
   '<path d="M9 16.3a5 5 0 0 1 6 0"/><circle cx="12" cy="20" r="1.2" fill="currentColor"/></svg>';
 
+/* Why a stream didn't start, said where you're looking — a phone has no
+   hover to show a tooltip. Cleared by the next try that works. */
+function streamProblem(where, why){
+  let line = where.querySelector('.streamproblem');
+  if(!why){ if(line) line.remove(); return; }
+  if(!line){ line = el('div','streamproblem'); where.append(line); }
+  line.textContent = why;
+}
+
 async function playStream(item){
   if(item.kind !== 'tvshow')
     return post('/api/play', {stream: {kind: 'movie', tmdb_id: item.tmdb_id}, resume: true});
@@ -18912,7 +18949,7 @@ async function openElsewhereShow(tmdbId){
         const r = await withWaking(go, () => post('/api/play', {stream: {kind: 'episode', tmdb_id: tmdbId,
           season: se.season, episode: ep.episode}, resume: true}));
         go.textContent = r && r.error ? 'FAILED' : 'PLAYING';
-        if(r && r.error) go.title = r.error;
+        streamProblem(row, r && r.error);
       };
       row.append(go);
       body.append(row);
@@ -22305,11 +22342,17 @@ function lookForPC(){
   if(!document.body.classList.contains('android')) return;
   post('/api/link/check').then(r => {
     if(r && pcLinkUp === null) pcLinkUp = !!r.up;
-    setTimeout(async () => {
+    /* A PC with several network adapters can take longer than the first
+       look; while the phone says it's still finding it, look again a
+       little later — a handful of times, and only after this one ask. */
+    let looks = 0;
+    const look = async () => {
       const s = await api('/api/status');
+      if(s && s.pc_link && s.pc_link.checking && ++looks < 6){ setTimeout(look, 2000); return; }
       const up = !!(s && s.pc_link && s.pc_link.up);
       if(up !== pcLinkUp){ pcLinkUp = up; loadLibrary(true); }
-    }, 4000);
+    };
+    setTimeout(look, 4000);
   });
 }
 document.addEventListener('visibilitychange', () => {
@@ -23333,6 +23376,28 @@ def _android_play_finished(position=None, duration=None, completed=False):
         note_playback_finished(kind, item_id, ran_for, position=position, duration=duration)
 
 
+# How much of a streamed thing's known length has to have played for mpv's
+# "it ended" to be believed. Generous: a TMDB runtime counts credits that a
+# file may have trimmed, and a sitting may have skipped the opening.
+STREAM_END_FRACTION = 0.85
+
+
+def _stream_length(kind, ident):
+    """Roughly how long it is, in seconds, or 0 when there's no telling:
+    a film's catalogue runtime; an episode, the usual length of that show's
+    episodes as seen in the history."""
+    conn = db()
+    try:
+        if kind == "movie":
+            row = conn.execute("SELECT runtime FROM snapshot_movies WHERE tmdb_id=?", (ident[0],)).fetchone()
+            return int(row["runtime"] or 0) if row else 0
+        totals = sorted(r[0] for r in conn.execute(
+            "SELECT total FROM history WHERE kind='episode' AND tmdb_id=? AND total > 0", (ident[0],)))
+        return int(totals[len(totals) // 2]) if totals else 0
+    finally:
+        conn.close()
+
+
 def _stream_finished(sitting, position, duration, completed):
     """A sitting streamed from the PC has ended. There's no row here to put
     a watch point on, so it goes in the history by what it is — which is
@@ -23341,6 +23406,12 @@ def _stream_finished(sitting, position, duration, completed):
     ran_for = time.time() - (sitting.get("started_at") or time.time())
     if completed:
         if ran_for < MIN_WATCH_SECONDS:
+            return
+        # Over the Wi-Fi a film can end early — the PC shut down, the
+        # signal went — and mpv may close as though it reached the end.
+        # Where the length is known, it's only the end if it got near it.
+        length = _stream_length(kind, ident)
+        if length and (sitting.get("start") or 0) + ran_for < length * STREAM_END_FRACTION:
             return
         log_event(kind, None, title, "watched", seconds=ran_for, position=duration,
                   total=duration, ident=ident)

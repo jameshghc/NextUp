@@ -18,7 +18,7 @@ def check(name, ok, detail=""):
     ok = bool(ok); results.append(ok)
     print("%s  %s%s" % ("PASS" if ok else "FAIL", name, ("  -- %s" % (detail,)) if detail != "" else ""))
 
-import urllib.request, urllib.error
+import urllib.request, urllib.error, threading
 PORT = 8797
 BASE = "http://127.0.0.1:%d" % PORT
 PHONE = "0123456789abcdef"
@@ -189,6 +189,17 @@ n._pc_hello = lambda *a, **k: asked.append(a) or _real_hello(*a, **k)
 n.pc_link_check()
 n._pc_hello = _real_hello
 check("a recent check is reused", not asked, asked)
+# Final review, Important 2: a PC whose dead adapters come first takes
+# longer than the page's first look; the status says a check is running so
+# the page can look again when it's done.
+link_cfg(["10.255.255.1", "10.255.255.2", "127.0.0.1"])
+seen = {}
+th = threading.Thread(target=lambda: n.pc_link_check(force=True))
+th.start(); time.sleep(0.3)
+seen["during"] = n.pc_link_public().get("checking")
+th.join()
+seen["after"] = n.pc_link_public().get("checking")
+check("the status says while a check is running", seen == {"during": True, "after": False}, seen)
 st, body = n.pc_link_call("GET", "/phone/hello")
 check("calls to the PC carry the token", st == 200 and body.get("ok"), (st, body))
 
@@ -348,6 +359,39 @@ n.LOCAL.loaded_at = 0
 st, body = desk_post("/api/play", {"type": "movie", "id": cid})
 check("copied later keeps the point", st == 200 and played[-1][0] == copy and played[-1][1] == 2000,
       (st, body, played[-1]))
+
+# Final review, Important 1: over Wi-Fi a stream can end early (the PC shut
+# down, the Wi-Fi dropped) and mpv may close as though it reached the end.
+# For a film whose length is known, that only counts as watched if it ran
+# for most of it.
+conn = n.db(); conn.execute("UPDATE snapshot_movies SET runtime=6000 WHERE tmdb_id='888001'"); conn.commit(); conn.close()
+desk_post("/api/play", {"stream": {"kind": "movie", "tmdb_id": "888001"}, "resume": True})
+n._ANDROID_SITTING["started_at"] = time.time() - 25 * 60
+n.android_play_finished(completed=True)
+check("a stream cut short isn't counted as watched", n.elsewhere_progress("movie", "888001")["watched"] is False,
+      n.elsewhere_progress("movie", "888001"))
+desk_post("/api/play", {"stream": {"kind": "movie", "tmdb_id": "888001"}, "resume": True})
+n._ANDROID_SITTING["started_at"] = time.time() - 98 * 60
+n.android_play_finished(completed=True)
+check("one that ran its length is", n.elsewhere_progress("movie", "888001")["watched"] is True)
+
+# Final review, Important 4: a long show's sheet (and PLAY on its tile) must
+# not crawl. 750 episodes and plenty of history.
+conn = n.db()
+for i in range(750):
+    conn.execute("INSERT OR REPLACE INTO snapshot_episodes (show_tmdb_id,season,episode,title) VALUES ('888009',?,?,?)",
+                 (1 + i // 25, 1 + i % 25, "E%d" % i))
+conn.execute("INSERT OR REPLACE INTO snapshot_shows (tmdb_id,title,year,episode_count) VALUES ('888009','Long Show',1989,750)")
+for i in range(0, 750, 3):
+    conn.execute("INSERT INTO history (at,kind,item_id,title,event,uid,utc,tmdb_id,season,episode,position)"
+                 " VALUES ('2026-01-01 00:00:00','episode',NULL,'x',?,?,?,'888009',?,?,600)",
+                 ("watched" if i % 2 else "stopped", "long-%d" % i, 1000.0 + i, 1 + i // 25, 1 + i % 25))
+conn.commit(); conn.close()
+t0 = time.time()
+long_show = n.elsewhere_episodes("888009")
+took = time.time() - t0
+check("a 750-episode show's sheet is quick", took < 0.5 and sum(len(x["episodes"]) for x in long_show["seasons"]) == 750,
+      round(took, 2))
 
 pc_says("asleep 1")
 before = len(played)

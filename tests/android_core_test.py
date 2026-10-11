@@ -301,6 +301,12 @@ _look = page_src[page_src.find("function lookForPC"):][:1400]
 check("Wi-Fi: the phone looks for the PC on opening and on coming back, never on a timer",
       "post('/api/link/check')" in _look and "'visibilitychange'" in _look
       and "setInterval" not in _look, _look[:120])
+_look = page_src[page_src.find("function lookForPC"):][:1600]
+check("Wi-Fi: the page looks again while the phone is still finding the PC",
+      "s.pc_link.checking" in _look, "")
+check("Wi-Fi: why a stream didn't start is on screen, not in a tooltip",
+      "function streamProblem(" in page_src and page_src.count("streamProblem(") >= 3
+      and "go.title = r.error" not in page_src)
 check("a details panel can be swiped down to close", "function sheetSwipe(" in page_src
       and "sheetSwipe(back" in page_src)
 
