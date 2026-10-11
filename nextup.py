@@ -11936,6 +11936,29 @@ def phone_pair_finish(code, device_id, name):
             raise AppError("Too many wrong codes. Press PAIR A PHONE for a new one.")
         raise AppError("That's not the code on the PC.")
     PHONE_PAIRING.update(code=None)           # one phone per code
+    return _phone_store_device(device_id, name)
+
+
+def phone_pair_direct(device_id, name):
+    """Pair a phone with no code: for SEND MY LIBRARY, where the phone is on
+    the cable and already trusted with the whole catalogue. The same checks
+    on the id as pairing by code, and the same storage."""
+    if not _PHONE_ID_RE.match(device_id or ""):
+        raise AppError("That doesn't look like a Next Up phone.")
+    # Not phone_id_taken: by now the cable swap has filed this phone's own
+    # history under this id, so to that check it looks taken — by itself.
+    # Over the cable the phone has just proved which id is its own; the one
+    # it can never have is this PC's.
+    if device_id == sync_device_id():
+        raise AppError("Another device already uses that id. Reinstalling "
+                       "Next Up on the phone gives it a new one.")
+    _phone_cut(device_id)       # the old token is about to stop working
+    phone_tickets_drop(device_id)
+    return _phone_store_device(device_id, name)
+
+
+def _phone_store_device(device_id, name):
+    """A new token for this phone, replacing any it had, kept as a hash."""
     token = secrets.token_urlsafe(32)
     cfg = phone_cfg()
     cfg["devices"] = [d for d in cfg["devices"] if d.get("id") != device_id]
@@ -13020,9 +13043,16 @@ def usb_send_library(step=None):
                                 {"snapshot": build_library_snapshot()}, timeout=1200)
         say("Swapping history, ratings, favourites and watch points")
         shared = usb_swap_history(local)
+        say("Letting the phone stream from here over Wi-Fi")
+        try:
+            streaming = usb_pair_for_wifi(local, shared.pop("device_id", None),
+                                          shared.get("phone") or "Phone")
+        except Exception as exc:
+            log_problem("pairing the phone for Wi-Fi")
+            streaming = str(exc) or exc.__class__.__name__
         say("Having the phone look at its own films")
         _usb_phone_call(local, "POST", "/api/library/scan", {})
-        return dict(reply.get("imported") or {}, shared=shared)
+        return dict(reply.get("imported") or {}, shared=shared, streaming=streaming)
     finally:
         if local:
             usb_adb("-s", serial, "forward", "--remove", "tcp:%d" % local)
@@ -13046,7 +13076,31 @@ def usb_swap_history(local):
                            {"text": phone_events_for(mine["device_id"]),
                             "from": sync_device_id()}, timeout=600)
     return {"from_phone": kept, "to_phone": back.get("arrived", 0),
-            "phone": mine.get("device") or "the phone"}
+            "phone": mine.get("device") or "the phone",
+            "device_id": mine["device_id"]}
+
+
+def usb_pair_for_wifi(local, device_id, name):
+    """While the phone is on the cable anyway: switch the Wi-Fi link on and
+    hand the phone a token for it, so it can stream from here later with no
+    code typed. Says how it went, in words for the send's result; never
+    fails the send."""
+    if not device_id:
+        return "update the phone app"
+    phone_link_set(True)
+    try:
+        token = phone_pair_direct(device_id, name)
+    except AppError as exc:
+        return str(exc)
+    try:
+        _usb_phone_call(local, "POST", "/api/link/pair", {
+            "token": token, "pc": snapshot_device_name(), "pc_id": sync_device_id(),
+            "port": PHONE_PORT, "addresses": phone_addresses()})
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return "update the phone app"
+        raise
+    return PHONE_LINK_ERROR[0] or "on"
 
 
 def usb_send_worker():
@@ -13809,6 +13863,18 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/mark/elsewhere":
                 return self.send_json({"on": mark_elsewhere(
                     data.get("kind"), data.get("tmdb_id"), data.get("what"))})
+
+            if route == "/api/link/pair":
+                # From the PC, over the cable: how to reach it on the Wi-Fi.
+                if PLATFORM != "android":
+                    return self.send_json({"error": "only on the phone"}, 404)
+                CONFIG["pc_link"] = {
+                    "token": str(data.get("token") or ""), "pc": str(data.get("pc") or ""),
+                    "pc_id": str(data.get("pc_id") or ""), "port": int(data.get("port") or PHONE_PORT),
+                    "addresses": [str(a) for a in (data.get("addresses") or [])][:8],
+                    "last_ip": None}
+                save_json(CONFIG_PATH, CONFIG)
+                return self.send_json({"ok": True})
 
             if route == "/api/share/import":
                 if PLATFORM != "android":

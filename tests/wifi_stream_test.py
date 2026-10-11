@@ -135,6 +135,22 @@ for _ in range(20):
 check("twenty live tickets per phone", call("GET", first)[0] == 404 and call("GET", last)[0] == 200)
 
 # The rest of the suite (tasks 2 to 5) appends below this line.
+
+# --- Task 2: pairing over the cable -------------------------------------------------
+direct = n.phone_pair_direct(PHONE, "S24 Ultra")
+check("direct pairing gives a working token", call("GET", "/phone/hello", direct)[0] == 200)
+def refused(fn, *a):
+    try:
+        fn(*a)
+    except n.AppError:
+        return True
+    return False
+check("direct pairing refuses a bad id", refused(n.phone_pair_direct, "../etc", "x"))
+check("direct pairing refuses this PC's own id", refused(n.phone_pair_direct, n.sync_device_id(), "x"))
+again = n.phone_pair_direct(PHONE, "S24 Ultra")
+check("re-pairing replaces the old token", call("GET", "/phone/hello", direct)[0] == 401
+      and call("GET", "/phone/hello", again)[0] == 200)
+token = again
 n.phone_link_stop()
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

@@ -22,7 +22,7 @@ def check(name, ok, detail=""):
 got = []
 # What the pretend phone has to share: a favourite, made on the phone, of a
 # film the PC also has — filled in once the library is open below.
-PHONE_SHARE = {"device_id": "phone-s24", "device": "James's S24 Ultra", "text": ""}
+PHONE_SHARE = {"device_id": "5024aabbccdd0024", "device": "James's S24 Ultra", "text": ""}
 class FakePhone(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def reply(self, obj):
@@ -39,6 +39,8 @@ class FakePhone(BaseHTTPRequestHandler):
         got.append(("POST", self.path, json.loads(raw or b"{}")))
         if self.path.startswith("/api/share/import"):
             return self.reply({"ok": True, "arrived": 5, "applied": 4})
+        if self.path.startswith("/api/link/pair"):
+            return self.reply({"ok": True})
         self.reply({"ok": True, "imported": {"movies": 3, "shows": 2, "episodes": 9, "art": 0}})
 phone = ThreadingHTTPServer(("127.0.0.1", 0), FakePhone)
 threading.Thread(target=phone.serve_forever, daemon=True).start()
@@ -104,11 +106,13 @@ _two = _c.execute("SELECT id, tmdb_id, title FROM movies WHERE tmdb_id IS NOT NU
 _c.execute("UPDATE movies SET favourited_at='2026-10-09 01:00:00' WHERE id=?", (_two[1]["id"],))
 _c.commit(); _c.close()
 PHONE_SHARE["text"] = json.dumps({"v": 1, "uid": "phone-ev-1", "utc": time.time(),
-    "device_id": "phone-s24", "device": "James's S24 Ultra", "kind": "movie",
+    "device_id": "5024aabbccdd0024", "device": "James's S24 Ultra", "kind": "movie",
     "tmdb": str(_two[0]["tmdb_id"]), "season": None, "episode": None, "show": None,
     "title": _two[0]["title"], "event": "favourited", "value": None, "seconds": None,
     "position": None, "total": None}) + "\n"
 calls.clear(); got.clear()
+# The Wi-Fi link opens on a test port, never the real one the PC app may hold.
+n.PHONE_PORT, n.PHONE_HOST = 8796, "127.0.0.1"
 result = n.usb_send_library()
 posts = {p: body for m, p, body in got if m == "POST"}
 snap = (posts.get("/api/library/snapshot/import") or {}).get("snapshot") or {}
@@ -134,10 +138,30 @@ check("the PC's favourites go to the phone",
       any(e.get("event") == "favourited" and e.get("tmdb") == str(_two[1]["tmdb_id"]) for e in _lines),
       len(_lines))
 check("the phone isn't sent its own events back",
-      not any(e.get("device_id") == "phone-s24" for e in _lines))
+      not any(e.get("device_id") == "5024aabbccdd0024" for e in _lines))
 check("the result says what was swapped", (result.get("shared") or {}).get("from_phone") == 1
       and (result.get("shared") or {}).get("to_phone") == 5, result.get("shared"))
 check("the result says what arrived", result.get("movies") == 3 and result.get("shows") == 2, result)
+_pair = posts.get("/api/link/pair") or {}
+check("the send pairs the phone for Wi-Fi",
+      (n.phone_device_for_token(_pair.get("token") or "") or {}).get("id") == "5024aabbccdd0024"
+      and _pair.get("port") == 8796 and _pair.get("pc_id") == n.sync_device_id()
+      and isinstance(_pair.get("addresses"), list), {k: v for k, v in _pair.items() if k != "token"})
+check("and says streaming is on", result.get("streaming") == "on", result.get("streaming"))
+n.phone_link_stop()
+_real_start = n.phone_link_start
+def _no_port(*a, **k):
+    raise OSError("port in use")
+n.phone_link_start = _no_port
+got.clear()
+try:
+    _r2 = n.usb_send_library()
+except Exception as exc:
+    _r2 = {"raised": str(exc)}
+n.phone_link_start = _real_start
+check("a port that won't open is reported, and the send still succeeds",
+      "raised" not in _r2 and "port" in str(_r2.get("streaming")) and _r2.get("movies") == 3, _r2)
+n.phone_link_set(False)
 check("the tunnel is taken down after", any(c[:2] == ("forward", "--remove") or
                                             (len(c) > 2 and c[2:4] == ("forward", "--remove")) for c in calls), calls)
 
