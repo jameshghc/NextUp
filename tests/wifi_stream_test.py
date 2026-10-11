@@ -205,6 +205,54 @@ with urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:8795/api/li
 check("the page can ask for a check", "up" in checked, checked)
 desk.shutdown()
 
+# --- Task 4: history both ways over Wi-Fi -----------------------------------------------
+# A real second machine for the PC: its own process and database. This one
+# is the phone from here on, under the phone's own id.
+import subprocess
+n.CONFIG["device_id"] = PHONE
+PC_PORT = 8794
+pc = subprocess.Popen([sys.executable, os.path.join(here, "wifi_pc_helper.py"), str(PC_PORT), PHONE],
+                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+def pc_says(cmd):
+    pc.stdin.write(cmd + "\n"); pc.stdin.flush()
+    return pc.stdout.readline().strip()
+pc_token = pc.stdout.readline().strip()
+n.CONFIG["pc_link"] = {"token": pc_token, "pc": "Test PC", "pc_id": "", "port": PC_PORT,
+                       "addresses": ["127.0.0.1"], "last_ip": None}
+n.pc_link_check(force=True)
+n.log_event("movie", film_id, "Don't Look Up", "stopped", seconds=700, position=600, total=6000)
+conn = n.db()
+uid = conn.execute("SELECT uid FROM history WHERE event='stopped' ORDER BY id DESC LIMIT 1").fetchone()[0]
+conn.close()
+pc_says("rate 777001 8")
+got = n.pc_link_sync()
+check("the phone's stop reaches the PC", pc_says("has " + uid) == "1", got)
+conn = n.db()
+mine = conn.execute("SELECT userrating FROM movies WHERE id=?", (film_id,)).fetchone()[0]
+conn.close()
+check("the PC's rating reaches the phone", mine == 8, (mine, got))
+# Both halves here started as copies of one library, so the first swap moves
+# thousands of events and the seeds (what was true before history) shift as
+# they land; one more swap carries those. After that it must be still.
+n.pc_link_sync()
+before = pc_says("inbox")
+again = n.pc_link_sync()
+check("a second sync adds nothing", again and again.get("from_pc") == 0 and pc_says("inbox") == before,
+      (again, before, pc_says("inbox")))
+check("the PC's lines are filed under its own id", os.path.exists(
+      os.path.join(n.PHONE_SYNC_DIR, "device-%s.jsonl" % n.CONFIG["pc_link"]["pc_id"])),
+      n.CONFIG["pc_link"]["pc_id"])
+soon = []
+_real_soon = n.pc_link_sync_soon
+n.pc_link_sync_soon = lambda: soon.append(1)
+n.android_play_finished(position=None, duration=None)
+n.pc_link_sync_soon = _real_soon
+check("every sitting ending swaps history", soon == [1], soon)
+pc_says("quit"); pc.wait(10)
+n.PC_LINK.update(checked=0)
+n.pc_link_check(force=True)
+check("link down gives None, no raise", n.pc_link_sync() is None)
+
 n.phone_link_stop()
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

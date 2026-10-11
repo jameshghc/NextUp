@@ -12830,16 +12830,18 @@ def pc_link_check(force=False):
     return PC_LINK
 
 
-def pc_link_call(method, path, body=None, timeout=10):
+def pc_link_call(method, path, body=None, timeout=10, raw=None):
     """(status, reply) from the PC: JSON as a dict, anything else as bytes.
-    No answer at all is status 0, and means the PC has gone."""
+    `raw` is sent as it is instead of `body` as JSON. No answer at all is
+    status 0, and means the PC has gone."""
     cfg = CONFIG.get("pc_link") or {}
     if not PC_LINK["base"] or not cfg.get("token"):
         return 0, {"error": "the PC isn't there"}
     req = urllib.request.Request(
         PC_LINK["base"] + path, method=method,
-        data=json.dumps(body).encode("utf-8") if body is not None else None,
-        headers={"Authorization": "Bearer " + cfg["token"], "Content-Type": "application/json"})
+        data=raw if raw is not None else (json.dumps(body).encode("utf-8") if body is not None else None),
+        headers={"Authorization": "Bearer " + cfg["token"],
+                 "Content-Type": "text/plain; charset=utf-8" if raw is not None else "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             status, raw, kind = r.status, r.read(), r.headers.get("Content-Type") or ""
@@ -12854,6 +12856,61 @@ def pc_link_call(method, path, body=None, timeout=10):
         except ValueError:
             pass
     return status, raw
+
+
+PC_LINK_SYNC_EVERY = 600       # at most this often on a check alone
+_PC_SYNCING = threading.Lock()
+
+
+def pc_link_sync():
+    """Swap history with the PC over the Wi-Fi: exactly what the cable's
+    usb_swap_history does, from this end. The phone's whole sharing file
+    goes up (the PC keeps only the lines in the phone's own name), and the
+    PC's comes back whole and is read from the top — uids make a line seen
+    twice harmless. None when the PC isn't there; never raises."""
+    if not PC_LINK["up"]:
+        return None
+    try:
+        mine = share_export()
+        status, reply = pc_link_call("POST", "/phone/sync", raw=mine["text"].encode("utf-8"),
+                                     timeout=120)
+        if status != 200:
+            return None
+        sent = reply.get("kept", 0) if isinstance(reply, dict) else 0
+        status, text = pc_link_call("GET", "/phone/sync", timeout=120)
+        if status != 200 or not isinstance(text, bytes):
+            return None
+        cfg = CONFIG.get("pc_link") or {}
+        back = share_import(text.decode("utf-8", "replace"), cfg.get("pc_id") or "pc")
+        PC_LINK["synced"] = time.time()
+        return {"to_pc": sent, "from_pc": back.get("arrived", 0)}
+    except Exception:
+        log_problem("wi-fi sync")
+        return None
+
+
+def pc_link_sync_soon():
+    """pc_link_sync behind the scenes, one at a time: a sitting ending must
+    never wait on the Wi-Fi."""
+    if PLATFORM != "android" or not (CONFIG.get("pc_link") or {}).get("token"):
+        return
+
+    def run():
+        if not _PC_SYNCING.acquire(blocking=False):
+            return
+        try:
+            if pc_link_check()["up"]:
+                pc_link_sync()
+        finally:
+            _PC_SYNCING.release()
+    threading.Thread(target=run, daemon=True, name="wi-fi sync").start()
+
+
+def pc_link_look():
+    """What the page asks for when the app opens or comes back: is the PC
+    there — and if it is and it's been a while, swap history with it."""
+    if pc_link_check(force=True)["up"] and time.time() - PC_LINK["synced"] > PC_LINK_SYNC_EVERY:
+        pc_link_sync_soon()
 
 
 def pc_link_public():
@@ -14004,8 +14061,8 @@ class Handler(BaseHTTPRequestHandler):
                 # behind it, and the page looks again a moment later.
                 if PLATFORM != "android":
                     return self.send_json({"error": "only on the phone"}, 404)
-                threading.Thread(target=pc_link_check, kwargs={"force": True},
-                                 daemon=True, name="pc link check").start()
+                threading.Thread(target=pc_link_look, daemon=True,
+                                 name="pc link check").start()
                 return self.send_json(pc_link_public())
 
             if route == "/api/link/pair":
@@ -22965,6 +23022,15 @@ _ANDROID_SITTING = {}
 
 
 def android_play_finished(position=None, duration=None, completed=False):
+    """mpv on the phone has closed: record the sitting, then, if the PC is on
+    the Wi-Fi, tell it — so stopping half way in bed is known on the sofa."""
+    try:
+        _android_play_finished(position, duration, completed)
+    finally:
+        pc_link_sync_soon()
+
+
+def _android_play_finished(position=None, duration=None, completed=False):
     """mpv on the phone has closed. Called by the Android app with what mpv
     handed back: where it stopped and how long the file is, in seconds, or
     that it played to the end. Recorded exactly as a sitting in mpv on the
