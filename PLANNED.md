@@ -9,6 +9,13 @@ summarised away and files don't.
 
 ---
 
+## Streaming from the PC over Wi-Fi — built (v0.1.75, 2026-10-11)
+
+Built; see DEVELOPMENT_NOTES v0.1.75. Still to do: the user to restart the
+PC app, SEND MY LIBRARY once (that pairs the phone), and try it on the
+real network. Not built (out of scope): streaming away from home, and
+phone-side code pairing.
+
 ## Android app: where it stands (2026-10-08)
 
 - **Done:** step 1 (PC phone link, v0.1.48), step 2 (toolchain in

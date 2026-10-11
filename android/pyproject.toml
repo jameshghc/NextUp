@@ -3,7 +3,7 @@
 [tool.briefcase]
 project_name = "Next Up"
 bundle = "app.nextup"
-version = "0.1.74"
+version = "0.1.75"
 url = "https://nextup.app/"
 license = "Proprietary"
 author = "jambo"

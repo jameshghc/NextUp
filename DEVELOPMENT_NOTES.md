@@ -16,6 +16,84 @@ at the top.
 
 ---
 
+## 2026-10-11 — v0.1.75, streaming from the PC over home Wi-Fi
+
+The user asked whether the phone could play from the main library when both
+are on the same Wi-Fi. Their library averages 5.7 Mbps (median of 150 films;
+90th percentile 7.7, heaviest 13.8), so any home Wi-Fi carries the original
+file and nothing is transcoded. Spec:
+`docs/superpowers/specs/2026-10-11-wifi-streaming-design.md`, plan beside it
+in `plans/`. Option A, seamless: greyed tiles light up when the PC answers.
+
+- **Built on the v0.1.48 phone link.** The PC side (port 8790, `PhoneHandler`,
+  pairing, `/phone/sync`, UDP `NEXTUP?`) had sat unused since the cable
+  took over.
+- **Play tickets** (`phone_ticket_new`). mpv-android opens a URL and can't
+  send the Bearer header, so the phone asks `/phone/play` (with its token)
+  for a ticket naming ONE file: `/phone/stream/<ticket>`, plus
+  `/sub/<n>` for the `.srt`/`.ass` beside it.
+  - Held in memory only, so restarting the PC app kills them all.
+  - Dropped by FORGET and by turning the link off.
+  - Dead after 12 idle hours, and at most 20 per phone.
+  - Served inline with a real media type, through the same ranged code as
+    downloads (`send_path`). `/phone/hello` now says the PC's `device_id`.
+- **Pairing over the cable.** SEND MY LIBRARY switches the link on and
+  pairs the phone (`usb_pair_for_wifi` → `phone_pair_direct`), handing over
+  the token, the PC's addresses and its id through the phone's
+  `/api/link/pair`. The result says `streaming: "on"` or why not.
+  - `phone_pair_direct` deliberately doesn't use `phone_id_taken`. By then
+    the cable swap has filed the phone's history under its own id, so to
+    that check it always looks taken. Only this PC's own id is refused.
+- **Finding the PC** (`pc_link_check`). It tries the last address that
+  answered, then each address given (a VPN adds dead ones), then calls
+  `NEXTUP?` across the network, 1.5 s each, and reuses an answer for 60 s.
+  - The page asks on opening and on `visibilitychange`, through
+    `/api/link/check` → `pc_link_look`. Never on a timer: v0.1.74's
+    battery work stands.
+- **Playing** (`pc_stream_play`, `/api/play {stream}`).
+  - The start is the later of the phone's own last stop
+    (`elsewhere_progress`, from history by tmdb identity) and the PC's.
+  - A 503 (drive asleep) is retried 5 times, 2 s apart. The page shows
+    "Waking the PC's drive…" after 1.5 s.
+  - The sitting is logged by identity (`log_event(..., ident=)`), because
+    there's no local row.
+  - On Android, a local file with no watch point of its own also falls
+    back to `elsewhere_progress`. A film streamed to 40 minutes, then
+    copied over, starts at 40 minutes.
+- **History both ways over Wi-Fi** (`pc_link_sync`): `share_export` up,
+  the PC's file down into `share_import`. It's the same pair as the cable
+  swap, so either route leaves the phone in the same state.
+  - It runs after every sitting (streamed or not) and after a check that
+    found the PC, at most every 10 minutes.
+  - `pc_link_call(raw=)`, because `/phone/sync` POST takes the raw file
+    rather than JSON.
+- **The page.**
+  - Streamable tiles are in colour with a Wi-Fi mark.
+  - The peek gets PLAY. For a show it plays the episode after the last one
+    watched.
+  - A greyed show's DETAILS opens `openElsewhereShow`, an episode sheet
+    with PLAY/RESUME per episode and a ✓ for watched. Back and the swipe
+    close it.
+  - "On this device" still opens first, and Show all is where streamable
+    titles appear.
+- **app.py.** `open_in_player` takes an http path as it is (`Uri.parse`, no
+  MediaStore, no grant) and passes the subtitles as mpv's `subs` /
+  `subs.enable` extras.
+
+**If it doesn't light up on the real network,** check these in order:
+1. The PC app restarted onto this version, and SEND MY LIBRARY run once
+   since (look for `streaming: on`).
+2. Windows Firewall allowed "Next Up" on port 8790. It asks the first time
+   the link opens.
+3. NordVPN's "Invisibility on LAN" is off. It hides the PC from the phone.
+4. The phone isn't on a guest network.
+
+Tests: `tests/wifi_stream_test.py` (56 checks).
+- It runs the PC as a second process (`wifi_pc_helper.py`) with its own
+  database, so the history swap is real.
+- `tests/phone_serve.py --with-pc` (launch config "nextup-phone-pc") is the
+  sandbox phone with a pretend PC beside it.
+
 ## 2026-10-10 — v0.1.74, the phone stops waking itself for nothing
 
 The user saw Next Up at 22.3% per hour in the phone's battery use. Measured
