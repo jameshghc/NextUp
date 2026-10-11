@@ -22,7 +22,8 @@ class NextUp(toga.App):
             os.environ["NEXTUP_HOME"] = data
             import nextup
             nextup.ANDROID_VIDEO_ACCESS = lambda: has_video_access(self)
-            nextup.ANDROID_PLAYER = lambda path, start: open_in_player(self, nextup, path, start)
+            nextup.ANDROID_PLAYER = lambda path, start, subs=None: open_in_player(
+                self, nextup, path, start, subs)
             first_run_library(nextup)
             name_the_phone(self, nextup)
             port = nextup.serve_in_thread()
@@ -304,20 +305,32 @@ def ask_for_videos(app):
         traceback.print_exc()   # shows in the phone's log; the app carries on
 
 
-def open_in_player(app, nextup, path, start):
+def open_in_player(app, nextup, path, start, subs=None):
     """Play a file in the mpv app, `start` seconds in, and when it closes
     tell nextup where it got to.
+
+    A path that's a web address is the PC streaming over the Wi-Fi: mpv is
+    given the address as it is, with the subtitle files' addresses beside
+    it, since there's no file here for Android to lend.
 
     Another app can't be handed a plain file path on Android — it has to be
     the file's entry in Android's own media index, lent with permission to
     read it. If mpv isn't installed (or won't take it), Android's "open
     with" list instead, so pressing play always opens something."""
-    from java import jclass, jint
+    from java import jarray, jclass, jint
     Intent = jclass("android.content.Intent")
     NotFound = jclass("android.content.ActivityNotFoundException")
     intent = Intent(Intent.ACTION_VIEW)
-    intent.setDataAndType(media_uri(app._impl.native, path), "video/*")
-    intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    if path.startswith("http"):
+        Uri = jclass("android.net.Uri")
+        intent.setDataAndType(Uri.parse(path), "video/*")
+        if subs:
+            # mpv's own extras: every subtitle on offer, and which to show.
+            intent.putExtra("subs", jarray(Uri)([Uri.parse(x) for x in subs]))
+            intent.putExtra("subs.enable", jarray(Uri)([Uri.parse(subs[0])]))
+    else:
+        intent.setDataAndType(media_uri(app._impl.native, path), "video/*")
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     if start > 5:
         # mpv's own name for it, in milliseconds — the one MX Player uses.
         intent.putExtra("position", jint(int(start * 1000)))

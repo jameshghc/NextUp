@@ -2157,7 +2157,7 @@ def stop_watching(timer):
 
 
 def log_event(kind, item_id, title, event, value=None,
-              seconds=None, position=None, total=None):
+              seconds=None, position=None, total=None, ident=None):
     """Append to the history table. Nothing reads this to make decisions —
     it's here so that when you want to know what you watched in June, the
     answer exists.
@@ -2170,11 +2170,14 @@ def log_event(kind, item_id, title, event, value=None,
     sync_identity — and, when sharing is on, handed to the sync loop. It is
     only ever handed over, never written to the cloud folder from here: a
     click must not wait on OneDrive, and a folder that isn't reachable right
-    now must not lose the event, which is what `shared` being unset is for."""
+    now must not lose the event, which is what `shared` being unset is for.
+
+    `ident` says what it was, (tmdb_id, season, episode, show title), for
+    something with no local row: a film streamed from the PC."""
     try:
         conn = db()
         utc = time.time()
-        ident = sync_identity(conn, kind, item_id)
+        ident = ident or sync_identity(conn, kind, item_id)
         conn.execute(
             "INSERT INTO history (at,kind,item_id,title,event,value,"
             "seconds,position,total,uid,utc,tmdb_id,season,episode,show_title)"
@@ -10139,6 +10142,68 @@ def tile_tags(genres, keywords=(), year=None, kind=None, want=3):
     return tags[:want]
 
 
+def elsewhere_progress(kind, tmdb_id, season=None, episode=None):
+    """Where the last sitting of this left off, from history alone, by what
+    it IS rather than which row — so it holds for something streamed from
+    the PC, watched on another device, or copied here since. A sitting seen
+    to the end means start again."""
+    conn = db()
+    try:
+        row = conn.execute(
+            "SELECT event, position FROM history WHERE kind=? AND tmdb_id=? AND season IS ?"
+            " AND episode IS ? AND event IN ('stopped', 'watched')"
+            " ORDER BY utc DESC, id DESC LIMIT 1",
+            (kind, str(tmdb_id), season, episode)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return {"position": 0, "watched": False}
+    if row["event"] == "watched":
+        return {"position": 0, "watched": True}
+    return {"position": int(row["position"] or 0), "watched": False}
+
+
+def elsewhere_episodes(tmdb_id):
+    """A greyed show's episodes, from the PC's catalogue, with what's been
+    seen of each — for the phone's episode sheet, and to know which one
+    PLAY means: the one after the last seen to the end."""
+    conn = db()
+    try:
+        show = conn.execute("SELECT title FROM snapshot_shows WHERE tmdb_id=?", (str(tmdb_id),)).fetchone()
+        rows = conn.execute("SELECT season, episode, title FROM snapshot_episodes WHERE show_tmdb_id=?"
+                            " ORDER BY season, episode", (str(tmdb_id),)).fetchall()
+        last = conn.execute(
+            "SELECT season, episode FROM history WHERE kind='episode' AND tmdb_id=? AND event='watched'"
+            " ORDER BY utc DESC, id DESC LIMIT 1", (str(tmdb_id),)).fetchone()
+    finally:
+        conn.close()
+    seasons, order = {}, []
+    for r in rows:
+        seen = elsewhere_progress("episode", tmdb_id, r["season"], r["episode"])
+        watched = seen["watched"] or bool(_ever_watched(tmdb_id, r["season"], r["episode"]))
+        seasons.setdefault(r["season"], []).append({
+            "episode": r["episode"], "title": r["title"] or "",
+            "watched": watched, "position": seen["position"]})
+        order.append((r["season"], r["episode"]))
+    nxt = order[0] if order else None
+    if last and (last["season"], last["episode"]) in order:
+        at = order.index((last["season"], last["episode"]))
+        nxt = order[at + 1] if at + 1 < len(order) else None
+    return {"title": show["title"] if show else "",
+            "seasons": [{"season": k, "episodes": v} for k, v in sorted(seasons.items())],
+            "next": {"season": nxt[0], "episode": nxt[1]} if nxt else None}
+
+
+def _ever_watched(tmdb_id, season, episode):
+    conn = db()
+    try:
+        return conn.execute("SELECT 1 FROM history WHERE kind='episode' AND tmdb_id=? AND season=?"
+                            " AND episode=? AND event='watched' LIMIT 1",
+                            (str(tmdb_id), season, episode)).fetchone()
+    finally:
+        conn.close()
+
+
 def elsewhere_rows(kind, query):
     """Snapshot entries this machine hasn't got, shaped like browse rows.
 
@@ -10202,6 +10267,18 @@ def elsewhere_rows(kind, query):
                 "favourited": bool(r["favourited_at"]),
             })
     conn.close()
+    # On the phone, with the PC on the Wi-Fi right now, these can be played
+    # from there: every film, and a show whose episodes the catalogue lists.
+    if PLATFORM == "android" and PC_LINK["up"]:
+        conn = db()
+        try:
+            with_eps = set(str(r[0]) for r in conn.execute(
+                "SELECT DISTINCT show_tmdb_id FROM snapshot_episodes"))
+        finally:
+            conn.close()
+        for r in rows:
+            if r["kind"] == "movie" or r["tmdb_id"] in with_eps:
+                r["stream"] = True
     return rows
 
 
@@ -12913,6 +12990,60 @@ def pc_link_look():
         pc_link_sync_soon()
 
 
+PC_WAKE_TRIES = 5              # a sleeping drive: asked this many times...
+PC_WAKE_PAUSE = 2              # ...this many seconds apart
+
+
+def pc_stream_play(stream, resume=False):
+    """Play something the PC has and this phone hasn't, straight from the
+    PC: a ticket for the file (see phone_ticket_new), handed to mpv as a web
+    address with its subtitles. Starts where it was left — here, or on the
+    PC, whichever got further — when asked to resume."""
+    kind = stream.get("kind")
+    tmdb_id = str(stream.get("tmdb_id") or "")
+    if kind not in ("movie", "episode") or not tmdb_id:
+        raise AppError("Nothing to play.")
+    season = int(stream["season"]) if kind == "episode" else None
+    episode = int(stream["episode"]) if kind == "episode" else None
+    if not pc_link_check()["up"]:
+        raise AppError("The PC isn't on the Wi-Fi right now.")
+    key = phone_file_key(kind, tmdb_id, season, episode)
+    for attempt in range(PC_WAKE_TRIES):
+        status, reply = pc_link_call("POST", "/phone/play", {"key": key}, timeout=15)
+        if status != 503:
+            break
+        if attempt < PC_WAKE_TRIES - 1:
+            time.sleep(PC_WAKE_PAUSE)
+    if status == 503:
+        raise AppError("The PC's drive isn't answering")
+    if status == 404:
+        raise AppError("The PC doesn't have that file any more.")
+    if status != 200 or not isinstance(reply, dict):
+        raise AppError("The PC isn't on the Wi-Fi right now.")
+    start = 0
+    if resume:
+        here = elsewhere_progress(kind, tmdb_id, season, episode)
+        start = max(here["position"], int(reply.get("resume") or 0))
+    base = PC_LINK["base"] or ""
+    conn = db()
+    try:
+        if kind == "movie":
+            row = conn.execute("SELECT title FROM snapshot_movies WHERE tmdb_id=?", (tmdb_id,)).fetchone()
+            show_title, title = None, (row["title"] if row else reply.get("title"))
+        else:
+            row = conn.execute("SELECT title FROM snapshot_shows WHERE tmdb_id=?", (tmdb_id,)).fetchone()
+            show_title = row["title"] if row else None
+            title = "%s S%02dE%02d" % (show_title or reply.get("title") or "", season, episode)
+    finally:
+        conn.close()
+    ident = (tmdb_id, season, episode, show_title)
+    android_play(base + reply["url"], start, subs=[base + x for x in reply.get("subs") or []])
+    log_event(kind, None, title, "played", ident=ident)
+    _ANDROID_SITTING.clear()
+    _ANDROID_SITTING.update(kind=kind, id=None, stream=ident, title=title, started_at=time.time())
+    return {"ok": True}
+
+
 def pc_link_public():
     return {"up": PC_LINK["up"], "pc": PC_LINK["pc"], "needs_pairing": PC_LINK["needs_pairing"]}
 
@@ -13661,6 +13792,9 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/movie":
                 return self.send_json(movie_detail_payload(one("id", "0")))
 
+            if route == "/api/elsewhere/episodes":
+                return self.send_json(elsewhere_episodes(one("tmdb_id", "")))
+
             if route == "/api/genres":
                 chosen = [g for g in one("with", "").split(",") if g]
                 return self.send_json({"genres": available_genres(one("kind", "any"), chosen)})
@@ -13802,6 +13936,11 @@ class Handler(BaseHTTPRequestHandler):
                 thread.start()
                 return self.send_json({"ok": True})
 
+            if route == "/api/play" and data.get("stream"):
+                if PLATFORM != "android":
+                    return self.send_json({"error": "only on the phone"}, 404)
+                return self.send_json(pc_stream_play(data["stream"], bool(data.get("resume"))))
+
             if route == "/api/play":
                 path = require_media_file(
                     LOCAL.path_for(data.get("type"), int(data["id"])))
@@ -13816,6 +13955,17 @@ class Handler(BaseHTTPRequestHandler):
                     # where you stopped. The phone's mpv keeps none for us,
                     # so the same start is handed over by hand.
                     start = resume_position(kind, item_id)
+                    if not start:
+                        # Nothing on the row: perhaps it was watched before
+                        # it was here — streamed from the PC, or on another
+                        # device — which history knows by what it is.
+                        conn = db()
+                        try:
+                            ident = sync_identity(conn, kind, item_id)
+                        finally:
+                            conn.close()
+                        if ident:
+                            start = elsewhere_progress(kind, ident[0], ident[1], ident[2])["position"]
                 # An episode holds the window open so the next one can follow
                 # it. A film doesn't: when it's finished, it's finished.
                 # Held open for an episode (the run follows it) and for
@@ -23037,6 +23187,8 @@ def _android_play_finished(position=None, duration=None, completed=False):
     PC is — a resume point, or watched."""
     sitting = dict(_ANDROID_SITTING)
     _ANDROID_SITTING.clear()
+    if sitting.get("stream"):
+        return _stream_finished(sitting, position, duration, completed)
     kind, item_id = sitting.get("kind"), sitting.get("id")
     if kind not in ("movie", "episode") or not item_id:
         return
@@ -23054,6 +23206,23 @@ def _android_play_finished(position=None, duration=None, completed=False):
             refresh_watch_scores()
     elif position is not None and duration:
         note_playback_finished(kind, item_id, ran_for, position=position, duration=duration)
+
+
+def _stream_finished(sitting, position, duration, completed):
+    """A sitting streamed from the PC has ended. There's no row here to put
+    a watch point on, so it goes in the history by what it is — which is
+    where the next PLAY, and the PC on the next swap, read it."""
+    kind, ident, title = sitting["kind"], sitting["stream"], sitting.get("title")
+    ran_for = time.time() - (sitting.get("started_at") or time.time())
+    if completed:
+        if ran_for < MIN_WATCH_SECONDS:
+            return
+        log_event(kind, None, title, "watched", seconds=ran_for, position=duration,
+                  total=duration, ident=ident)
+    elif position is not None and duration:
+        event = "watched" if position >= duration * WATCHED_FRACTION else "stopped"
+        log_event(kind, None, title, event, seconds=ran_for, position=position,
+                  total=duration, ident=ident)
 
 
 def repair_android_resume():
@@ -23107,13 +23276,17 @@ def repair_android_resume():
     LIB.loaded_at = 0
 
 
-def android_play(path, start=0):
-    """Play on the phone: Android opens the file in the mpv app. Returns no
-    process — there isn't one of ours to watch."""
+def android_play(path, start=0, subs=None):
+    """Play on the phone: Android opens the file — or the PC's web address
+    for it — in the mpv app. Returns no process: there isn't one of ours to
+    watch."""
     if not ANDROID_PLAYER:
         raise AppError("This copy of Next Up has no way to open a player.")
     try:
-        ANDROID_PLAYER(path, int(start or 0))
+        if subs:
+            ANDROID_PLAYER(path, int(start or 0), subs)
+        else:
+            ANDROID_PLAYER(path, int(start or 0))
     except AppError:
         raise
     except Exception as exc:

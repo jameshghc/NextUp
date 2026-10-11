@@ -6,6 +6,9 @@ command per line on stdin:
     rate <tmdb> <value>   log a rating here, as you would on the PC
     has <uid>             1 if an event with that uid has arrived here, else 0
     inbox                 how many events have arrived from other devices
+    film <tmdb> <resume>  a real film file here, with this PC's watch point
+    episode <tmdb> <s> <e>  a real episode file of that show here
+    asleep 1|0            the drive stops (or starts) answering
     quit
 """
 import sys, os, tempfile
@@ -17,6 +20,7 @@ from devserve import isolate
 
 port, phone = int(ARGS[0]), ARGS[1]
 isolate(n, os.path.join(tempfile.gettempdir(), "nextup_wifistream_pc"))
+REAL_CHECK = n.media_file_check
 n.phone_link_start(port, "127.0.0.1")
 print(n.phone_pair_direct(phone, "Test Phone"), flush=True)
 for line in sys.stdin:
@@ -41,6 +45,28 @@ for line in sys.stdin:
         elif cmd[0] == "has":
             got = conn.execute("SELECT 1 FROM sync_inbox WHERE uid=?", (cmd[1],)).fetchone()
             print("1" if got else "0", flush=True)
+        elif cmd[0] == "film":
+            path = os.path.join(tempfile.gettempdir(), "nextup_wifistream_pc", "pc-film-%s.mkv" % cmd[1])
+            open(path, "wb").write(b"F" * 50000)
+            conn.execute("INSERT INTO movies (path,title,year,tmdb_id,resume_pos,resume_total)"
+                         " VALUES (?,?,?,?,?,?)", (path, "PC Only Film", 2019, cmd[1], int(cmd[2]), 6000))
+            conn.commit()
+            print("ok", flush=True)
+        elif cmd[0] == "episode":
+            path = os.path.join(tempfile.gettempdir(), "nextup_wifistream_pc",
+                                "pc-ep-%s-%s-%s.mkv" % tuple(cmd[1:4]))
+            open(path, "wb").write(b"P" * 40000)
+            show = conn.execute("SELECT id FROM shows WHERE tmdb_id=?", (cmd[1],)).fetchone()
+            show_id = show[0] if show else conn.execute(
+                "INSERT INTO shows (name,title,tmdb_id) VALUES (?,?,?)",
+                ("pc show", "PC Only Show", cmd[1])).lastrowid
+            conn.execute("INSERT INTO episodes (path,show_id,season,episode) VALUES (?,?,?,?)",
+                         (path, show_id, int(cmd[2]), int(cmd[3])))
+            conn.commit()
+            print("ok", flush=True)
+        elif cmd[0] == "asleep":
+            n.media_file_check = (lambda p: None) if cmd[1] == "1" else REAL_CHECK
+            print("ok", flush=True)
         elif cmd[0] == "inbox":
             print(conn.execute("SELECT COUNT(*) FROM sync_inbox").fetchone()[0], flush=True)
     finally:

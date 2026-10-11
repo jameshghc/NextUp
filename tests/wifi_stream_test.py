@@ -253,6 +253,118 @@ n.PC_LINK.update(checked=0)
 n.pc_link_check(force=True)
 check("link down gives None, no raise", n.pc_link_sync() is None)
 
+# --- Task 5: playing a streamed item -----------------------------------------------------
+# The PC (its own process again) has a film and two episodes this phone
+# hasn't; the phone's catalogue lists them, greyed.
+pc = subprocess.Popen([sys.executable, os.path.join(here, "wifi_pc_helper.py"), str(PC_PORT), PHONE],
+                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+pc_token = pc.stdout.readline().strip()
+pc_says("film 888001 1234")
+pc_says("episode 888002 1 1")
+pc_says("episode 888002 1 2")
+conn = n.db()
+conn.execute("DELETE FROM movies WHERE tmdb_id IN ('888001')")
+conn.execute("DELETE FROM shows WHERE tmdb_id IN ('888002')")
+conn.execute("INSERT OR REPLACE INTO snapshot_movies (tmdb_id,title,year,runtime) VALUES ('888001','PC Only Film',2019,6000)")
+conn.execute("INSERT OR REPLACE INTO snapshot_shows (tmdb_id,title,year,episode_count) VALUES ('888002','PC Only Show',2020,3)")
+for e in (1, 2, 3):      # the PC's catalogue lists S1E3, but the file isn't there
+    conn.execute("INSERT OR REPLACE INTO snapshot_episodes (show_tmdb_id,season,episode,title) VALUES ('888002',1,?,?)",
+                 (e, "Episode %d" % e))
+conn.commit(); conn.close()
+n.CONFIG["pc_link"] = {"token": pc_token, "pc": "Test PC", "pc_id": "", "port": PC_PORT,
+                       "addresses": ["127.0.0.1"], "last_ip": None}
+n.CONFIG["show_elsewhere"] = True
+n.PC_WAKE_PAUSE = 0.05
+
+played = []
+n.ANDROID_PLAYER = lambda path, start, subs=None: played.append((path, start, subs))
+desk = n.ThreadingHTTPServer(("127.0.0.1", 8795), n.Handler)
+threading.Thread(target=desk.serve_forever, daemon=True).start()
+def desk_post(path, body):
+    req = urllib.request.Request("http://127.0.0.1:8795" + path, data=json.dumps(body).encode(),
+                                 method="POST", headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"{}")
+def desk_get(path):
+    with urllib.request.urlopen("http://127.0.0.1:8795" + path, timeout=30) as r:
+        return json.loads(r.read())
+
+def far(kind):
+    return dict((r["tmdb_id"], r) for r in n.elsewhere_rows("all", "") if r["kind"] == kind)
+n.PC_LINK.update(up=False, base=None)
+down = far("movie").get("888001") or {}
+n.pc_link_check(force=True)
+up = far("movie").get("888001") or {}
+check("elsewhere film marked stream while up, not when down", up.get("stream") and not down.get("stream"),
+      (up.get("stream"), down.get("stream")))
+check("a show with episodes on the PC is marked too", (far("tvshow").get("888002") or {}).get("stream"))
+
+eps = desk_get("/api/elsewhere/episodes?tmdb_id=888002")
+listed = [(e["episode"]) for se in eps.get("seasons", []) for e in se["episodes"]]
+check("the show's episodes are listed from the catalogue", eps.get("title") == "PC Only Show"
+      and listed == [1, 2, 3] and eps.get("next") == {"season": 1, "episode": 1}, eps)
+st, body = desk_post("/api/play", {"stream": {"kind": "episode", "tmdb_id": "888002", "season": 1, "episode": 3}})
+check("an episode the PC hasn't got can't be played", body.get("error") and not played, (st, body))
+
+st, body = desk_post("/api/play", {"stream": {"kind": "movie", "tmdb_id": "888001"}, "resume": True})
+url, start, subs = played[-1] if played else (None, None, None)
+check("stream play hands mpv the PC's address", st == 200 and (url or "").startswith(BASE.replace(str(PORT), str(PC_PORT)) + "/phone/stream/"),
+      (st, body, url))
+check("start is the PC's point when the phone has none", start == 1234, start)
+
+n._ANDROID_SITTING["started_at"] = time.time() - 900
+n.android_play_finished(position=2000, duration=6000)
+conn = n.db()
+row = conn.execute("SELECT * FROM history WHERE tmdb_id='888001' ORDER BY id DESC LIMIT 1").fetchone()
+conn.close()
+check("the finish logs a stop on the tmdb identity", row and row["event"] == "stopped" and row["position"] == 2000
+      and row["item_id"] is None and row["kind"] == "movie", dict(row) if row else None)
+check("elsewhere_progress reads it back", n.elsewhere_progress("movie", "888001") == {"position": 2000, "watched": False},
+      n.elsewhere_progress("movie", "888001"))
+desk_post("/api/play", {"stream": {"kind": "movie", "tmdb_id": "888001"}, "resume": True})
+check("the next play starts at the later point (phone 2000 over PC 1234)", played[-1][1] == 2000, played[-1][1])
+desk_post("/api/play", {"stream": {"kind": "movie", "tmdb_id": "888001"}})
+check("PLAY without resume starts over", played[-1][1] == 0, played[-1][1])
+
+desk_post("/api/play", {"stream": {"kind": "episode", "tmdb_id": "888002", "season": 1, "episode": 1}})
+n._ANDROID_SITTING["started_at"] = time.time() - 1500
+n.android_play_finished(completed=True)
+eps = desk_get("/api/elsewhere/episodes?tmdb_id=888002")
+first = eps["seasons"][0]["episodes"][0]
+check("a streamed episode seen to the end is watched", first.get("watched") is True, first)
+check("next episode after the last watched", eps.get("next") == {"season": 1, "episode": 2}, eps.get("next"))
+
+# Copied to the phone later: the same film, now a local row with no point of its own.
+copy = os.path.join(WORK, "PC Only Film.mkv")
+open(copy, "wb").write(b"F" * 1000)
+conn = n.db()
+cid = conn.execute("INSERT INTO movies (path,title,year,tmdb_id) VALUES (?,?,?,?)",
+                   (copy, "PC Only Film", 2019, "888001")).lastrowid
+conn.commit(); conn.close()
+n.LOCAL.loaded_at = 0
+st, body = desk_post("/api/play", {"type": "movie", "id": cid})
+check("copied later keeps the point", st == 200 and played[-1][0] == copy and played[-1][1] == 2000,
+      (st, body, played[-1]))
+
+pc_says("asleep 1")
+before = len(played)
+t0 = time.time()
+st, body = desk_post("/api/play", {"stream": {"kind": "movie", "tmdb_id": "888001"}})
+check("a sleeping drive is retried, then reported", body.get("error") == "The PC's drive isn't answering"
+      and len(played) == before, (st, body, round(time.time() - t0, 2)))
+pc_says("asleep 0")
+desk.shutdown()
+pc_says("quit"); pc.wait(10)
+
+app_src = open(os.path.join("android", "src", "mobile", "app.py"), encoding="utf-8").read()
+check("the phone hands mpv a web address as it is, not through the media index",
+      'startswith("http")' in app_src and "Uri.parse(path)" in app_src, "")
+check("and the subtitles with it", '"subs"' in app_src and '"subs.enable"' in app_src
+      and "lambda path, start, subs=None" in app_src, "")
+
 n.phone_link_stop()
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
