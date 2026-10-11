@@ -35,6 +35,7 @@ up and you've backed up your ratings, your progress and the lot.
 import atexit
 import glob
 import hashlib
+import mimetypes
 import hmac
 import ipaddress
 import json
@@ -11875,6 +11876,12 @@ def remote_step_channel(step):
 # like any other, and one copied off this machine shouldn't let anything in.
 
 PHONE_PORT = 8790
+# What a streamed file says it is, for the few that the mimetypes table
+# doesn't know on every machine. mpv sniffs the content anyway; this is for
+# anything less forgiving that ever asks.
+STREAM_TYPES = {".mkv": "video/x-matroska", ".mp4": "video/mp4", ".m4v": "video/mp4",
+                ".avi": "video/x-msvideo", ".webm": "video/webm", ".ts": "video/mp2t",
+                ".srt": "application/x-subrip", ".ass": "text/x-ssa"}
 # Every interface, because which one is the home Wi-Fi isn't knowable in
 # advance. The private-address check in PhoneHandler is what narrows it.
 PHONE_HOST = "0.0.0.0"
@@ -11979,6 +11986,7 @@ def phone_forget(device_id):
     cfg["devices"] = [d for d in cfg["devices"] if d.get("id") != device_id]
     save_json(CONFIG_PATH, CONFIG)
     _phone_cut(device_id)       # including a download it's in the middle of
+    phone_tickets_drop(device_id)
 
 
 def phone_file_key(kind, tmdb, season=None, episode=None):
@@ -12047,6 +12055,88 @@ def phone_path_for_key(key):
 
 
 PHONE_SYNC_MAX_BYTES = 20 * 1024 * 1024
+
+
+# --- play tickets: streaming to the phone over Wi-Fi --------------------------
+#
+# mpv on the phone opens a web address and can't be told to send a header
+# with it, so the Bearer token the rest of the link insists on can't come
+# along. Instead the phone asks (with its token) for a ticket: a long random
+# name for ONE file, which is then the whole of the address. Held in memory
+# only — restarting this app ends every one — dropped when the phone is
+# forgotten or the link turned off, and dead after twelve hours unused, so a
+# ticket left in mpv's history on the phone is worth nothing for long.
+
+PHONE_TICKET_IDLE = 12 * 3600
+PHONE_TICKETS_PER_DEVICE = 20
+_PHONE_TICKETS = {}             # ticket -> [device_id, path, last_used]
+SUB_EXTS = (".srt", ".ass")
+
+
+def phone_ticket_new(device_id, path):
+    ticket = secrets.token_urlsafe(24)
+    with _PHONE_LOCK:
+        _PHONE_TICKETS[ticket] = [device_id, path, time.time()]
+        mine = sorted((v[2], t) for t, v in _PHONE_TICKETS.items() if v[0] == device_id)
+        for _used, old in mine[:max(0, len(mine) - PHONE_TICKETS_PER_DEVICE)]:
+            _PHONE_TICKETS.pop(old, None)
+    return ticket
+
+
+def phone_ticket_path(ticket):
+    """The file a ticket names, or None for one that's unknown or has gone
+    stale. Using it keeps it alive."""
+    with _PHONE_LOCK:
+        held = _PHONE_TICKETS.get(ticket or "")
+        if not held:
+            return None
+        if time.time() - held[2] > PHONE_TICKET_IDLE:
+            _PHONE_TICKETS.pop(ticket, None)
+            return None
+        held[2] = time.time()
+        return held[1]
+
+
+def phone_tickets_drop(device_id=None):
+    with _PHONE_LOCK:
+        for t in [t for t, v in _PHONE_TICKETS.items()
+                  if device_id is None or v[0] == device_id]:
+            _PHONE_TICKETS.pop(t, None)
+
+
+def phone_subs_for(path):
+    """The subtitle files mpv on the PC would find beside a video: same
+    folder, name starting with the video's own (so "Film.en.srt" and
+    "Film.forced.ass" for "Film.mkv"). Sorted, so /sub/0 means the same
+    file every time it's asked for."""
+    folder, base = os.path.split(path)
+    stem = os.path.splitext(base)[0].lower()
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return []
+    return [os.path.join(folder, f) for f in sorted(names)
+            if f.lower().startswith(stem) and os.path.splitext(f)[1].lower() in SUB_EXTS]
+
+
+def phone_resume_for_key(key):
+    """Where this PC last stopped in the file a key names, in seconds."""
+    m = _PHONE_KEY_RE.match(key or "")
+    if not m:
+        return 0
+    conn = db()
+    try:
+        if m.group(1):
+            row = conn.execute("SELECT resume_pos FROM movies WHERE tmdb_id=? ORDER BY id LIMIT 1",
+                               (m.group(1),)).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT e.resume_pos FROM episodes e JOIN shows s ON s.id=e.show_id"
+                " WHERE s.tmdb_id=? AND e.season=? AND e.episode=? ORDER BY e.id LIMIT 1",
+                (m.group(2), int(m.group(3)), int(m.group(4)))).fetchone()
+    finally:
+        conn.close()
+    return int(row["resume_pos"] or 0) if row else 0
 
 
 def _own_sharing_lines(conn):
@@ -12245,19 +12335,35 @@ class PhoneHandler(BaseHTTPRequestHandler):
             return None
         return self.rfile.read(length) if length else b""
 
+    def check_media(self, key):
+        """The path a key names if the file is there to send; otherwise the
+        reason has been answered and None comes back."""
+        path = phone_path_for_key(key)
+        if not path:
+            self.send_json({"error": "not in the library"}, 404)
+            return None
+        there = media_file_check(path)
+        if there is None:
+            self.send_json({"error": "the drive isn't answering — try again "
+                                     "in a minute"}, 503)
+            return None
+        if not there:
+            self.send_json({"error": "the file isn't on the drive"}, 404)
+            return None
+        return path
+
     def send_media(self, key):
         """A library file, whole or from a byte onwards. Ranges are what let
         a download that dropped half way pick up where it stopped instead of
         starting a two-gigabyte film again."""
-        path = phone_path_for_key(key)
-        if not path:
-            return self.send_json({"error": "not in the library"}, 404)
-        there = media_file_check(path)
-        if there is None:
-            return self.send_json({"error": "the drive isn't answering — try again "
-                                            "in a minute"}, 503)
-        if not there:
-            return self.send_json({"error": "the file isn't on the drive"}, 404)
+        path = self.check_media(key)
+        if path:
+            self.send_path(path)
+
+    def send_path(self, path, inline=False):
+        """The file itself, ranged. `inline` is for a player streaming it
+        rather than a download keeping it: a real media type, and no
+        "save this as"."""
         size = os.path.getsize(path)
         start, end, status = 0, size - 1, 200
         wanted = self.headers.get("Range")
@@ -12274,7 +12380,11 @@ class PhoneHandler(BaseHTTPRequestHandler):
                 return
             status = 206
         self.send_response(status)
-        self.send_header("Content-Type", "application/octet-stream")
+        kind = "application/octet-stream"
+        if inline:
+            kind = STREAM_TYPES.get(os.path.splitext(path)[1].lower()) \
+                or mimetypes.guess_type(path)[0] or kind
+        self.send_header("Content-Type", kind)
         self.send_header("Content-Length", str(end - start + 1))
         self.send_header("Accept-Ranges", "bytes")
         # Headers are Latin-1. "Don’t Look Up – 2021" has two characters
@@ -12284,8 +12394,9 @@ class PhoneHandler(BaseHTTPRequestHandler):
         # real name the standard way (RFC 5987) beside it.
         name = os.path.basename(path)
         plain = name.encode("ascii", "replace").decode("ascii").replace("?", "_").replace('"', "")
-        self.send_header("Content-Disposition", "attachment; filename=\"%s\"; "
-                         "filename*=UTF-8''%s" % (plain, urllib.parse.quote(name, safe="")))
+        self.send_header("Content-Disposition", "%s; filename=\"%s\"; "
+                         "filename*=UTF-8''%s" % ("inline" if inline else "attachment",
+                                                  plain, urllib.parse.quote(name, safe="")))
         if status == 206:
             self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
         self.end_headers()
@@ -12323,15 +12434,34 @@ class PhoneHandler(BaseHTTPRequestHandler):
                 _PHONE_CONNS[self.connection] = device["id"]
         return device
 
+    def send_stream(self, route):
+        """/phone/stream/<ticket>, or /phone/stream/<ticket>/sub/<n>: what a
+        ticket names, to whatever on the home network has it. The ticket is
+        the whole of the permission — see the note above phone_ticket_new."""
+        m = re.fullmatch(r"/phone/stream/([A-Za-z0-9_-]{32})(?:/sub/(\d{1,3}))?", route)
+        path = phone_ticket_path(m.group(1)) if m else None
+        if path and m.group(2) is not None:
+            subs = phone_subs_for(path)
+            n = int(m.group(2))
+            path = subs[n] if n < len(subs) else None
+        if not path or not os.path.isfile(path):
+            return self.send_json({"error": "no such thing"}, 404)
+        return self.send_path(path, inline=True)
+
     def do_GET(self):
         try:
+            parsed = urllib.parse.urlparse(self.path)
+            route, query = parsed.path, urllib.parse.parse_qs(parsed.query)
+            if route.startswith("/phone/stream/"):
+                if not self.from_home():
+                    return self.send_json({"error": "only from the home network"}, 403)
+                return self.send_stream(route)
             device = self.gate()
             if not device:
                 return
-            parsed = urllib.parse.urlparse(self.path)
-            route, query = parsed.path, urllib.parse.parse_qs(parsed.query)
             if route == "/phone/hello":
                 return self.send_json({"ok": True, "pc": snapshot_device_name(),
+                                       "device_id": sync_device_id(),
                                        "version": APP_VERSION})
             if route == "/phone/snapshot":
                 return self.send_json(phone_snapshot())
@@ -12384,6 +12514,21 @@ class PhoneHandler(BaseHTTPRequestHandler):
             device = self.gate()
             if not device:
                 return
+            if route == "/phone/play":
+                try:
+                    key = str(json.loads((self.read_raw(4096) or b"{}").decode("utf-8")).get("key") or "")
+                except (ValueError, AttributeError):
+                    return self.send_json({"error": "that wasn't a play request"}, 400)
+                path = self.check_media(key)
+                if not path:
+                    return
+                ticket = phone_ticket_new(device["id"], path)
+                url = "/phone/stream/" + ticket
+                return self.send_json({
+                    "url": url,
+                    "subs": ["%s/sub/%d" % (url, i) for i in range(len(phone_subs_for(path)))],
+                    "title": os.path.splitext(os.path.basename(path))[0],
+                    "resume": phone_resume_for_key(key)})
             if route == "/phone/sync":
                 raw = self.read_raw(PHONE_SYNC_MAX_BYTES)
                 if raw is None:
@@ -12531,6 +12676,7 @@ def _phone_cut(device_id=None):
 
 def phone_link_stop():
     _phone_cut()
+    phone_tickets_drop()
     with _PHONE_LOCK:
         server, _PHONE_SERVER[0] = _PHONE_SERVER[0], None
         sock, stop = _PHONE_UDP["sock"], _PHONE_UDP["stop"]

@@ -26,6 +26,7 @@ SUITES = [
     ("empty shows", "empty_shows_test.py"),
     ("youtube channel", "youtube_test.py"),
     ("phone link", "phone_link_test.py"),
+    ("streaming over wi-fi", "wifi_stream_test.py"),
     ("android core", "android_core_test.py"),
     ("phone over usb", "usb_phone_test.py"),
     ("phone as a drive", "phone_dock_test.py"),

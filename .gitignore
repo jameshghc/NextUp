@@ -47,3 +47,4 @@ Old versions and extras/
 *.lnk
 # Database backups taken before a data change
 nextup_library.before-*.db
+.superpowers/
