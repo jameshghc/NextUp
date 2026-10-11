@@ -15628,6 +15628,28 @@ body.android .tile.peeking .peek .peekdetails{pointer-events:auto}
 .tile.elsewhere .cap small{color:rgba(244,241,236,.38);}
 .tile.elsewhere{cursor:default;}
 .tile.elsewhere:hover .art{filter:grayscale(.82) brightness(.72);}
+/* Greyed, but the PC is on the Wi-Fi and can stream it: in full colour
+   again, with a Wi-Fi mark where "ON THE PC" would be. */
+.tile.elsewhere.streamable .art{filter:none}
+.tile.elsewhere.streamable .blank{opacity:1}
+.tile.elsewhere.streamable .cap b{color:inherit}
+.tile.elsewhere.streamable .cap small{color:rgba(244,241,236,.55)}
+.tile.elsewhere.streamable{cursor:pointer}
+.wifimark{
+  position:absolute;bottom:0;left:0;right:0;display:flex;align-items:center;justify-content:center;
+  gap:5px;padding:3px 7px;background:rgba(6,5,9,.78);color:var(--marigold);
+  font-family:var(--mono);font-size:9px;letter-spacing:.08em;white-space:nowrap;overflow:hidden;
+}
+.wifimark svg{width:11px;height:11px;flex:none}
+body.android .tile.elsewhere.streamable .cap{padding-bottom:26px}
+.epsheet h2{margin:0 0 4px}
+.epsheet .eseason{font-family:var(--mono);font-size:11px;letter-spacing:.1em;color:rgba(244,241,236,.5);
+  margin:18px 0 6px}
+.epsheet .erow{display:flex;align-items:center;gap:10px;padding:9px 0;border-top:1px solid rgba(244,241,236,.08)}
+.epsheet .erow .ecode{font-family:var(--mono);font-size:11px;color:rgba(244,241,236,.55);flex:none;width:52px}
+.epsheet .erow .ename{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.epsheet .erow .eseen{color:var(--marigold);flex:none;width:14px;text-align:center}
+.epsheet .erow button{flex:none;padding:6px 12px}
 .elsewhereline{color:var(--marigold);opacity:.85;}
 /* The picker covers everything below the title bar. Not the bar itself —
    being unable to close a window because nobody has been chosen yet is the
@@ -18598,7 +18620,10 @@ function tile(item){
   if(item.identified === false) b.append(el('div','unknown','NOT IDENTIFIED'));
   if(item.elsewhere){
     b.classList.add('elsewhere');
-    b.append(el('div','elsewherebadge', elsewhereLabel()));
+    if(item.stream){
+      b.classList.add('streamable');
+      b.append(el('div','wifimark', WIFI_GLYPH + 'ON ' + esc(elsewhereWhere().toUpperCase())));
+    } else b.append(el('div','elsewherebadge', elsewhereLabel()));
   }
   const corner = el('div','tilecorner');
   b.append(corner);
@@ -18619,8 +18644,9 @@ function tile(item){
   const peek = el('div','peek');
   peek.append(el('h4',null,esc(item.title||'')));
   if(item.elsewhere)
-    peek.append(el('div','line elsewhereline',
-      'On ' + esc(elsewhereWhere()) + ' — not on this device'));
+    peek.append(el('div','line elsewhereline', item.stream
+      ? 'On ' + esc(elsewhereWhere()) + ' — plays over the Wi-Fi'
+      : 'On ' + esc(elsewhereWhere()) + ' — not on this device'));
   const facts = [item.year];
   if(item.tmdb) facts.push('TMDB '+item.tmdb);
   if(item.kind==='movie' && item.runtime) facts.push(item.runtime+' min');
@@ -18675,6 +18701,23 @@ function tile(item){
       item.kind === 'tvshow' ? openShow(item.id) : openFilm(item.id);
     };
     peek.append(more);
+  } else if(item.stream){
+    /* Not here, but the PC is on the Wi-Fi: PLAY streams it from there. A
+       show plays the episode after the last one seen; DETAILS lists them. */
+    const go = el('button','play peekplay', 'PLAY');
+    go.onclick = async (e) => {
+      e.stopPropagation();
+      go.textContent = '…';
+      const r = await withWaking(go, () => playStream(item));
+      go.textContent = r && r.error ? 'FAILED' : 'PLAYING';
+      if(r && r.error) go.title = r.error;
+    };
+    peek.append(go);
+    if(item.kind === 'tvshow'){
+      const more = el('button','iconbtn peekdetails','DETAILS');
+      more.onclick = (e) => { e.stopPropagation(); closePeeks(); openElsewhereShow(item.tmdb_id); };
+      peek.append(more);
+    }
   }
   /* The heart and the watchlist, on the phone: here a tap marks it in the
      library; on a greyed tile, on the catalogue's copy — the PC hears at the
@@ -18816,6 +18859,67 @@ function genreShort(g){
 
 /* PLAY from a poster's peek: a film from where you got to, a show from the
    episode you're up to (its first, if you haven't started). */
+/* Streaming from the PC over the Wi-Fi: the phone's server asks the PC for
+   the file and hands mpv its address. A film starts where it was left; a
+   show at the episode after the last one seen to the end. */
+const WIFI_GLYPH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" ' +
+  'stroke-linecap="round"><path d="M2 8.5a15 15 0 0 1 20 0"/><path d="M5.5 12.5a10 10 0 0 1 13 0"/>' +
+  '<path d="M9 16.3a5 5 0 0 1 6 0"/><circle cx="12" cy="20" r="1.2" fill="currentColor"/></svg>';
+
+async function playStream(item){
+  if(item.kind !== 'tvshow')
+    return post('/api/play', {stream: {kind: 'movie', tmdb_id: item.tmdb_id}, resume: true});
+  const d = await api('/api/elsewhere/episodes?tmdb_id=' + encodeURIComponent(item.tmdb_id));
+  if(!d || d.error) return d || {error: 'no show'};
+  const ep = d.next || (d.seasons[0] && {season: d.seasons[0].season, episode: d.seasons[0].episodes[0].episode});
+  if(!ep) return {error: 'no episodes'};
+  return post('/api/play', {stream: {kind: 'episode', tmdb_id: item.tmdb_id,
+                                     season: ep.season, episode: ep.episode}, resume: true});
+}
+
+/* A drive on the PC that has spun down takes a few seconds to answer; the
+   phone's server keeps asking. Past a second and a half, the button says
+   why nothing has happened yet. */
+async function withWaking(button, run){
+  const was = button.textContent;
+  const t = setTimeout(() => { button.textContent = 'Waking the PC\u2019s drive\u2026'; }, 1500);
+  try{ return await run(); }
+  finally{ clearTimeout(t); if(button.textContent !== was && button.textContent.startsWith('Waking')) button.textContent = was; }
+}
+
+/* A greyed show has no details page here — its rows are the PC's — so
+   DETAILS is this: its episodes from the catalogue, what's been seen, and
+   a play button on each. */
+async function openElsewhereShow(tmdbId){
+  const body = sheet();
+  body.classList.add('epsheet');
+  body.append(el('p','empty','Loading…'));
+  const d = await api('/api/elsewhere/episodes?tmdb_id=' + encodeURIComponent(tmdbId));
+  body.querySelector('.empty').remove();
+  if(!d || d.error){ body.append(el('p','empty', esc((d && d.error) || 'Nothing here'))); return; }
+  body.append(el('h2', null, esc(d.title || '')));
+  body.append(el('div','subline', 'On ' + esc(elsewhereWhere()) + ' — plays over the Wi-Fi'));
+  (d.seasons || []).forEach(se => {
+    body.append(el('div','eseason', 'SEASON ' + se.season));
+    se.episodes.forEach(ep => {
+      const row = el('div','erow');
+      row.append(el('span','ecode', 'S' + String(se.season).padStart(2,'0') + 'E' + String(ep.episode).padStart(2,'0')));
+      row.append(el('span','ename', esc(ep.title || '')));
+      row.append(el('span','eseen', ep.watched ? '✓' : ''));
+      const go = el('button','play', ep.position ? 'RESUME' : 'PLAY');
+      go.onclick = async () => {
+        go.textContent = '…';
+        const r = await withWaking(go, () => post('/api/play', {stream: {kind: 'episode', tmdb_id: tmdbId,
+          season: se.season, episode: ep.episode}, resume: true}));
+        go.textContent = r && r.error ? 'FAILED' : 'PLAYING';
+        if(r && r.error) go.title = r.error;
+      };
+      row.append(go);
+      body.append(row);
+    });
+  });
+}
+
 async function playFromTile(item){
   if(item.kind !== 'tvshow')
     return post('/api/play', {type: 'movie', id: item.id, resume: true});
@@ -22191,6 +22295,27 @@ async function pickerBoot(){
   pickerRender();
   $('#picker').classList.remove('hidden');
 }
+
+/* The phone looks for the PC on the Wi-Fi when the app opens and each time
+   it comes back to the front — never on a timer, which would keep a phone
+   in a pocket calling out to a PC that's off. The answer comes a moment
+   later, and the library is redrawn only if it changed what can play. */
+let pcLinkUp = null;
+function lookForPC(){
+  if(!document.body.classList.contains('android')) return;
+  post('/api/link/check').then(r => {
+    if(r && pcLinkUp === null) pcLinkUp = !!r.up;
+    setTimeout(async () => {
+      const s = await api('/api/status');
+      const up = !!(s && s.pc_link && s.pc_link.up);
+      if(up !== pcLinkUp){ pcLinkUp = up; loadLibrary(true); }
+    }, 4000);
+  });
+}
+document.addEventListener('visibilitychange', () => {
+  if(document.visibilityState === 'visible') lookForPC();
+});
+lookForPC();
 
 /* The count has to come from somewhere after the library exists; piggybacking
    on whichever path actually got us into the app. */

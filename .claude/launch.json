@@ -48,6 +48,15 @@
         "tests\\phone_serve.py"
       ],
       "port": 8776
+    },
+    {
+      "name": "nextup-phone-pc",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "tests\\phone_serve.py",
+        "--with-pc"
+      ],
+      "port": 8776
     }
   ]
 }

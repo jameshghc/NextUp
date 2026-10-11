@@ -15,10 +15,16 @@ films on E:.
 closes as though you'd watched five minutes and backed out — so resume
 points can be tried end to end.
 
+With --with-pc, a pretend PC runs beside it (tests/wifi_pc_helper.py, a
+sandbox copy of the real library, its phone link on 8794) and this phone is
+paired with it, so the greyed tiles light up for streaming over "Wi-Fi".
+PLAY hands the pretend mpv the PC's address; nothing is downloaded.
+
 What it can't show: Android itself — the permission prompt, the media
 index, the real mpv app, the WebView's quirks. A real phone is still the
 last word on those."""
 import os, sys, tempfile, threading
+WITH_PC = "--with-pc" in sys.argv      # devserve resets argv as it's imported
 # Decided when nextup is imported, as on the phone.
 os.environ["NEXTUP_PLATFORM"] = "android"
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -76,8 +82,9 @@ got = n.import_library_snapshot(snapshot, fetch_art=False)
 n.ANDROID_VIDEO_ACCESS = lambda: True
 
 
-def pretend_mpv(path, start):
-    print("[mpv] opened %s at %ds" % (os.path.basename(path), start), flush=True)
+def pretend_mpv(path, start, subs=None):
+    print("[mpv] opened %s at %ds%s" % (path if path.startswith("http") else os.path.basename(path), start,
+                                        " with %d subtitles" % len(subs) if subs else ""), flush=True)
     stopped = start + 300
 
     def close():
@@ -85,6 +92,18 @@ def pretend_mpv(path, start):
         n.android_play_finished(position=stopped, duration=max(stopped * 2, 7200))
     threading.Timer(3, close).start()
 n.ANDROID_PLAYER = pretend_mpv
+
+if WITH_PC:
+    import subprocess, uuid
+    # A phone's own id, not the PC's: both sandboxes start from one config.
+    n.CONFIG["device_id"] = uuid.uuid4().hex[:16]
+    PC_PORT = 8794
+    pc = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                        "wifi_pc_helper.py"), str(PC_PORT), n.CONFIG["device_id"]],
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    n.CONFIG["pc_link"] = {"token": pc.stdout.readline().strip(), "pc": n.snapshot_device_name(),
+                           "pc_id": "", "port": PC_PORT, "addresses": ["127.0.0.1"], "last_ip": None}
+    print("pretend PC on %d: %s" % (PC_PORT, "up" if n.pc_link_check(force=True)["up"] else "NOT up"), flush=True)
 
 n.prepare_app()
 print("phone serve on http://127.0.0.1:%d — %d films and %s on the phone, %d films and %d shows sent "

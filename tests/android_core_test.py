@@ -289,6 +289,18 @@ check("the phone doesn't poll for what's playing: playback is mpv's, out of sigh
       "PHONE_NO_PLAYING_POLL" in page_src)
 check("and the server answers without waking twice a second to check for a stop",
       "SERVE_POLL_SECONDS" in open(os.path.join(ROOT, "nextup.py"), encoding="utf-8").read())
+check("Wi-Fi: a greyed tile the PC can stream isn't grey, and wears a Wi-Fi mark",
+      ".tile.elsewhere.streamable .art{filter:none" in page_src and "'wifimark'" in page_src
+      and "classList.add('streamable')" in page_src)
+check("Wi-Fi: PLAY on a streamable tile plays it from the PC; a show's DETAILS lists its episodes",
+      "stream: {kind: 'movie', tmdb_id: item.tmdb_id}" in page_src and "function openElsewhereShow(" in page_src
+      and "/api/elsewhere/episodes?tmdb_id=" in page_src)
+check("Wi-Fi: a slow start says the drive is waking",
+      "button.textContent = 'Waking the PC" in page_src and "withWaking(go" in page_src)
+_look = page_src[page_src.find("function lookForPC"):][:1400]
+check("Wi-Fi: the phone looks for the PC on opening and on coming back, never on a timer",
+      "post('/api/link/check')" in _look and "'visibilitychange'" in _look
+      and "setInterval" not in _look, _look[:120])
 check("a details panel can be swiped down to close", "function sheetSwipe(" in page_src
       and "sheetSwipe(back" in page_src)
 
