@@ -21,6 +21,13 @@ summarised away and files don't.
      (sort 1) ahead of films (sort 2) and cuts the list at 6.
    - With 30+ shows in progress, films never make it in. `/api/resume`
      has 88 films and 32 shows.
+   - **Fixed:** Now's strip uses the resume row (newest first, films and
+     TV, up to 24).
+   - **Found while doing it (not fixed):** if mpv's resume folder is
+     missing, `read_resume_points` returns nothing and
+     `sync_playback_state` reads every watch point as "watched to the end".
+     It wipes them all, adds a play, and stamps them played now. A missing
+     folder should mean "don't know", not "all finished".
 3. **Settings in tabs** instead of one long scroll. There are nine sections
    today.
 4. **The Now page:**

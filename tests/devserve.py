@@ -46,7 +46,14 @@ def isolate(n, sandbox):
         shutil.copyfile(n.RECS_PATH, recs)
     n.RECS_PATH = recs
     n.PLAY_STATE_PATH = os.path.join(sandbox, "nextup_playing.json")
-    n.WATCH_LATER = os.path.join(sandbox, "nextup_resume")
+    # mpv's resume files, copied: with none, the app reads every watch point
+    # as "played to the end" (see sync_playback_state), wiping them all and
+    # stamping every half-watched thing as played just now.
+    resume = os.path.join(sandbox, "nextup_resume")
+    shutil.rmtree(resume, ignore_errors=True)
+    if os.path.isdir(n.WATCH_LATER):
+        shutil.copytree(n.WATCH_LATER, resume)
+    n.WATCH_LATER = resume
     n.ERROR_LOG = os.path.join(sandbox, "nextup_errors.log")
     # The YouTube channels' video lists. Copied in when there is one, so
     # the sandbox's channel page matches the real one without a fetch.

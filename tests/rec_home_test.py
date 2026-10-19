@@ -166,5 +166,17 @@ check("the PC's Now: Continue on top, the chooser, the pick with its alternative
 check("the chooser: several genres, the impossible greyed, Anything folds it away, and NEXT not NOT THIS",
       "/api/genres" in page and "chosenGenres" in page and "'NEXT'" in page and "'NOT THIS'" not in page)
 
+# Now's Continue strip: films too. It used to put every half-watched
+# episode ahead of every film and stop at six, so with thirty shows on the
+# go no film ever showed. Newest first now, films and TV mixed.
+n.LIB.loaded_at = 0
+cont = n.build_continue()
+kinds = set(c["type"] for c in cont)
+check("Continue has films as well as TV", {"movie", "episode"} <= kinds, [c["type"] for c in cont][:10])
+ats = [c.get("at") or "" for c in cont]
+check("newest first", ats == sorted(ats, reverse=True), ats[:6])
+check("more than six, since the strip scrolls", len(cont) > 6, len(cont))
+check("each says where it's up to", all(c.get("why") for c in cont), [c.get("why") for c in cont][:4])
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

@@ -1177,59 +1177,17 @@ def random_episode(episodes, exclude=()):
     return random.choice(rested or pool)
 
 
-def build_continue():
-    """Everything this app has actually seen you start and not finish. Nothing
-    here is inferred — if it's listed, mpv reported a position or you played an
-    episode through to the end."""
-    LIB.load()
+def build_continue(limit=24):
+    """Now's Continue strip: what you were watching, newest first, films and
+    TV mixed — the Library's resume row, a strip's worth of it.
+
+    It used to sort every half-watched episode ahead of every film and stop
+    at six, so with thirty shows on the go no film ever reached it. The
+    strip scrolls sideways now, so it can hold more than fits at once."""
     out = []
-
-    for m in LIB.movies:
-        resume = m.get("resume") or {}
-        if resume.get("position", 0) <= 60:
-            continue
-        total = resume.get("total") or 0
-        percent = int(100 * resume["position"] / total) if total else 0
-        if total and percent >= 95:
-            continue
-        out.append({
-            "type": "movie", "id": m["movieid"], "title": m.get("title"),
-            "year": m.get("year"), "percent": percent,
-            "why": ("%d%% in · %d min left" % (percent, minutes(total - resume["position"])))
-                   if total else ("%d minutes in" % minutes(resume["position"])),
-            "art": art_url(m.get("art", {}).get("poster")),
-            "sort": 2,
-        })
-
-    by_show = defaultdict(list)
-    for e in LIB.episodes:
-        by_show[e.get("tvshowid")].append(e)
-
-    for show in LIB.shows:
-        progress = series_progress(by_show, show.get("tvshowid"))
-        if not progress:
-            continue
-        ep = progress["episode"]
-        code = "S%02dE%02d" % (ep.get("season") or 0, ep.get("episode") or 0)
-        if progress["state"] == "resume":
-            note = "%s%% through %s" % (progress["percent"], code)
-            sort = 1
-        else:
-            note = "up to %s" % code
-            sort = 3
-        out.append({
-            "type": "episode", "id": ep["episodeid"],
-            "title": show.get("title"), "sub": code, "why": note,
-            "percent": progress["percent"],
-            "art": art_url(show.get("art", {}).get("poster")),
-            "sort": sort,
-        })
-
-    out.sort(key=lambda x: (x["sort"], -(x.get("percent") or 0)))
-    # Two rows on a normal window. Past that it stops being "where was I"
-    # and turns into a second library — and the things you actually meant to
-    # get back to are the ones at the top anyway.
-    return out[:6]
+    for item in build_resume_row(limit=limit):
+        out.append(dict(item, why=item.get("note") or ""))
+    return out
 
 
 # "More than a few minutes." Below this you opened something, thought
