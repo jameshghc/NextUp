@@ -178,5 +178,19 @@ check("newest first", ats == sorted(ats, reverse=True), ats[:6])
 check("more than six, since the strip scrolls", len(cont) > 6, len(cont))
 check("each says where it's up to", all(c.get("why") for c in cont), [c.get("why") for c in cont][:4])
 
+# The Now page, 2026-10-19: the chooser up beside a shorter Continue, a
+# choice that keeps your place, and the wheel scrolling Continue sideways.
+page = n.PAGE
+check("the chooser sits in the top row, beside Continue",
+      'grid-template-areas:"cont chooser" "pick chooser" "pick fits"' in page)
+check("a choice keeps the chooser where it was on screen",
+      "function keepPlace(" in page and "keepPlace(" in page[page.find("async function chooserApply"):][:600])
+check("the phone no longer jumps to the top after a choice",
+      "$('#view-now').scrollTo({top: 0" not in page)
+check("the genre row keeps its sideways place when redrawn",
+      "genres.scrollLeft = keepLeft" in page)
+check("the wheel scrolls Continue sideways",
+      "function wheelSideways(" in page and "wheelSideways($('#unfinished-out'))" in page)
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

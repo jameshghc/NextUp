@@ -15929,7 +15929,7 @@ body.android .chooserback{display:none}
    alternatives in a column beside it. The three boxes and the reason cards
    go — the card carries a short why of its own. */
 body:not(.android) #view-now:not(.hidden){display:grid;grid-template-columns:minmax(0,1fr) 260px;
-  grid-template-areas:"cont cont" "pick chooser" "pick fits";grid-template-rows:auto auto 1fr;
+  grid-template-areas:"cont chooser" "pick chooser" "pick fits";grid-template-rows:auto auto 1fr;
   column-gap:18px;align-content:start}
 body:not(.android) #view-now > #unfinished-sec{grid-area:cont;margin:6px 0 10px}
 body:not(.android) #view-now > .nowchooser{grid-area:chooser;display:grid;grid-template-columns:auto minmax(0,1fr);
@@ -17825,6 +17825,9 @@ function drawChooser(){
     kinds.append(b);
   });
   const genres = $('#chooser-genre');
+  /* Redrawn on every choice; on the phone it's a row you've scrolled along
+     to find the genre, and starting it back at the beginning lost your place. */
+  const keepLeft = genres.scrollLeft;
   genres.classList.toggle('hidden', chooserStep < 1);
   genres.innerHTML = '';
   if(chooserStep < 1) return;
@@ -17845,6 +17848,7 @@ function drawChooser(){
     b.onclick = () => chooserGenre(name);
     genres.append(b);
   });
+  genres.scrollLeft = keepLeft;
 }
 
 /* Which genres are still possible with the kind and genres chosen. */
@@ -17880,14 +17884,43 @@ function chooserGenre(name){
 async function chooserApply(){
   $('#mood').value = 'any';
   rejected.clear(); currentTop = null; resetTrail();
-  drawChooser();
-  await loadTonight();
-  /* A finished choice: up to its suggestion, the alternatives under it. */
-  if(chooserStep >= 2 && document.body.classList.contains('android'))
-    $('#view-now').scrollTo({top: 0, behavior: 'smooth'});
+  /* The chooser stays where it is on screen through a choice: what's drawn
+     around it changes height (the alternatives come and go, the pick is
+     replaced), and the page jumping under your pointer between one genre
+     and the next was the complaint. */
+  await keepPlace($('#nowchooser'), async () => {
+    drawChooser();
+    await loadTonight();
+  });
+}
+
+/* Run `change`, then scroll the Now page so `anchor` is back where it was
+   in the window. */
+async function keepPlace(anchor, change){
+  const view = $('#view-now');
+  const before = anchor ? anchor.getBoundingClientRect().top : null;
+  await change();
+  if(before === null || !anchor.isConnected) return;
+  const moved = anchor.getBoundingClientRect().top - before;
+  if(Math.abs(moved) > 1) view.scrollTop += moved;
 }
 
 $('#chooserback').onclick = () => $('#spinback').click();
+
+/* A mouse wheel over a sideways strip moves the strip, not the page —
+   while there's further for it to go. At either end the page has it back. */
+function wheelSideways(strip){
+  strip.addEventListener('wheel', e => {
+    if(Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;     // a trackpad's own sideways swipe
+    const max = strip.scrollWidth - strip.clientWidth;
+    if(max <= 0) return;
+    const step = e.deltaMode === 1 ? e.deltaY * 40 : e.deltaY;
+    if((step < 0 && strip.scrollLeft <= 0) || (step > 0 && strip.scrollLeft >= max - 1)) return;
+    e.preventDefault();
+    strip.scrollLeft += step;
+  }, {passive: false});
+}
+wheelSideways($('#unfinished-out'));
 
 /* What else fits a completed choice: the picks after the first, as small
    posters; a tap makes one the pick. */
