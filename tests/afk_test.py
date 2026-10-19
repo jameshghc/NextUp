@@ -240,6 +240,102 @@ n._finish_current("closed")
 check("closing the window asks nothing", n.afk_state(), None)
 check("closing the window hands over nothing", HANDED, [])
 
+# --- in the middle of a film -------------------------------------------------
+# A lone film has no hand-over, so it used to play to the end with nobody
+# watching (Ben-Hur, three nights running). Past the limit it now pauses and
+# asks; with no answer it closes, keeping the place ten minutes before the
+# pause — roughly where you'd stopped following.
+MPV = {"pause": False, "time-pos": 5400.0, "duration": 13348.0, "idle-active": False}
+n.mpv_get = lambda name, default=None: MPV.get(name, default)
+def mpv_cmd(*a):
+    CALLS.append(a)
+    if a[:2] == ("set_property", "pause"):
+        MPV["pause"] = a[2] == "yes"
+    if a[:1] == ("seek",):
+        MPV["time-pos"] = float(a[1])
+n.mpv_command = mpv_cmd
+
+def film_on():
+    n._KEEP_OPEN[0] = False
+    n.afk_new_file()
+    MPV.update(pause=False)
+    MPV["time-pos"] = 5400.0
+    n.NOW_PLAYING.update(type="movie", id=626, title="Ben-Hur", sub="1959", art=None,
+                         started_at=time.time() - 5400, channel=None, channel_id=None,
+                         position=5400.0, duration=13348.0)
+
+class Alive:
+    def poll(self): return None
+n._PLAY_PROC[0] = Alive()
+
+CALLS[:] = []
+n.seen_you()
+film_on()
+n._monitor_tick()
+check("mid-film, awake: nothing asked", n.afk_state(), None)
+check("mid-film, awake: not paused", MPV["pause"], False)
+
+CALLS[:] = []
+film_on()
+n._LAST_SEEN[0] = time.time() - 4 * 3600
+n._monitor_tick()
+state = n.afk_state()
+check("mid-film, asleep: the question is up", bool(state), True)
+check("mid-film, asleep: the film is paused", MPV["pause"], True)
+check("it says the film is paused, not finished", (state or {}).get("paused"), True)
+n._monitor_tick()
+check("our own pause isn't you being there", n.afk_state() is not None, True)
+
+CALLS[:] = []
+check("yes answers it", n.afk_answer(True), True)
+check("yes carries on playing", MPV["pause"], False)
+check("yes hands nothing over", HANDED, [])
+
+CALLS[:] = []
+film_on()
+n._LAST_SEEN[0] = time.time() - 4 * 3600
+n._monitor_tick()
+n.afk_answer(False)
+check("no closes the player where it is", ("quit",) in CALLS and not any(c[0] == "seek" for c in CALLS), True)
+
+CALLS[:] = []
+film_on()
+n._LAST_SEEN[0] = time.time() - 4 * 3600
+n._monitor_tick()
+n.ASK["since"] = time.time() - 6 * 60
+n.afk_tick()
+check("no answer: it goes back ten minutes, then closes",
+      [c for c in CALLS if c[0] in ("seek", "quit")], [("seek", "4800", "absolute"), ("quit",)])
+check("no answer: the question goes", n.afk_state(), None)
+check("and the app's own record of the place says the same", n.NOW_PLAYING.get("position"), 4800)
+
+CALLS[:] = []
+film_on()
+MPV["time-pos"] = 300.0
+n.NOW_PLAYING["position"] = 300.0
+n._LAST_SEEN[0] = time.time() - 4 * 3600
+n._monitor_tick()
+n.ASK["since"] = time.time() - 6 * 60
+n.afk_tick()
+check("never before the start", [c for c in CALLS if c[0] == "seek"], [("seek", "0", "absolute")])
+
+CALLS[:] = []
+film_on()
+MPV["pause"] = True
+n._LAST_SEEN[0] = time.time() - 4 * 3600
+n._monitor_tick()
+check("already paused: nobody to ask", n.afk_state(), None)
+
+CALLS[:] = []
+film_on()
+n.NOW_PLAYING.update(channel="cult", channel_id="cult")
+n._LAST_SEEN[0] = time.time() - 4 * 3600
+n._monitor_tick()
+check("a channel isn't paused mid-programme (it asks at the hand-over)", n.afk_state(), None)
+n.NOW_PLAYING.update(channel=None, channel_id=None)
+n._PLAY_PROC[0] = None
+n.NOW_PLAYING.update(type=None)
+
 # --- the app's own buttons count as being there -------------------------------
 # Not reachable without a request, so the check is that the hook is there at
 # all, and before anything that can raise.

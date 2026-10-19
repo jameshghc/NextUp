@@ -4439,6 +4439,8 @@ def _monitor_tick():
     if position is None:
         return                          # no control channel, or still loading
     afk_watch_mpv(position)
+    if not settling:
+        afk_mid_file(playing, position)
     if playing == "youtube" and position > 5:
         YT_PLAY_FAILED["at"] = 0        # one played, so the warning is stale
     duration = mpv_get("duration")
@@ -4886,7 +4888,11 @@ _APP_WINDOW = [None]        # the pywebview window, once there is one
 
 _ASK_LOCK = threading.Lock()
 ASK = {"active": False, "since": 0.0, "current": None, "follow_on": None,
-       "band": "", "idle": 0, "title": "", "next": ""}
+       "band": "", "idle": 0, "title": "", "next": "", "pause_at": None}
+
+# Asked in the middle of something and nobody answered: the place kept is
+# this far before the pause, about where you'd have stopped following.
+AFK_REWIND = 600
 
 
 def seen_you():
@@ -4975,13 +4981,51 @@ def afk_ask(current, follow_on):
     with _ASK_LOCK:
         ASK.update(active=True, since=time.time(), current=dict(current),
                    follow_on=follow_on, band=afk_band(), idle=idle,
-                   title=current.get("title") or "",
+                   title=current.get("title") or "", pause_at=None,
                    next=_follow_label(current, follow_on))
     try:
         mpv_command("set_property", "fullscreen", "no")
         mpv_command("show-text",
                     "Are you still watching?\n\nNext Up has the next one "
                     "waiting \u2014 answer there to carry on.", 600000)
+    except Exception:
+        pass
+    raise_app_window()
+
+
+def afk_mid_file(playing, position):
+    """The other time to ask: part way through something, with nobody there.
+
+    A hand-over is the gentle moment, but a film on its own has none — it
+    plays to the end and is marked watched with nobody watching (Ben-Hur,
+    three nights running). So past the limit, mid-film, it pauses and asks;
+    "still here" carries on from the same frame. Not on a channel, whose
+    schedule a pause would knock out of line — that asks at its hand-over.
+    Nor when it's already paused: nobody is being played to."""
+    if playing not in ("movie", "episode"):
+        return
+    with _PLAY_LOCK:
+        current = dict(NOW_PLAYING)
+    if current.get("channel_id") or current.get("channel"):
+        return
+    with _ASK_LOCK:
+        if ASK["active"]:
+            return
+    if mpv_get("pause") or not afk_should_ask():
+        return
+    mpv_command("set_property", "pause", "yes")
+    # Our own pause, not the space bar: don't take it as you being there.
+    _MPV_SEEN["paused"] = True
+    idle = int(afk_idle() / 60)
+    with _ASK_LOCK:
+        ASK.update(active=True, since=time.time(), current=current, follow_on=None,
+                   band=afk_band(), idle=idle, title=current.get("title") or "",
+                   next="", pause_at=float(position))
+    try:
+        mpv_command("set_property", "fullscreen", "no")
+        mpv_command("show-text",
+                    "Paused \u2014 are you still watching?\n\nAnswer in Next Up "
+                    "to carry on.", 600000)
     except Exception:
         pass
     raise_app_window()
@@ -5007,7 +5051,7 @@ def afk_clear():
     with _ASK_LOCK:
         if not ASK["active"]:
             return
-        ASK.update(active=False, current=None, follow_on=None)
+        ASK.update(active=False, current=None, follow_on=None, pause_at=None)
     try:
         mpv_command("show-text", "", 1)
     except Exception:
@@ -5020,12 +5064,22 @@ def afk_answer(still):
         if not ASK["active"]:
             return False
         current, follow_on = ASK["current"], ASK["follow_on"]
-        ASK.update(active=False, current=None, follow_on=None)
+        mid_file = ASK["pause_at"] is not None
+        ASK.update(active=False, current=None, follow_on=None, pause_at=None)
     seen_you()
     try:
         mpv_command("show-text", "", 1)
     except Exception:
         pass
+    if mid_file:
+        # Paused part way through: yes carries on from the same frame; no
+        # closes it right there, since you were awake to say so.
+        if still:
+            mpv_command("set_property", "pause", "no")
+            _MPV_SEEN["paused"] = False
+        else:
+            mpv_command("quit")
+        return True
     if still:
         _hand_over(current, follow_on)
     else:
@@ -5044,9 +5098,18 @@ def afk_tick():
         gone = not mpv_alive()
         if not gone and time.time() - ASK["since"] < grace:
             return
-        ASK.update(active=False, current=None, follow_on=None)
+        pause_at = ASK["pause_at"]
+        ASK.update(active=False, current=None, follow_on=None, pause_at=None)
     if not gone:
         try:
+            if pause_at is not None:
+                # Back to about where you dropped off, so that's the place
+                # kept — in mpv's own record and in ours, which is what the
+                # sitting is written from once the player has gone.
+                back = int(max(0, pause_at - AFK_REWIND))
+                mpv_command("seek", str(back), "absolute")
+                with _PLAY_LOCK:
+                    NOW_PLAYING["position"] = back
             mpv_command("quit")
         except Exception:
             pass
@@ -5060,6 +5123,7 @@ def afk_state():
             return None
         grace = max(1, int(afk_settings().get("grace") or 5)) * 60
         return {"title": ASK["title"], "next": ASK["next"], "idle": ASK["idle"],
+                "paused": ASK["pause_at"] is not None,
                 "band": AFK_BAND_NAMES.get(ASK["band"], ""),
                 "left": max(0, int(ASK["since"] + grace - time.time()))}
 
@@ -21982,7 +22046,8 @@ function renderAsk(a){
   const what = el('p');
   if(a.title){
     what.append(el('b', null, a.title));
-    what.append(document.createTextNode(' finished. '));
+    what.append(document.createTextNode(a.paused
+      ? ' is paused. Carry on, or stop and keep your place.' : ' finished. '));
   }
   if(a.next){
     what.append(document.createTextNode('Next up: '));
