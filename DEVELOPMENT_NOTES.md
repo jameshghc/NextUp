@@ -68,6 +68,13 @@ at the top.
     off" heading (centres 123/124 px).
   - On the phone `#nowside` is `display:contents`, so its own order is
     unchanged.
+- **mpv's saved places, if the folder goes missing.** `read_resume_points`
+  now returns None when `nextup_resume` can't be read whole: missing,
+  unlistable, or a file locked by a sync tool.
+  - `sync_playback_state` then changes nothing, and logs once. Before, an
+    empty read meant "everything finished": every watch point wiped, a play
+    added, and everything stamped played now. Reproduced in `afk_test`
+    before the fix.
 - **Settings in tabs.** Each section carries `data-tab` and sits under one
   of Library, Playback, Phone & sharing or Storage (`showSettingsTab`). The
   last tab used is remembered in localStorage.

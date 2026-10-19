@@ -4323,8 +4323,9 @@ def _note_playback_finished(kind, item_id, ran_for, position=None, duration=None
         if prior:
             return
         path = LOCAL.path_for(kind, item_id)
-        if not path or os.path.normcase(path) in read_resume_points():
-            return      # mpv saved a position, so you stopped part way
+        points = read_resume_points()
+        if not path or points is None or os.path.normcase(path) in points:
+            return      # mpv saved a position (or can't say), so not counted
         # No position and no duration on this path — how long the player was
         # open is the one number that was actually observed, so it's the only
         # one recorded.
@@ -5210,17 +5211,25 @@ def resume_dir_changed():
 
 def read_resume_points():
     """mpv writes one small file per part-watched video. It deletes that file
-    when you watch something to the end, so its absence means finished."""
+    when you watch something to the end, so its absence means finished.
+
+    None when the folder can't be read whole — missing (moved, deleted,
+    left out of a backup), unlistable, or with a file that won't open (a
+    sync tool holding it). Then there's no telling which files are absent,
+    and reading "nothing saved" as "everything finished" once wiped every
+    watch point in the library."""
     points = {}
-    if not os.path.isdir(WATCH_LATER):
-        return points
-    for name in os.listdir(WATCH_LATER):
+    try:
+        names = os.listdir(WATCH_LATER)
+    except OSError:
+        return None
+    for name in names:
         full = os.path.join(WATCH_LATER, name)
         try:
             with open(full, "r", encoding="utf-8", errors="replace") as fh:
                 lines = fh.read().splitlines()
         except OSError:
-            continue
+            return None
         path, position = None, None
         for line in lines:
             if line.startswith("# ") and not path:
@@ -5233,6 +5242,9 @@ def read_resume_points():
         if path and position:
             points[os.path.normcase(path)] = position
     return points
+
+
+_RESUME_UNREADABLE_SAID = [False]
 
 
 def sync_playback_state():
@@ -5251,6 +5263,13 @@ def sync_playback_state():
     if PLATFORM == "android":
         return
     points = read_resume_points()
+    if points is None:
+        # Can't read mpv's saved places right now: change nothing rather
+        # than take every missing file as "watched to the end".
+        if not _RESUME_UNREADABLE_SAID[0]:
+            _RESUME_UNREADABLE_SAID[0] = True       # once, not on every library load
+            log_problem("mpv's resume folder couldn't be read: %s" % WATCH_LATER)
+        return
     conn = db()
     for table in ("movies", "episodes"):
         for row in conn.execute("SELECT id,path,runtime,resume_pos FROM %s" % table):

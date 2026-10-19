@@ -26,7 +26,7 @@ first.
      has 88 films and 32 shows.
    - **Fixed:** Now's strip uses the resume row (newest first, films and
      TV, up to 24).
-   - **Found while doing it (not fixed):** if mpv's resume folder is
+   - **Found while doing it (fixed in v0.1.76 since):** if mpv's resume folder is
      missing, `read_resume_points` returns nothing and
      `sync_playback_state` reads every watch point as "watched to the end".
      It wipes them all, adds a play, and stamps them played now. A missing

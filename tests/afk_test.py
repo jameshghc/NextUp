@@ -336,6 +336,25 @@ n.NOW_PLAYING.update(channel=None, channel_id=None)
 n._PLAY_PROC[0] = None
 n.NOW_PLAYING.update(type=None)
 
+# --- mpv's saved places gone missing ----------------------------------------
+# No resume folder used to read as "every film finished": each watch point
+# wiped, a play added, everything stamped played just now. A folder that
+# isn't there (moved, deleted, left out of a backup) says nothing at all.
+conn = n.db()
+row = conn.execute("SELECT id, resume_pos, playcount, last_played FROM movies WHERE resume_pos > 0 LIMIT 1").fetchone()
+conn.close()
+real_dir = n.WATCH_LATER
+n.WATCH_LATER = os.path.join(SANDBOX, "no_such_resume_folder")
+check("a missing folder is 'don't know', not 'nothing saved'", n.read_resume_points(), None)
+n.sync_playback_state()
+conn = n.db()
+after = conn.execute("SELECT resume_pos, playcount, last_played FROM movies WHERE id=?", (row["id"],)).fetchone()
+conn.close()
+check("a missing folder wipes no watch point",
+      (after["resume_pos"], after["playcount"], after["last_played"]),
+      (row["resume_pos"], row["playcount"], row["last_played"]))
+n.WATCH_LATER = real_dir
+
 # --- the app's own buttons count as being there -------------------------------
 # Not reachable without a request, so the check is that the hook is there at
 # all, and before anything that can raise.
