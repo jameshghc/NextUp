@@ -9,7 +9,7 @@ summarised away and files don't.
 
 ---
 
-## The look: grey glass (mock-ups shown 2026-10-19, waiting on a choice)
+## The look: grey glass (built in v0.1.77: the user chose C)
 
 `docs/mockups/glass-ui.html` (serve with the "mockups" launch config, port
 8778) has A (today), B (smoked glass) and C (frosted glass). Screenshots are

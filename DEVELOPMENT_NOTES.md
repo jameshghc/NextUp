@@ -16,6 +16,45 @@ at the top.
 
 ---
 
+## 2026-10-19 — v0.1.77, Glass, and Settings → Appearance
+
+The user picked mock-up C (frosted glass) from three
+(`docs/mockups/glass-ui.html`, screenshots in `docs/mockups/shots/`). They
+asked for a menu to customise parts of it, "nothing that might break
+anything".
+
+- **Two styles.** Classic (the room as it was) and Glass.
+  - Glass is the PC's default. The phone starts on Classic, because the
+    blur behind every panel costs battery.
+  - In Glass, the panel colours are swapped at the variables most of the
+    page already paints with (`--ink-2`, `--surface`, `--line` …), so
+    anything not in the panel list still follows, just without blur.
+  - The listed panels get `backdrop-filter`.
+  - `#roomart`, a fixed layer behind everything, carries the current
+    pick's poster blurred to a wash (`setRoomArt` from `showPick`).
+- **Settings → Appearance** has style, accent (8 presets), glass strength,
+  background art, corners and RESET.
+  - Every value is a preset or a 0–100 number, checked and clamped in
+    `appearance_settings`. A damaged or hand-edited config reads as the
+    defaults.
+  - `appearance_look` turns the settings into body classes and CSS
+    variables. It's the single source for the page as served
+    (`page_html`, so there's no flash of the old look) and for the live
+    preview (`/api/appearance` GET and POST, `{reset: true}`).
+- **The accent reaches everything.** The 18 hard-coded marigolds became
+  `var(--marigold)` and `rgba(var(--accent-rgb),…)`.
+- **Corners.** A slider at "Style's own" (`round: null`) leaves each
+  style's corners. Moving it sets `--r-user` (0–22 px) on panels, tiles,
+  chips and buttons.
+- **Readability guard.** The first full-frost screenshot, over a bright
+  orange poster, lost the outline buttons. Panels now never go below .24
+  opacity, the art is dimmed to brightness .6, and outline buttons get a
+  faint dark backing in Glass.
+- Tests: `tests/appearance_test.py` (21). The phone suite's body-tag check
+  now allows the extra classes and style.
+- Screenshots were taken with headless Edge driven over CDP (a scratch
+  `shot.js`), because the preview pane is too small for a 1440-wide page.
+
 ## 2026-10-19 — v0.1.76, the timer asks mid-film; Continue gets its films back; Settings in tabs
 
 - **"Are you still watching?" asks in the middle of a film** (`afk_mid_file`,

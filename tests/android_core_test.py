@@ -19,7 +19,7 @@ shutil.rmtree(home, ignore_errors=True)
 os.makedirs(home)
 
 PROBE = r'''
-import sys, os, json, socket, threading, urllib.request, urllib.error
+import sys, os, re, json, socket, threading, urllib.request, urllib.error
 sys.argv = ["nextup.py"]
 sys.path.insert(0, r"%s")
 import nextup as n
@@ -39,7 +39,7 @@ out["port"] = port
 with urllib.request.urlopen("http://127.0.0.1:%%d/" %% port, timeout=10) as r:
     body = r.read()
     out["status"], out["has_title"] = r.status, b"<title>" in body
-    out["android_body"] = b'<body class="android">' in body
+    out["android_body"] = re.search(rb'<body class="android[ "]', body) is not None
 out["dismissed_loaded"] = "movie:424242" in n.DISMISSED
 out["again"] = n.serve_in_thread(8797)
 with urllib.request.urlopen("http://127.0.0.1:%%d/api/status" %% port, timeout=10) as r:

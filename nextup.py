@@ -110,7 +110,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.76"
+APP_VERSION = "0.1.77"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -4800,6 +4800,92 @@ AFK_DEFAULTS = {
 
 AFK_BAND_NAMES = {"late": "after midnight", "day": "the afternoon",
                   "evening": "the evening"}
+
+
+# --- the look --------------------------------------------------------------------
+#
+# Classic (the room as it was) or Glass (see-through grey panels over the
+# pick's own art), and four things you can set in Settings -> Appearance.
+# Every value is a preset or a clamped number, checked here rather than in
+# the page: a hand-edited config, or one from an older version, can only
+# ever produce one of the looks this file knows how to draw.
+
+ACCENTS = {
+    "marigold": "#e0a33e", "teal": "#4fb3a9", "rose": "#e0607e", "violet": "#9b7be0",
+    "lime": "#9ccb4a", "sky": "#4ea4e6", "coral": "#e8774f", "silver": "#c9c9d4",
+}
+APPEARANCE_DEFAULTS = {"theme": "glass", "accent": "marigold", "glass": 60, "art": 55,
+                       "round": None}      # None: each theme's own corners
+
+
+def appearance_settings():
+    """The look's settings, every one checked. Glass is the PC's default;
+    the phone starts on Classic, since blurring behind every panel costs a
+    phone battery for something it shows on a small screen."""
+    out = dict(APPEARANCE_DEFAULTS)
+    if PLATFORM == "android":
+        out["theme"] = "classic"
+    saved = CONFIG.get("appearance")
+    if not isinstance(saved, dict):
+        return out
+    if saved.get("theme") in ("classic", "glass"):
+        out["theme"] = saved["theme"]
+    if saved.get("accent") in ACCENTS:
+        out["accent"] = saved["accent"]
+    for key in ("glass", "art", "round"):
+        if key not in saved or (key == "round" and saved[key] is None):
+            continue
+        try:
+            out[key] = max(0, min(100, int(saved[key])))
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def _hex_rgb(colour):
+    colour = colour.lstrip("#")
+    return tuple(int(colour[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def appearance_look(settings=None):
+    """What the page needs to wear the settings: classes for <body> and
+    CSS variables. Worked out here, once, for the page as it's served and
+    for the live preview in Settings alike."""
+    st = settings or appearance_settings()
+    t = st["glass"] / 100.0
+    r, g, b = _hex_rgb(ACCENTS[st["accent"]])
+    light = tuple(int(c + (255 - c) * 0.22) for c in (r, g, b))
+    # Smoke at 0 (dark, mostly solid), frost at 100 (lighter, see-through).
+    tint = tuple(int(lo + (hi - lo) * t) for lo, hi in zip((30, 30, 36), (150, 150, 165)))
+    # Never thinner than .24: at full frost over a bright poster, the outline
+    # buttons and the grey text went with anything less.
+    alpha = 0.58 - 0.34 * t
+    look = {"classes": [], "vars": {
+        "--marigold": ACCENTS[st["accent"]],
+        "--marigold-2": "#%02x%02x%02x" % light,
+        "--accent-rgb": "%d,%d,%d" % (r, g, b),
+        "--glass-panel": "rgba(%d,%d,%d,%.2f)" % (tint + (alpha,)),
+        "--glass-panel-2": "rgba(%d,%d,%d,%.2f)" % (tint + (min(0.9, alpha + 0.08),)),
+        "--glass-line": "rgba(255,255,255,%.2f)" % (0.07 + 0.1 * t),
+        "--glass-blur": "%dpx" % round(14 + 18 * t),
+        "--art-opacity": "0" if not st["art"] else "%.2f" % (st["art"] / 100.0 * 0.9),
+    }}
+    if st["theme"] == "glass":
+        look["classes"].append("glass")
+    if st["round"] is not None:
+        look["classes"].append("customround")
+        look["vars"]["--r-user"] = "%dpx" % round(st["round"] * 22 / 100.0)
+    return look
+
+
+def page_html():
+    """The page, already dressed in the chosen look — classes and variables
+    on <body> as it's sent, so it never draws once in the wrong one first."""
+    look = appearance_look()
+    classes = (["android"] if PLATFORM == "android" else []) + look["classes"]
+    style = ";".join("%s:%s" % kv for kv in look["vars"].items())
+    tag = '<body class="%s" style="%s">' % (" ".join(classes), style)
+    return PAGE.replace("<body>", tag, 1)
 
 
 def afk_settings():
@@ -13576,9 +13662,9 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             if route == "/":
-                # Marked on the phone, for the few rules only it wants.
-                return self.send_html(PAGE if PLATFORM != "android"
-                                      else PAGE.replace("<body>", '<body class="android">', 1))
+                # Marked on the phone, for the few rules only it wants, and
+                # dressed in the chosen look (see page_html).
+                return self.send_html(page_html())
 
             if route == "/favicon.ico" and os.path.exists(ICON_PATH):
                 # A real .ico, with the small sizes a tab actually renders.
@@ -13613,6 +13699,11 @@ class Handler(BaseHTTPRequestHandler):
 
             if route == "/api/remote/state":
                 return self.send_json(remote_state())
+
+            if route == "/api/appearance":
+                st = appearance_settings()
+                return self.send_json({"settings": st, "look": appearance_look(st),
+                                       "accents": list(ACCENTS.items())})
 
             if route == "/api/status":
                 payload = self.status_payload()
@@ -14045,6 +14136,20 @@ class Handler(BaseHTTPRequestHandler):
                 log_event(kind, item_id, title, "played")
                 note_now_playing(proc, kind, item_id, title)
                 return self.send_json({"ok": True})
+
+            if route == "/api/appearance":
+                if data.get("reset"):
+                    CONFIG.pop("appearance", None)
+                else:
+                    keep = {k: data[k] for k in APPEARANCE_DEFAULTS if k in data}
+                    CONFIG["appearance"] = keep
+                    # Stored as checked, so the file only ever holds good values.
+                    st = appearance_settings()
+                    CONFIG["appearance"] = st
+                save_json(CONFIG_PATH, CONFIG)
+                st = appearance_settings()
+                return self.send_json({"settings": st, "look": appearance_look(st),
+                                       "accents": list(ACCENTS.items())})
 
             if route == "/api/afk":
                 # still: carry on with what was held. Otherwise close the
@@ -14585,6 +14690,7 @@ PAGE = r"""<!doctype html>
   --paper:#ece6dc;
   --muted:#8d859b;
   --marigold:#e0a33e;
+  --accent-rgb:224,163,62;   /* the accent again, for rgba() — see appearance_look */
   --teal:#4fa8a0;
   --rust:#c2593c;
   --line:#272031;
@@ -14628,7 +14734,7 @@ PAGE = r"""<!doctype html>
 ::-webkit-scrollbar-thumb:hover{background:rgba(236,230,220,.38);background-clip:content-box}
 /* Literal colour, not var(--marigold): custom properties don't reach inside
    a scrollbar pseudo-element, and the rule silently computes to nothing. */
-::-webkit-scrollbar-thumb:active{background:#e0a33e;background-clip:content-box}
+::-webkit-scrollbar-thumb:active{background:var(--marigold);background-clip:content-box}
 /* The standard properties are deliberately NOT set alongside the above:
    where both exist the standard ones win outright, which throws away the
    rounded, inset thumb. They're kept here only for anything that has no
@@ -14874,10 +14980,10 @@ select{
   margin-left:auto;align-self:flex-end;background:var(--marigold);color:#1a1206;border:0;
   font-family:var(--display);font-weight:800;font-size:15px;padding:10px 22px;
   border-radius:6px;cursor:pointer;letter-spacing:.01em;
-  box-shadow:0 4px 14px rgba(224,163,62,.22);
+  box-shadow:0 4px 14px rgba(var(--accent-rgb),.22);
   transition:filter .12s ease,transform .08s ease,box-shadow .12s ease;
 }
-.spin:hover{filter:brightness(1.08);box-shadow:0 6px 18px rgba(224,163,62,.3)}
+.spin:hover{filter:brightness(1.08);box-shadow:0 6px 18px rgba(var(--accent-rgb),.3)}
 .spin:active{transform:translateY(1px)}
 /* The two travel together at the end of the filter row, so BACK reads as
    part of the picking rather than as one more filter. */
@@ -15992,7 +16098,7 @@ body:not(.android) .nowfits .fitgrid{grid-template-columns:repeat(2,minmax(0,1fr
 }
 body:not(.android) .pick .plot.clamp{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;cursor:pointer}
 body:not(.android) .pick .ppwhy{max-width:62ch;margin:0 0 14px;padding:8px 12px;border-left:2px solid var(--marigold);
-  background:rgba(224,163,62,.07);font-size:13.5px;line-height:1.45;color:var(--paper)}
+  background:rgba(var(--accent-rgb),.07);font-size:13.5px;line-height:1.45;color:var(--paper)}
 body:not(.android) .pick .ppwhy:empty{display:none}
 body:not(.android) .pick .rowbtns{margin:0 0 14px}
 
@@ -16066,7 +16172,7 @@ body.android #unfinished-sec .alt p.empty:empty{display:none}
 .phonepick .plot{margin:0 0 10px;cursor:pointer}
 .phonepick .plot.clamp{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .phonepick .ppwhy{margin:0 0 12px;padding:8px 11px;border-left:2px solid var(--marigold);
-  background:rgba(224,163,62,.07);font-size:13px;line-height:1.4;color:var(--paper);
+  background:rgba(var(--accent-rgb),.07);font-size:13px;line-height:1.4;color:var(--paper);
   display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .phonepick .ppwhy:empty{display:none}
 .phonepick .pptop.swiping{transition:none}
@@ -16272,8 +16378,8 @@ label.f span b{color:var(--marigold);font-weight:400;font-family:var(--mono)}
 .yearrange input[type=range]::-webkit-slider-thumb{margin-top:3.5px;pointer-events:auto}
 .yearrange input[type=range]::-moz-range-thumb{pointer-events:auto}
 /* Focus has to be visible on something with no visible box of its own. */
-.yearrange input[type=range]:focus-visible::-webkit-slider-thumb{box-shadow:0 0 0 3px rgba(224,163,62,.35)}
-.yearrange input[type=range]:focus-visible::-moz-range-thumb{box-shadow:0 0 0 3px rgba(224,163,62,.35)}
+.yearrange input[type=range]:focus-visible::-webkit-slider-thumb{box-shadow:0 0 0 3px rgba(var(--accent-rgb),.35)}
+.yearrange input[type=range]:focus-visible::-moz-range-thumb{box-shadow:0 0 0 3px rgba(var(--accent-rgb),.35)}
 .secfilters{display:flex;gap:18px;flex-wrap:wrap;align-items:flex-end;margin-bottom:18px}
 .settings{background:var(--ink-2);border:1px solid var(--line);border-radius:6px;padding:20px;margin-top:20px}
 .settings h3{font-family:var(--display);font-size:17px;margin:0 0 4px}
@@ -16351,7 +16457,7 @@ label.f span b{color:var(--marigold);font-weight:400;font-family:var(--mono)}
 .resumecard:focus-visible,.simcard:hover,.castchip:not(:disabled):hover{
   border-color:rgba(255,255,255,.10);box-shadow:var(--shadow-lift);
 }
-.resumecard:hover,.resumecard:focus-visible{border-color:rgba(224,163,62,.45)}
+.resumecard:hover,.resumecard:focus-visible{border-color:rgba(var(--accent-rgb),.45)}
 .channelcard:hover,.channelcard:focus-visible{box-shadow:var(--shadow-lift)}
 
 /* Rulers between rows and under headings: present, faint. */
@@ -16374,9 +16480,9 @@ label.f span b{color:var(--marigold);font-weight:400;font-family:var(--mono)}
 .spin{
   border-radius:999px;padding:10px 24px;
   background:linear-gradient(180deg,var(--marigold-2),var(--marigold));
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.35),0 6px 20px rgba(224,163,62,.28);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.35),0 6px 20px rgba(var(--accent-rgb),.28);
 }
-.spin:hover{filter:none;box-shadow:inset 0 1px 0 rgba(255,255,255,.4),0 8px 26px rgba(224,163,62,.38)}
+.spin:hover{filter:none;box-shadow:inset 0 1px 0 rgba(255,255,255,.4),0 8px 26px rgba(var(--accent-rgb),.38)}
 .iconbtn,.spinback,.favtoggle,.watchtoggle,.seasontab{
   background:rgba(255,255,255,.055);border-color:transparent;border-radius:var(--r-btn);
   box-shadow:inset 0 1px 0 rgba(255,255,255,.04);
@@ -16384,13 +16490,13 @@ label.f span b{color:var(--marigold);font-weight:400;font-family:var(--mono)}
 .iconbtn:hover,.spinback:hover:not(:disabled),.favtoggle:hover,.watchtoggle:hover,
 .seasontab:hover{background:rgba(255,255,255,.095);border-color:transparent;color:var(--paper)}
 .favtoggle.on{background:rgba(194,89,60,.16);color:#e8876a;border-color:transparent}
-.watchtoggle.on{background:rgba(224,163,62,.16);color:var(--marigold-2);border-color:transparent}
+.watchtoggle.on{background:rgba(var(--accent-rgb),.16);color:var(--marigold-2);border-color:transparent}
 .seasontab{border-radius:999px;padding:5px 11px}
-.seasontab[aria-selected="true"]{background:rgba(224,163,62,.18);color:var(--paper);border-color:transparent}
+.seasontab[aria-selected="true"]{background:rgba(var(--accent-rgb),.18);color:var(--paper);border-color:transparent}
 .pager button:disabled:hover{background:rgba(255,255,255,.055);color:var(--muted)}
 .score{border-radius:7px;box-shadow:0 2px 8px rgba(0,0,0,.4)}
 .chip{border-radius:999px;padding:3px 8px;background:rgba(255,255,255,.05);border-color:transparent}
-.chip.strong{background:rgba(224,163,62,.14);color:var(--marigold-2)}
+.chip.strong{background:rgba(var(--accent-rgb),.14);color:var(--marigold-2)}
 .gap-top .tag{border-radius:999px;padding:3px 9px;background:rgba(194,89,60,.14);border-color:transparent}
 .closex{
   border-radius:999px;padding:7px 12px;z-index:3;color:var(--paper);
@@ -16414,9 +16520,9 @@ select,textarea,.searchbox input,.fields input,.fixform input{
    tells the control to draw its native parts dark in the first place. */
 select{color-scheme:dark}
 select option{background-color:var(--surface-2);color:var(--paper)}
-select option:checked{background-color:rgba(224,163,62,.25)}
+select option:checked{background-color:rgba(var(--accent-rgb),.25)}
 select:focus,textarea:focus,.searchbox input:focus,.fields input:focus,.fixform input:focus{
-  outline:none;border-color:rgba(224,163,62,.55);box-shadow:0 0 0 3px rgba(224,163,62,.14);
+  outline:none;border-color:rgba(var(--accent-rgb),.55);box-shadow:0 0 0 3px rgba(var(--accent-rgb),.14);
 }
 .searchbox input{padding:11px 14px}
 
@@ -16425,7 +16531,7 @@ select:focus,textarea:focus,.searchbox input:focus,.fields input:focus,.fixform 
 .progress{height:4px}
 .progress i,.playprogress i,.queuebar .track i,.resumecard .rbar i,.bar i{
   background:linear-gradient(90deg,#c98a2e,var(--marigold-2));
-  box-shadow:0 0 10px rgba(224,163,62,.45);border-radius:999px;
+  box-shadow:0 0 10px rgba(var(--accent-rgb),.45);border-radius:999px;
 }
 
 /* -- tiles: a poster, not a boxed poster ---------------------------------------- */
@@ -16852,10 +16958,45 @@ header.mast .libplaces.offview{visibility:hidden}
   .castgrid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}
   .simgrid{grid-template-columns:repeat(auto-fill,minmax(96px,1fr))}
 }
+/* ---- the look: Glass, and corners you set ----
+   Glass (see appearance_look): the panels turn see-through grey and blur
+   what's behind them, and behind everything is the current pick's own
+   poster, blurred to a wash of its colours. The panel colours are swapped
+   at the variables most of the page already paints with, so anything not
+   named below still follows along — just without the blur. */
+#roomart{position:fixed;inset:-90px;z-index:-1;pointer-events:none;background:#0c0c10 center/cover no-repeat;
+  filter:blur(56px) saturate(.9) brightness(.6);transform:scale(1.08);opacity:var(--art-opacity,0);
+  transition:opacity .5s ease}
+body:not(.glass) #roomart{display:none}
+body.glass{background:radial-gradient(1100px 520px at 50% -160px,#24242c 0%,rgba(12,12,16,0) 70%),#0c0c10;
+  --ink-2:var(--glass-panel);--ink-3:var(--glass-panel-2);--surface:var(--glass-panel);
+  --surface-2:var(--glass-panel-2);--line:var(--glass-line);--edge:var(--glass-line);--muted:#a7a7b2}
+body.glass :is(.settings,.pick,.alt,.hubcard,.card,.coll,.dirblock,.profile,.ratecard,.channelcard,.toplist,.resumecard,.reccard,.sheetbody,.sheetpanel,.simcard,.askcard,.ctxmenu,.queuerail,.syncoffer,.fitcard,.nowchooser,.nowfits,#playingbar,.gap,.notice){
+  background-color:var(--glass-panel);border-color:var(--glass-line);
+  backdrop-filter:blur(var(--glass-blur)) saturate(1.3);-webkit-backdrop-filter:blur(var(--glass-blur)) saturate(1.3);
+  border-radius:var(--r-card)}
+body.glass :is(.sheetbody,.sheetpanel,.settings,.pick){border-radius:var(--r-panel)}
+/* Outline buttons have no fill of their own; over a bright poster they need
+   a little dark behind the outline to stay readable. */
+body.glass .iconbtn{background-color:rgba(0,0,0,.22)}
+body.customround :is(.settings,.pick,.alt,.hubcard,.card,.coll,.dirblock,.profile,.ratecard,.channelcard,.toplist,.resumecard,.reccard,.sheetbody,.sheetpanel,.simcard,.askcard,.ctxmenu,.queuerail,.syncoffer,.fitcard,.nowchooser,.nowfits,#playingbar,.gap,.notice,.tile,.kchip,.iconbtn,.play,.tab){border-radius:var(--r-user)!important}
+/* The Appearance tab's own controls. */
+.apgrid{display:grid;grid-template-columns:150px minmax(0,1fr);gap:16px 18px;align-items:center;margin-top:14px}
+.apgrid > label{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.apswatches{display:flex;flex-wrap:wrap;gap:8px}
+.apswatch{width:30px;height:30px;border-radius:50%;border:2px solid transparent;cursor:pointer;padding:0;
+  box-shadow:inset 0 0 0 2px rgba(0,0,0,.25)}
+.apswatch[aria-pressed="true"]{border-color:var(--paper)}
+.apthemes{display:flex;gap:8px}
+.apthemes .kchip{flex:0 0 auto;padding:8px 20px}
+.apslider{display:flex;align-items:center;gap:12px}
+.apslider input{flex:1;max-width:360px}
+.apslider span{font-family:var(--mono);font-size:12px;color:var(--muted);min-width:96px}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
 </head>
 <body>
+<div id="roomart"></div>
 <div class="wrap">
 
 <div id="titlebar">
@@ -17287,6 +17428,26 @@ header.mast .libplaces.offview{visibility:hidden}
     <div id="usbphone_body"><p class="empty">Looking for a phone…</p></div>
   </div>
 
+  <div class="settings" data-tab="appearance">
+    <h3>Appearance</h3>
+    <p class="empty">How Next Up looks on this machine. Changes show as you make them; nothing here can hide or break anything, and Reset puts it all back.</p>
+    <div class="apgrid">
+      <label>Style</label>
+      <div class="apthemes" id="ap_theme"></div>
+      <label>Accent colour</label>
+      <div class="apswatches" id="ap_accent"></div>
+      <label>Glass strength</label>
+      <div class="apslider"><input type="range" id="ap_glass" min="0" max="100" step="5"><span id="ap_glass_v"></span></div>
+      <label>Background art</label>
+      <div class="apslider"><input type="range" id="ap_art" min="0" max="100" step="5"><span id="ap_art_v"></span></div>
+      <label>Corners</label>
+      <div class="apslider"><input type="range" id="ap_round" min="0" max="100" step="5"><span id="ap_round_v"></span></div>
+    </div>
+    <div class="rowbtns" style="margin-top:18px">
+      <button class="iconbtn" id="ap_reset" type="button">RESET TO DEFAULT</button>
+    </div>
+  </div>
+
   <div class="settings" data-tab="storage">
     <h3>What's stored on this machine</h3>
     <p class="empty" id="dbline">All of it lives in the Next Up folder. Nothing leaves your PC except the metadata lookups.</p>
@@ -17376,12 +17537,77 @@ function resetView(view){
 }
 
 let currentView = 'now';
+/* ---------- the look ----------
+   Behind the page in Glass, the current pick's poster, blurred to a wash
+   of its colours (#roomart). */
+function setRoomArt(url){
+  const art = $('#roomart');
+  if(art) art.style.backgroundImage = url ? 'url("' + String(url).replace(/"/g, '%22') + '")' : 'none';
+}
+
+/* The page wears what the server says: classes on <body> and CSS
+   variables, worked out (and every value checked) by appearance_look. */
+function applyLook(look){
+  if(!look) return;
+  ['glass', 'customround'].forEach(c => document.body.classList.toggle(c, look.classes.includes(c)));
+  if(!look.classes.includes('customround')) document.body.style.removeProperty('--r-user');
+  Object.entries(look.vars).forEach(([k, v]) => document.body.style.setProperty(k, v));
+}
+
+let apState = null;
+async function apLoad(){
+  const r = await api('/api/appearance');
+  if(r && r.settings){ apState = r; apDraw(); }
+}
+async function apSave(change){
+  const r = await post('/api/appearance', change);
+  if(r && r.settings){ apState = r; applyLook(r.look); apDraw(); }
+}
+function apDraw(){
+  const st = apState.settings;
+  const themes = $('#ap_theme'); themes.innerHTML = '';
+  [['classic', 'Classic'], ['glass', 'Glass']].forEach(([key, label]) => {
+    const b = el('button', 'kchip' + (st.theme === key ? ' on' : ''), label);
+    b.type = 'button';
+    b.onclick = () => apSave(Object.assign({}, st, {theme: key}));
+    themes.append(b);
+  });
+  const sw = $('#ap_accent'); sw.innerHTML = '';
+  apState.accents.forEach(([key, colour]) => {
+    const b = el('button', 'apswatch');
+    b.type = 'button';
+    b.title = key[0].toUpperCase() + key.slice(1);
+    b.style.background = colour;
+    b.setAttribute('aria-pressed', String(st.accent === key));
+    b.onclick = () => apSave(Object.assign({}, st, {accent: key}));
+    sw.append(b);
+  });
+  const glassOnly = st.theme !== 'glass';
+  [['glass', v => glassOnly ? 'Glass style only' : (v < 35 ? 'Smoked' : v < 70 ? 'Between' : 'Frosted')],
+   ['art', v => glassOnly ? 'Glass style only' : (v ? v + '%' : 'Off')],
+   ['round', v => st.round === null ? 'Style\u2019s own' : (v < 15 ? 'Sharp' : v < 60 ? 'Soft' : 'Round')]
+  ].forEach(([key, say]) => {
+    const input = $('#ap_' + key);
+    const value = st[key] === null ? 50 : st[key];
+    if(document.activeElement !== input) input.value = value;
+    input.disabled = glassOnly && key !== 'round';
+    $('#ap_' + key + '_v').textContent = say(+input.value);
+    input.oninput = () => {
+      $('#ap_' + key + '_v').textContent = say(+input.value);
+      clearTimeout(input.saving);
+      input.saving = setTimeout(() => apSave(Object.assign({}, apState.settings, {[key]: +input.value})), 120);
+    };
+  });
+}
+$('#ap_reset').onclick = () => apSave({reset: true});
+
 /* Settings in tabs: it had grown into one long page to scroll through.
    Each section says which tab it belongs to (data-tab); the one you were
    on last is remembered, in this browser only — a convenience, nothing
    that matters if it's forgotten. */
 const SETTINGS_TABS = [['library', 'Library'], ['playback', 'Playback'],
-                       ['sharing', 'Phone & sharing'], ['storage', 'Storage']];
+                       ['sharing', 'Phone & sharing'], ['appearance', 'Appearance'],
+                       ['storage', 'Storage']];
 function showSettingsTab(id){
   if(!id){
     try{ id = localStorage.getItem('nextup.settingsTab'); }catch(e){ id = null; }
@@ -17417,7 +17643,7 @@ function switchTo(view){
   }
   if(view==='rate'){ staleRatings = false; loadRatings(); }
   if(view==='channels') loadChannels();
-  if(view==='settings'){ showSettingsTab(); loadData(); syncLoad(); sorterLoad(); phoneLoad(); usbPhoneLoad(); }
+  if(view==='settings'){ showSettingsTab(); apLoad(); loadData(); syncLoad(); sorterLoad(); phoneLoad(); usbPhoneLoad(); }
 }
 
 /* The shell is a fixed-height column and only the panel inside a tab
@@ -17579,6 +17805,7 @@ function showPick(p){
   const out = $('#tonight-out');
   out.innerHTML = '';
   out.append(pickCard(p));
+  setRoomArt(p.art || p.backdrop);
   loadReasons(p);
   currentTop = p.type + ':' + p.id;
   offTrail = false;

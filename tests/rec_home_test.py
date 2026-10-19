@@ -198,8 +198,8 @@ _settings = page[page.find('<div id="view-settings"'):]
 _settings = _settings[:_settings.find('\n<div id="view-', 10) if '\n<div id="view-' in _settings[10:] else 40000]
 _cards = _re.findall(r'<div class="settings"[^>]*>', _settings)
 check("every Settings section belongs to a tab", _cards and all('data-tab="' in c for c in _cards), _cards)
-check("the tabs: Library, Playback, Phone & sharing, Storage",
-      set(_re.findall(r'data-tab="(\w+)"', _settings)) == {"library", "playback", "sharing", "storage"},
+check("the tabs: Library, Playback, Phone & sharing, Appearance, Storage",
+      set(_re.findall(r'data-tab="(\w+)"', _settings)) == {"library", "playback", "sharing", "appearance", "storage"},
       sorted(set(_re.findall(r'data-tab="(\w+)"', _settings))))
 check("a tab bar, drawn and remembered", 'id="settabs"' in page and "function showSettingsTab(" in page
       and "nextup.settingsTab" in page)
