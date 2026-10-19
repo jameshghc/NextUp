@@ -9,6 +9,28 @@ summarised away and files don't.
 
 ---
 
+## The user's list, 2026-10-19
+
+1. **"Are you still watching?" never stops a film.**
+   - By design it only asks at a hand-over (between episodes or queue
+     items), so a lone film always plays out.
+   - Ben-Hur ran to the end on 17, 18 and 19 Oct while the user slept, and
+     was marked watched twice.
+2. **Films missing from Now's "Continue" strip.**
+   - Not the sleep timer. `build_continue` sorts every half-watched episode
+     (sort 1) ahead of films (sort 2) and cuts the list at 6.
+   - With 30+ shows in progress, films never make it in. `/api/resume`
+     has 88 films and 32 shows.
+3. **Settings in tabs** instead of one long scroll. There are nine sections
+   today.
+4. **The Now page:**
+   - the genre chooser moves up, and the Continue strip gets shorter to make
+     room;
+   - choosing a genre mustn't reset the scroll position;
+   - the mouse wheel over the Continue strip scrolls it sideways.
+5. **Visual customisation in Settings,** starting with a more transparent
+   grey UI.
+
 ## To check first, 2026-10-12: "Continue where you left off" with Wi-Fi streaming
 
 The user wants to see how Continue behaves for streamed films and episodes.
