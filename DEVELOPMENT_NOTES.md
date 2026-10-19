@@ -16,6 +16,28 @@ at the top.
 
 ---
 
+## 2026-10-19 — v0.1.79, Glass darker; the black header; BACK beside NEXT
+
+The user: bright shows (The Simpsons, The White Lotus) still lit the page,
+so "the theme just needs to prioritise being darker".
+- **Darker.**
+  - Panels: alpha `.74 − .30×strength`, so .56 at the default and never
+    below .44.
+  - The art behind the page: brightness .36, saturation .8.
+  - The film's own backdrop inside the pick card: `.hero` opacity .18 in
+    Glass.
+  - Checked with The Simpsons' bright yellow artwork in the pick slot.
+- **The black header from the mock-ups.**
+  - `#titlebar` is solid black in Glass, with "NEXT UP" in the accent,
+    mono, uppercase.
+  - The library line is at .62 of the accent. It needed `#libline` in the
+    selector: an older id rule was winning.
+- **BACK beside NEXT on the pick card** (`.pickback`, enabled with the
+  trail by `paintBack`). The chooser's own ‹ stays for now.
+- **Buttons that don't fade into the glass.** NEXT, BACK, WATCHLIST and
+  favourite get a fill (white .10) and a firm outline (white .30) in Glass.
+  When disabled they sit at .45 rather than vanishing.
+
 ## 2026-10-19 — v0.1.78, Glass without the sheen; the chooser floats
 
 The user's notes on v0.1.77's Glass.

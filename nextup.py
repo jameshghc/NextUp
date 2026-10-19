@@ -110,7 +110,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.78"
+APP_VERSION = "0.1.79"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -4860,9 +4860,10 @@ def appearance_look(settings=None):
     # and over a dark room that laid a white sheen across everything. The
     # frost is the blur, not the colour.
     tint = tuple(int(lo + (hi - lo) * t) for lo, hi in zip((18, 18, 22), (58, 58, 66)))
-    # Never thinner than .24: at full frost over a bright poster, the outline
-    # buttons and the grey text went with anything less.
-    alpha = 0.58 - 0.34 * t
+    # Dark first: mostly solid at the default, never thinner than .44 even at
+    # full frost. Bright shows (The Simpsons, The White Lotus) still lit the
+    # whole page through anything thinner.
+    alpha = 0.74 - 0.30 * t
     look = {"classes": [], "vars": {
         "--marigold": ACCENTS[st["accent"]],
         "--marigold-2": "#%02x%02x%02x" % light,
@@ -16971,7 +16972,7 @@ header.mast .libplaces.offview{visibility:hidden}
    at the variables most of the page already paints with, so anything not
    named below still follows along — just without the blur. */
 #roomart{position:fixed;inset:-90px;z-index:-1;pointer-events:none;background:#0c0c10 center/cover no-repeat;
-  filter:blur(56px) saturate(.9) brightness(.6);transform:scale(1.08);opacity:var(--art-opacity,0);
+  filter:blur(56px) saturate(.8) brightness(.36);transform:scale(1.08);opacity:var(--art-opacity,0);
   transition:opacity .5s ease}
 body:not(.glass) #roomart{display:none}
 body.glass{background:radial-gradient(1100px 520px at 50% -160px,#24242c 0%,rgba(12,12,16,0) 70%),#0c0c10;
@@ -16982,9 +16983,26 @@ body.glass :is(.settings,.pick,.alt,.hubcard,.card,.coll,.dirblock,.profile,.rat
   backdrop-filter:blur(var(--glass-blur)) saturate(1.3);-webkit-backdrop-filter:blur(var(--glass-blur)) saturate(1.3);
   border-radius:var(--r-card)}
 body.glass :is(.sheetbody,.sheetpanel,.settings,.pick){border-radius:var(--r-panel)}
-/* Outline buttons have no fill of their own; over a bright poster they need
-   a little dark behind the outline to stay readable. */
-body.glass .iconbtn{background-color:rgba(0,0,0,.22)}
+/* The film's own backdrop inside the pick card: fainter in Glass, where the
+   page's art is already behind it — a bright one lit the whole card. */
+body.glass .hero{opacity:.18}
+body.glass .pick .hero{opacity:.18}
+/* The header: a solid black bar, the name and the library line in the
+   accent, as on the look mock-ups. */
+body.glass #titlebar{background:#000;border-bottom:1px solid rgba(255,255,255,.08)}
+body.glass #titlebar .dragzone span{font-family:var(--mono);font-weight:700;font-size:12.5px;
+  letter-spacing:.12em;text-transform:uppercase;color:var(--marigold)}
+body.glass #titlebar .dragzone #libline{font-weight:400;letter-spacing:.04em;text-transform:none;
+  color:rgba(var(--accent-rgb),.62)}
+/* Buttons that mustn't fade into the glass: a fill and a firm outline,
+   and a disabled one still visible as itself. */
+body.glass :is(.iconbtn,.watchtoggle,.favtoggle){background-color:rgba(255,255,255,.1);
+  border:1px solid rgba(255,255,255,.3);color:var(--paper)}
+body.glass :is(.iconbtn,.watchtoggle,.favtoggle):hover:not(:disabled){background-color:rgba(255,255,255,.18);
+  border-color:rgba(255,255,255,.5)}
+body.glass .watchtoggle.on{background-color:rgba(var(--accent-rgb),.22);border-color:rgba(var(--accent-rgb),.6);
+  color:var(--marigold-2)}
+body.glass .iconbtn:disabled{opacity:.45}
 body.customround :is(.settings,.pick,.alt,.hubcard,.card,.coll,.dirblock,.profile,.ratecard,.channelcard,.toplist,.resumecard,.reccard,.sheetbody,.sheetpanel,.simcard,.askcard,.ctxmenu,.queuerail,.syncoffer,.fitcard,.nowfits,#playingbar,.gap,.notice,.tile,.kchip,.iconbtn,.play,.tab){border-radius:var(--r-user)!important}
 /* The Appearance tab's own controls. */
 .apgrid{display:grid;grid-template-columns:150px minmax(0,1fr);gap:16px 18px;align-items:center;margin-top:14px}
@@ -17805,6 +17823,7 @@ function paintBack(){
   $('#spinback').disabled = offTrail ? trailAt < 0 : trailAt <= 0;
   const back = document.getElementById('chooserback');
   if(back) back.disabled = $('#spinback').disabled;
+  document.querySelectorAll('.pickback').forEach(b => b.disabled = $('#spinback').disabled);
 }
 
 function showPick(p){
@@ -17975,6 +17994,10 @@ function pickCard(p){
   };
   const skip = el('button','iconbtn','NEXT');
   skip.onclick = () => { rejected.add(p.type+':'+p.id); loadTonight(); };
+  /* And back to the one before, right beside it (the trail the draw keeps —
+     see paintBack). */
+  const back = el('button','iconbtn pickback','\u2039 BACK');
+  back.onclick = () => $('#spinback').click();
 
   /* "Not tonight, but don't let me forget it." NOT THIS is the other half of
      that thought and only does the first part — it drops the pick and moves
@@ -18009,7 +18032,7 @@ function pickCard(p){
     libraryChanged();
   };
 
-  btns.append(play, skip, watch);
+  btns.append(play, back, skip, watch);
   right.append(btns);
   right.append(problem);
   card.append(right);

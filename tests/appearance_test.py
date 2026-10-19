@@ -109,6 +109,24 @@ check("the tag chooser floats: no box behind it", ".nowchooser" not in _rule.spl
 check("the tags start level with the Continue cards, not their heading",
       "#view-now:has(#unfinished-sec:not(.hidden)) > #nowside{" in page)
 
+# 2026-10-19, second round: darker above all (bright shows like The
+# Simpsons still lit the page), the mock-up's black header with gold
+# lettering, BACK beside NEXT, and buttons that don't fade into the glass.
+n.CONFIG["appearance"] = {}
+mid = n.appearance_look()["vars"]["--glass-panel"]
+check("the panels are mostly solid at the default strength", float(mid.rsplit(",", 1)[1].rstrip(")")) >= 0.5, mid)
+full = n.appearance_look(dict(n.appearance_settings(), glass=100))["vars"]["--glass-panel"]
+check("and never thinner than .4 even at full frost", float(full.rsplit(",", 1)[1].rstrip(")")) >= 0.4, full)
+_art = page[page.find("#roomart{"):][:400]
+_b = re.search(r"brightness\(([\d.]+)\)", _art)
+check("the art behind the page is dimmed hard", _b and float(_b.group(1)) <= 0.4, _art[:200])
+check("and the film's own backdrop in the pick card fades further in Glass", "body.glass .hero{" in page)
+check("the black header with gold lettering", "body.glass #titlebar{" in page
+      and "background:#000" in page[page.find("body.glass #titlebar{"):][:200])
+check("BACK beside NEXT on the pick", "'iconbtn pickback'" in page
+      and "pickback" in page[page.find("function paintBack("):][:400])
+check("buttons on glass have a fill and a firm outline", "body.glass :is(.iconbtn,.watchtoggle,.favtoggle){" in page)
+
 js = "\n;\n".join(re.findall(r"<script>(.*?)</script>", page, re.S))
 open(os.path.join(tempfile.gettempdir(), "nextup_appearance", "page.js"), "w", encoding="utf-8").write(js)
 import subprocess
