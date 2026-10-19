@@ -213,5 +213,8 @@ check("Anything no longer folds the tags away", "function chooserKind(" in page
       and "chooserStep = 0" not in _kind and "chooserStep = 0" not in page)
 check("the tag counts are asked for as the page opens", "drawChooser();\nchooserAvail();" in page)
 
+check("a chosen tag is underlined, as well as filled",
+      ".ptag.gchip.on{" in page and "text-decoration:underline" in page[page.find(".ptag.gchip.on{"):][:300])
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

@@ -16016,7 +16016,10 @@ body.android .chooserow.genres{overflow-x:auto;flex-wrap:nowrap;padding-bottom:4
   color:var(--paper);font-family:var(--display);font-weight:700;font-size:14px;cursor:pointer}
 .kchip.on{background:var(--paper);color:#17151c;border-color:var(--paper)}
 .ptag.gchip{flex:none;font-size:11px;padding:7px 13px;cursor:pointer;scroll-snap-align:start}
-.ptag.gchip.on{background:hsl(var(--h) 60% 45% / .6);color:#fff;border-color:hsl(var(--h) 75% 65%)}
+.ptag.gchip.on{background:hsl(var(--h) 60% 45% / .6);color:#fff;border-color:hsl(var(--h) 75% 65%);
+  /* Underlined as well as filled: with a dozen colours on the row, the fill
+     alone didn't say clearly enough which ones are chosen. */
+  text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:3px}
 .ptag.gchip.off{opacity:.28;cursor:default;filter:grayscale(1)}
 /* What fits, under the chooser. */
 body.android .nowfits{display:block;margin:0 0 14px}
