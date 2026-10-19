@@ -15236,6 +15236,10 @@ section:first-child{margin-top:0}
   font-size:10px;letter-spacing:.06em;color:var(--muted);margin-left:6px;opacity:.75;
 }
 .subtab[aria-selected="true"] .count{color:var(--marigold)}
+/* Settings, a tab at a time: the bar sits at the top of the page, and a
+   tab's first section doesn't need the gap the rest keep between them. */
+#view-settings .settabs{margin:4px 0 0;flex-wrap:wrap}
+#view-settings .settings.tabhidden{display:none}
 
 /* ---- continue where you left off ----
    A strip across the top of the library, above the search row rather than
@@ -17164,7 +17168,8 @@ header.mast .libplaces.offview{visibility:hidden}
 
 <!-- ================= SETTINGS ================= -->
 <div id="view-settings" class="hidden">
-  <div class="settings">
+  <div class="subnav settabs" id="settabs" role="tablist"></div>
+  <div class="settings" data-tab="library">
     <h3>Your media folders</h3>
     <p class="empty">One folder per line. Subfolders are searched automatically, so the top of each drive is usually enough.</p>
     <div class="fields" style="grid-template-columns:1fr">
@@ -17187,7 +17192,7 @@ header.mast .libplaces.offview{visibility:hidden}
     <div id="sortaside"></div>
   </div>
 
-  <div class="settings">
+  <div class="settings" data-tab="library">
     <h3>TMDB key</h3>
     <p class="empty">Optional. Without it, Next Up can only spot holes inside seasons you already own. With it you get missing seasons, film series, director filmographies and the suggestions built from your ratings. Free from themoviedb.org &gt; Settings &gt; API.</p>
     <div class="fields">
@@ -17199,7 +17204,7 @@ header.mast .libplaces.offview{visibility:hidden}
     </div>
   </div>
 
-  <div class="settings">
+  <div class="settings" data-tab="playback">
     <h3>Are you still watching?</h3>
     <p class="empty">Episodes, the queue and the channels all carry on by themselves. After this long with nothing touched &mdash; here, or on mpv&rsquo;s own keyboard &mdash; the next one is held back and Next Up asks. It only ever asks between programmes, never over one. Minutes; <b>0</b> means never ask at that time of day.</p>
     <div class="fields quad">
@@ -17216,7 +17221,7 @@ header.mast .libplaces.offview{visibility:hidden}
     </div>
   </div>
 
-  <div class="settings">
+  <div class="settings" data-tab="playback">
     <h3>Subtitles</h3>
     <p class="empty">For the FETCH SUBS button on the remote. Searching needs only the API key — free from opensubtitles.com &gt; Consumers. Downloading needs an account too, because it's rationed against one: <b>five a day without an account, twenty with a free one</b>. Files are saved next to the film, so any player finds them.</p>
     <div class="fields quad">
@@ -17233,7 +17238,7 @@ header.mast .libplaces.offview{visibility:hidden}
   </div>
 
   <!-- ================= SHARING BETWEEN DEVICES ================= -->
-  <div class="settings" id="syncsettings">
+  <div class="settings" data-tab="sharing" id="syncsettings">
     <h3>Sharing between devices</h3>
     <p class="empty">Your history, ratings, watchlist, favourites and where you stopped, kept the same on every computer running Next Up — through a cloud folder they all sync, such as OneDrive. Each computer writes only its own file there, so two open at once can't get in each other's way. Your library itself stays on this computer.</p>
     <div id="sync_body"><p class="empty">Checking…</p></div>
@@ -17242,7 +17247,7 @@ header.mast .libplaces.offview{visibility:hidden}
   <!-- ================= YOUR PHONE =================
        The Android copy reaches this one over the home Wi-Fi: its library
        list, downloads, and history both ways. Off until turned on here. -->
-  <div class="settings" id="phonesettings">
+  <div class="settings" data-tab="sharing" id="phonesettings">
     <h3>Your phone</h3>
     <p class="empty">Next Up on your phone gets this library's list, downloads films to watch anywhere, and swaps ratings and history with this PC whenever both are on the same Wi-Fi. The phone finds this PC by itself. Windows may ask whether Python can use private networks &mdash; say yes, or the phone can&rsquo;t reach it.</p>
     <div id="phone_body"><p class="empty">Checking…</p></div>
@@ -17253,7 +17258,7 @@ header.mast .libplaces.offview{visibility:hidden}
     <div id="usbphone_body"><p class="empty">Looking for a phone…</p></div>
   </div>
 
-  <div class="settings">
+  <div class="settings" data-tab="storage">
     <h3>What's stored on this machine</h3>
     <p class="empty" id="dbline">All of it lives in the Next Up folder. Nothing leaves your PC except the metadata lookups.</p>
     <div class="rowbtns"><button class="iconbtn" id="exportdata">EXPORT RATINGS &amp; HISTORY (JSON)</button></div>
@@ -17342,6 +17347,32 @@ function resetView(view){
 }
 
 let currentView = 'now';
+/* Settings in tabs: it had grown into one long page to scroll through.
+   Each section says which tab it belongs to (data-tab); the one you were
+   on last is remembered, in this browser only — a convenience, nothing
+   that matters if it's forgotten. */
+const SETTINGS_TABS = [['library', 'Library'], ['playback', 'Playback'],
+                       ['sharing', 'Phone & sharing'], ['storage', 'Storage']];
+function showSettingsTab(id){
+  if(!id){
+    try{ id = localStorage.getItem('nextup.settingsTab'); }catch(e){ id = null; }
+  }
+  if(!SETTINGS_TABS.some(t => t[0] === id)) id = SETTINGS_TABS[0][0];
+  try{ localStorage.setItem('nextup.settingsTab', id); }catch(e){}
+  const bar = $('#settabs');
+  bar.innerHTML = '';
+  SETTINGS_TABS.forEach(([key, label]) => {
+    const b = el('button', 'subtab', esc(label));
+    b.type = 'button';
+    b.setAttribute('role', 'tab');
+    b.setAttribute('aria-selected', String(key === id));
+    b.onclick = () => showSettingsTab(key);
+    bar.append(b);
+  });
+  document.querySelectorAll('#view-settings .settings[data-tab]').forEach(card =>
+    card.classList.toggle('tabhidden', card.dataset.tab !== id));
+}
+
 function switchTo(view){
   currentView = view;
   document.querySelectorAll('.tab').forEach(x => x.setAttribute('aria-selected', x.dataset.view===view));
@@ -17357,7 +17388,7 @@ function switchTo(view){
   }
   if(view==='rate'){ staleRatings = false; loadRatings(); }
   if(view==='channels') loadChannels();
-  if(view==='settings'){ loadData(); syncLoad(); sorterLoad(); phoneLoad(); usbPhoneLoad(); }
+  if(view==='settings'){ showSettingsTab(); loadData(); syncLoad(); sorterLoad(); phoneLoad(); usbPhoneLoad(); }
 }
 
 /* The shell is a fixed-height column and only the panel inside a tab

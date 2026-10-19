@@ -192,5 +192,17 @@ check("the genre row keeps its sideways place when redrawn",
 check("the wheel scrolls Continue sideways",
       "function wheelSideways(" in page and "wheelSideways($('#unfinished-out'))" in page)
 
+# Settings in tabs, not one long scroll. Every section belongs to a tab.
+import re as _re
+_settings = page[page.find('<div id="view-settings"'):]
+_settings = _settings[:_settings.find('\n<div id="view-', 10) if '\n<div id="view-' in _settings[10:] else 40000]
+_cards = _re.findall(r'<div class="settings"[^>]*>', _settings)
+check("every Settings section belongs to a tab", _cards and all('data-tab="' in c for c in _cards), _cards)
+check("the tabs: Library, Playback, Phone & sharing, Storage",
+      set(_re.findall(r'data-tab="(\w+)"', _settings)) == {"library", "playback", "sharing", "storage"},
+      sorted(set(_re.findall(r'data-tab="(\w+)"', _settings))))
+check("a tab bar, drawn and remembered", 'id="settabs"' in page and "function showSettingsTab(" in page
+      and "nextup.settingsTab" in page)
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
