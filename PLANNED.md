@@ -11,6 +11,9 @@ summarised away and files don't.
 
 ## The user's list, 2026-10-19
 
+Items 1–4 were done in v0.1.76. Item 5 (the look) is next: show mock-ups
+first.
+
 1. **"Are you still watching?" never stops a film.**
    - By design it only asks at a hand-over (between episodes or queue
      items), so a lone film always plays out.

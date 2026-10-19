@@ -16,6 +16,49 @@ at the top.
 
 ---
 
+## 2026-10-19 — v0.1.76, the timer asks mid-film; Continue gets its films back; Settings in tabs
+
+- **"Are you still watching?" asks in the middle of a film** (`afk_mid_file`,
+  from `_monitor_tick`).
+  - It used to ask only at a hand-over, so a lone film always played out:
+    Ben-Hur ran to the end on 17, 18 and 19 Oct while the user slept, and
+    was marked watched twice.
+  - Now, past the idle limit, a film or episode pauses and the question
+    goes up, with mpv's OSD reading "Paused — are you still watching?".
+    STILL HERE unpauses; THAT'S ENOUGH closes it where it is.
+  - With no answer within the grace period, it seeks back `AFK_REWIND`
+    (10 min, the user's choice) before closing. Both mpv's resume file and
+    `NOW_PLAYING["position"]` hold that point, so the sitting is written at
+    it.
+  - It doesn't trigger on a channel, whose schedule a pause would knock
+    out (that asks at the hand-over), and not when already paused. Our own
+    pause is set in `_MPV_SEEN`, so it doesn't count as you being there.
+- **Now's Continue strip had no films.**
+  - `build_continue` sorted every half-watched episode ahead of every film
+    and cut the list at 6. With 30+ shows on the go, films never reached
+    it.
+  - It's now the Library's resume row (`build_resume_row`): newest first,
+    films and TV mixed, up to 24.
+- **Test sandbox:** `devserve.isolate` now copies mpv's resume folder. With
+  none, `sync_playback_state` read every watch point as finished and
+  stamped everything played "now".
+  - The same would happen in the real app if `nextup_resume` vanished;
+    noted in PLANNED.
+- **The Now page (PC).**
+  - The chooser moved up into the top-right: `"cont chooser" "pick chooser"
+    "pick fits"`.
+  - Continue is now the left column only, and the mouse wheel scrolls it
+    sideways (`wheelSideways`), handing back to the page at either end.
+  - A choice keeps the chooser where it was on screen (`keepPlace`).
+  - The phone no longer jumps to the top after a choice, and the genre row
+    keeps its sideways scroll when redrawn.
+  - The page jump the user reported couldn't be reproduced in the sandbox
+    (only "Anything" folding the page shorter moves it). `keepPlace` is the
+    guard; ask if it still happens.
+- **Settings in tabs.** Each section carries `data-tab` and sits under one
+  of Library, Playback, Phone & sharing or Storage (`showSettingsTab`). The
+  last tab used is remembered in localStorage.
+
 ## 2026-10-11 — v0.1.75, streaming from the PC over home Wi-Fi
 
 The user asked whether the phone could play from the main library when both
