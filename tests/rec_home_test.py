@@ -181,8 +181,8 @@ check("each says where it's up to", all(c.get("why") for c in cont), [c.get("why
 # The Now page, 2026-10-19: the chooser up beside a shorter Continue, a
 # choice that keeps your place, and the wheel scrolling Continue sideways.
 page = n.PAGE
-check("the chooser sits in the top row, beside Continue",
-      'grid-template-areas:"cont chooser" "pick chooser" "pick fits"' in page)
+check("the chooser and its alternatives stack down the right, beside Continue and the pick",
+      'id="nowside"' in page and 'grid-template-areas:"cont side" "pick side"' in page)
 check("a choice keeps the chooser where it was on screen",
       "function keepPlace(" in page and "keepPlace(" in page[page.find("async function chooserApply"):][:600])
 check("the phone no longer jumps to the top after a choice",
@@ -203,6 +203,15 @@ check("the tabs: Library, Playback, Phone & sharing, Storage",
       sorted(set(_re.findall(r'data-tab="(\w+)"', _settings))))
 check("a tab bar, drawn and remembered", 'id="settabs"' in page and "function showSettingsTab(" in page
       and "nextup.settingsTab" in page)
+
+# 2026-10-19, second pass: no empty chooser on opening. Anything is chosen
+# from the start with every tag showing, and tags combine under Anything too.
+check("the tags show from the start", 'class="chooserow genres" id="chooser-genre"' in page
+      and "genres.classList.toggle('hidden'" not in page)
+_kind = page[page.find("function chooserKind("):][:700]
+check("Anything no longer folds the tags away", "function chooserKind(" in page
+      and "chooserStep = 0" not in _kind and "chooserStep = 0" not in page)
+check("the tag counts are asked for as the page opens", "drawChooser();\nchooserAvail();" in page)
 
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

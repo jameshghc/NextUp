@@ -15933,15 +15933,19 @@ body.android .chooserback{display:none}
    alternatives in a column beside it. The three boxes and the reason cards
    go — the card carries a short why of its own. */
 body:not(.android) #view-now:not(.hidden){display:grid;grid-template-columns:minmax(0,1fr) 260px;
-  grid-template-areas:"cont chooser" "pick chooser" "pick fits";grid-template-rows:auto auto 1fr;
+  grid-template-areas:"cont side" "pick side";grid-template-rows:auto 1fr;
   column-gap:18px;align-content:start}
 body:not(.android) #view-now > #unfinished-sec{grid-area:cont;margin:6px 0 10px}
-body:not(.android) #view-now > .nowchooser{grid-area:chooser;display:grid;grid-template-columns:auto minmax(0,1fr);
+/* The chooser and the alternatives it produced, one column down the right:
+   in a wrapper, so the alternatives follow straight on from the chooser
+   rather than waiting for a grid row the pick has made tall. */
+body:not(.android) #view-now > #nowside{grid-area:side;min-width:0;margin-top:2px}
+body:not(.android) #nowside > .nowchooser{display:grid;grid-template-columns:auto minmax(0,1fr);
   gap:8px;margin:0 0 14px;min-width:0;align-items:start}
 body:not(.android) .nowchooser #chooser-genre{grid-column:1 / -1}
 body:not(.android) #view-now > #tonight-out{grid-area:pick;min-width:0}
-body:not(.android) #view-now > .nowfits{grid-area:fits;display:block}
-body:not(.android) #view-now > .nowfits.hidden{display:none}
+body:not(.android) #nowside > .nowfits{display:block}
+body:not(.android) #nowside > .nowfits.hidden{display:none}
 body:not(.android) #view-now > .filters,body:not(.android) #view-now > #reasons-out{display:none}
 body:not(.android) .nowchooser .chooserow{display:flex;gap:6px}
 body:not(.android) .nowchooser .chooserow.hidden{display:none}
@@ -15964,7 +15968,7 @@ body:not(.android) .nowfits .fitgrid{grid-template-columns:repeat(2,minmax(0,1fr
    squeezing it. */
 @media (max-width:900px){
   body:not(.android) #view-now:not(.hidden){grid-template-columns:minmax(0,1fr);
-    grid-template-areas:"cont" "chooser" "pick" "fits";grid-template-rows:none}
+    grid-template-areas:"cont" "side" "pick";grid-template-rows:none}
   body:not(.android) .nowfits .fitgrid{grid-template-columns:repeat(auto-fill,minmax(110px,1fr))}
 }
 body:not(.android) .pick .plot.clamp{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;cursor:pointer}
@@ -15978,8 +15982,9 @@ body.android #view-now > #unfinished-sec{order:1}
 body.android #view-now > #tonight-out{order:2}
 /* The suggestion, then its alternatives right under it, then the chooser
    that produced them. */
-body.android #view-now > .nowfits{order:3}
-body.android #view-now > .nowchooser{order:4}
+body.android #nowside{display:contents}
+body.android #nowside > .nowfits{order:3}
+body.android #nowside > .nowchooser{order:4}
 body.android #view-now > #reasons-out{order:6}
 body.android #view-now > .filters{display:none}
 /* The chooser: one row of three, then the genres sliding sideways, each in
@@ -16923,13 +16928,15 @@ header.mast .libplaces.offview{visibility:hidden}
   <!-- The chooser: Anything / Film / TV, then a sliding row of genres in
        their colours, then what fits. At the foot of the phone's page; along
        the top of the PC's, beside a Back. -->
+  <div id="nowside">
   <div class="nowchooser" id="nowchooser">
     <button class="kchip chooserback" id="chooserback" type="button" disabled
             title="Back to the one before">‹</button>
     <div class="chooserow" id="chooser-kind"></div>
-    <div class="chooserow genres hidden" id="chooser-genre"></div>
+    <div class="chooserow genres" id="chooser-genre"></div>
   </div>
   <div class="nowfits hidden" id="nowfits"></div>
+  </div>
   <div class="filters">
     <label class="f"><span>Mood</span>
       <select id="mood">
@@ -17841,7 +17848,7 @@ function phonePick(p, poster, right, btns, problem, meta, rateSlot){
    is greyed out. Anything folds the whole thing away again: no kind, no
    genre. Each step drives the pick, which follows it. No mood. */
 const CHOOSER_KINDS = [['any', 'Anything'], ['film', 'Film'], ['tv', 'TV']];
-let chooserStep = 0;            // 0 nothing chosen, 1 a kind, 2 a kind and genres
+let chooserStep = 1;            // 1 a kind (Anything to start), 2 a kind and genres
 var chosenGenres = [];          // var: read by nowGenres before this line may run
 let genreAvail = null;          // [{name, n}] for the kind and genres chosen
 
@@ -17849,7 +17856,7 @@ function drawChooser(){
   const kinds = $('#chooser-kind');
   kinds.innerHTML = '';
   CHOOSER_KINDS.forEach(([value, label]) => {
-    const on = value === 'any' ? chooserStep === 0 : chooserStep >= 1 && $('#kind').value === value;
+    const on = $('#kind').value === value;
     const b = el('button', 'kchip' + (on ? ' on' : ''), label);
     b.type = 'button';
     b.onclick = () => chooserKind(value);
@@ -17859,11 +17866,9 @@ function drawChooser(){
   /* Redrawn on every choice; on the phone it's a row you've scrolled along
      to find the genre, and starting it back at the beginning lost your place. */
   const keepLeft = genres.scrollLeft;
-  genres.classList.toggle('hidden', chooserStep < 1);
   genres.innerHTML = '';
-  if(chooserStep < 1) return;
   const list = genreAvail || (STATUS && STATUS.genres || []).map(name => ({name, n: null}));
-  const any = el('button', 'ptag gchip' + (chooserStep >= 2 && !chosenGenres.length ? ' on' : ''), 'Any genre');
+  const any = el('button', 'ptag gchip' + (!chosenGenres.length ? ' on' : ''), 'Any genre');
   any.type = 'button';
   any.style.setProperty('--h', 40);
   any.onclick = () => chooserGenre('');
@@ -17893,11 +17898,8 @@ function chooserKind(value){
   $('#kind').value = value;
   chosenGenres = [];
   genreAvail = null;
-  if(value === 'any'){
-    chooserStep = 0;          // folded away: everything, any genre
-    chooserApply();
-    return;
-  }
+  /* Anything is a kind like the others now: its tags stay up, and combine
+     the same way — what's chosen narrows films and TV together. */
   chooserStep = 1;
   chooserApply();
   chooserAvail();
@@ -17983,6 +17985,7 @@ function drawFits(data){
 }
 
 drawChooser();
+chooserAvail();
 
 function altCard(p){
   const a = el('div','alt');

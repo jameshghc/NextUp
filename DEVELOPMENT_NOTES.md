@@ -55,6 +55,19 @@ at the top.
   - The page jump the user reported couldn't be reproduced in the sandbox
     (only "Anything" folding the page shorter moves it). `keepPlace` is the
     guard; ask if it still happens.
+- **The chooser, second pass (the user's notes).**
+  - The page opened with an empty chooser and a gap under it. Anything is
+    now chosen from the start, with every tag showing.
+  - Tags combine under Anything too, narrowing films and TV together.
+    Anything no longer folds the tags away (`chooserStep` starts at 1).
+  - The chooser and its alternatives share one right-hand column
+    (`#nowside`, grid `"cont side" "pick side"`, `auto 1fr`). Because the
+    column spans the flexible row, it doesn't stretch Continue's row, and
+    the alternatives follow straight on from the tags.
+  - The Anything/Film/TV row lines up with the "Continue where you left
+    off" heading (centres 123/124 px).
+  - On the phone `#nowside` is `display:contents`, so its own order is
+    unchanged.
 - **Settings in tabs.** Each section carries `data-tab` and sits under one
   of Library, Playback, Phone & sharing or Storage (`showSettingsTab`). The
   last tab used is remembered in localStorage.
