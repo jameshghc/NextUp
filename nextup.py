@@ -110,7 +110,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.77"
+APP_VERSION = "0.1.78"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -4855,8 +4855,11 @@ def appearance_look(settings=None):
     t = st["glass"] / 100.0
     r, g, b = _hex_rgb(ACCENTS[st["accent"]])
     light = tuple(int(c + (255 - c) * 0.22) for c in (r, g, b))
-    # Smoke at 0 (dark, mostly solid), frost at 100 (lighter, see-through).
-    tint = tuple(int(lo + (hi - lo) * t) for lo, hi in zip((30, 30, 36), (150, 150, 165)))
+    # Smoke at 0 (dark, mostly solid), frost at 100 (see-through). The tint
+    # stays dark all the way: it was a light grey (102,102,113 by default),
+    # and over a dark room that laid a white sheen across everything. The
+    # frost is the blur, not the colour.
+    tint = tuple(int(lo + (hi - lo) * t) for lo, hi in zip((18, 18, 22), (58, 58, 66)))
     # Never thinner than .24: at full frost over a bright poster, the outline
     # buttons and the grey text went with anything less.
     alpha = 0.58 - 0.34 * t
@@ -16065,6 +16068,9 @@ body:not(.android) #view-now > #unfinished-sec{grid-area:cont;margin:6px 0 10px}
    in a wrapper, so the alternatives follow straight on from the chooser
    rather than waiting for a grid row the pick has made tall. */
 body:not(.android) #view-now > #nowside{grid-area:side;min-width:0;margin-top:2px}
+/* The tags start level with the Continue cards rather than their heading —
+   while there are cards; with none, the chooser goes to the top. */
+body:not(.android) #view-now:has(#unfinished-sec:not(.hidden)) > #nowside{margin-top:48px}
 body:not(.android) #nowside > .nowchooser{display:grid;grid-template-columns:auto minmax(0,1fr);
   gap:8px;margin:0 0 14px;min-width:0;align-items:start}
 body:not(.android) .nowchooser #chooser-genre{grid-column:1 / -1}
@@ -16971,15 +16977,15 @@ body:not(.glass) #roomart{display:none}
 body.glass{background:radial-gradient(1100px 520px at 50% -160px,#24242c 0%,rgba(12,12,16,0) 70%),#0c0c10;
   --ink-2:var(--glass-panel);--ink-3:var(--glass-panel-2);--surface:var(--glass-panel);
   --surface-2:var(--glass-panel-2);--line:var(--glass-line);--edge:var(--glass-line);--muted:#a7a7b2}
-body.glass :is(.settings,.pick,.alt,.hubcard,.card,.coll,.dirblock,.profile,.ratecard,.channelcard,.toplist,.resumecard,.reccard,.sheetbody,.sheetpanel,.simcard,.askcard,.ctxmenu,.queuerail,.syncoffer,.fitcard,.nowchooser,.nowfits,#playingbar,.gap,.notice){
-  background-color:var(--glass-panel);border-color:var(--glass-line);
+body.glass :is(.settings,.pick,.alt,.hubcard,.card,.coll,.dirblock,.profile,.ratecard,.channelcard,.toplist,.resumecard,.reccard,.sheetbody,.sheetpanel,.simcard,.askcard,.ctxmenu,.queuerail,.syncoffer,.fitcard,.nowfits,#playingbar,.gap,.notice){
+  background-color:var(--glass-panel);border-color:var(--glass-line);background-image:none;
   backdrop-filter:blur(var(--glass-blur)) saturate(1.3);-webkit-backdrop-filter:blur(var(--glass-blur)) saturate(1.3);
   border-radius:var(--r-card)}
 body.glass :is(.sheetbody,.sheetpanel,.settings,.pick){border-radius:var(--r-panel)}
 /* Outline buttons have no fill of their own; over a bright poster they need
    a little dark behind the outline to stay readable. */
 body.glass .iconbtn{background-color:rgba(0,0,0,.22)}
-body.customround :is(.settings,.pick,.alt,.hubcard,.card,.coll,.dirblock,.profile,.ratecard,.channelcard,.toplist,.resumecard,.reccard,.sheetbody,.sheetpanel,.simcard,.askcard,.ctxmenu,.queuerail,.syncoffer,.fitcard,.nowchooser,.nowfits,#playingbar,.gap,.notice,.tile,.kchip,.iconbtn,.play,.tab){border-radius:var(--r-user)!important}
+body.customround :is(.settings,.pick,.alt,.hubcard,.card,.coll,.dirblock,.profile,.ratecard,.channelcard,.toplist,.resumecard,.reccard,.sheetbody,.sheetpanel,.simcard,.askcard,.ctxmenu,.queuerail,.syncoffer,.fitcard,.nowfits,#playingbar,.gap,.notice,.tile,.kchip,.iconbtn,.play,.tab){border-radius:var(--r-user)!important}
 /* The Appearance tab's own controls. */
 .apgrid{display:grid;grid-template-columns:150px minmax(0,1fr);gap:16px 18px;align-items:center;margin-top:14px}
 .apgrid > label{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}

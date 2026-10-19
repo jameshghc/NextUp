@@ -95,6 +95,20 @@ check("the Glass layer and the art behind it", "body.glass " in page and 'id="ro
       and "function setRoomArt(" in page)
 check("the pick's art goes behind the page", "setRoomArt(" in page[page.find("function showPick("):][:3000])
 
+# 2026-10-19, the user's notes on Glass: a white sheen over the Now page
+# (the panels were a light grey, 102,102,113 at .38), and the tag chooser
+# boxed in so its chips touched the box's edge.
+n.CONFIG["appearance"] = {}
+mid = n.appearance_look()["vars"]["--glass-panel"]
+rgb = [int(x) for x in mid[mid.index("(") + 1:].split(",")[:3]]
+check("the glass is a dark tint, not a light grey: the frost is the blur", max(rgb) <= 60, mid)
+_glass = page[page.find("body.glass :is("):][:1200]
+_rule = _glass[:_glass.find("}")]
+check("and no white sheen laid over the panels in Glass", "background-image:none" in _rule, _rule[-200:])
+check("the tag chooser floats: no box behind it", ".nowchooser" not in _rule.split("{")[0])
+check("the tags start level with the Continue cards, not their heading",
+      "#view-now:has(#unfinished-sec:not(.hidden)) > #nowside{" in page)
+
 js = "\n;\n".join(re.findall(r"<script>(.*?)</script>", page, re.S))
 open(os.path.join(tempfile.gettempdir(), "nextup_appearance", "page.js"), "w", encoding="utf-8").write(js)
 import subprocess

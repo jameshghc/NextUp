@@ -16,6 +16,22 @@ at the top.
 
 ---
 
+## 2026-10-19 — v0.1.78, Glass without the sheen; the chooser floats
+
+The user's notes on v0.1.77's Glass.
+- **A white sheen over the Now page.** Measured: every glass panel was
+  `rgba(102,102,113,.38)`, a light grey, plus the white `--sheen`
+  gradient, so over a dark room everything lifted towards grey. The tint
+  now runs dark at every strength, (18,18,22)→(58,58,66) (default
+  42,42,48), and `background-image:none` drops the sheen in Glass. The
+  frost comes from the blur.
+- **The tag chooser floats.** It's out of the Glass panel list, with no box
+  and no border, so its chips no longer sit against an edge.
+- **The tags start level with the Continue cards**, not their heading:
+  `#view-now:has(#unfinished-sec:not(.hidden)) > #nowside{margin-top:48px}`.
+  Measured equal at 153 px. With nothing to continue, the chooser goes to
+  the top.
+
 ## 2026-10-19 — v0.1.77, Glass, and Settings → Appearance
 
 The user picked mock-up C (frosted glass) from three
