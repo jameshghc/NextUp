@@ -57,6 +57,18 @@
         "--with-pc"
       ],
       "port": 8776
+    },
+    {
+      "name": "mockups",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8778",
+        "--bind",
+        "127.0.0.1"
+      ],
+      "port": 8778
     }
   ]
 }

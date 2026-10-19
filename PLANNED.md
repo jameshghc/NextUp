@@ -9,6 +9,60 @@ summarised away and files don't.
 
 ---
 
+## The look: grey glass (mock-ups shown 2026-10-19, waiting on a choice)
+
+`docs/mockups/glass-ui.html` (serve with the "mockups" launch config, port
+8778) has A (today), B (smoked glass) and C (frosted glass). Screenshots are
+in `docs/mockups/shots/`. Once the user picks, build it as a choice under a
+new Settings → Appearance tab, keeping today's look available.
+
+## Sketch: a remote for the PC, in the phone app (asked 2026-10-19, not started)
+
+Control what's playing on the PC from the phone, on the same Wi-Fi. It
+builds on two things that exist:
+- the PC's own remote (`remote_state`, `/api/remote/*`: play/pause,
+  volume, mute, audio delay, subtitle and audio tracks, next episode, skip,
+  channels, stop);
+- the Wi-Fi link (`PhoneHandler` on 8790, the token from SEND MY LIBRARY,
+  `pc_link_call`).
+
+1. **PC: `/phone/remote/*` on `PhoneHandler`.** Bearer-gated, home network
+   only, the same as every phone route.
+   - An explicit list: `state`, `toggle`, `volume`, `mute`, `delay`,
+     `subtitles`, `audio`, `seek`, `episode`, `skip`, `channel`, `stop`,
+     `afk` (answer "are you still watching?").
+   - Each calls the same function the desktop remote route does, so the
+     two can't drift. Nothing else from the desktop server is exposed.
+   - Every press calls `seen_you()`, so using the phone remote counts as
+     being there for the sleep timer.
+2. **PC: two additions to `remote_state`:**
+   - `position` and `duration`, so the phone can draw a seek bar;
+   - the AFK question, so the phone can show it.
+3. **Phone server: `/api/pcremote/*`.** It passes each call to the PC via
+   `pc_link_call`, so the token never reaches the page.
+4. **Phone page: a Remote screen.** A fifth tab, or a button in the
+   masthead that only shows while the PC answers.
+   - Now playing: art, title, a seek bar with times.
+   - Big play/pause, back 10 s / forward 30 s, volume with mute.
+   - Audio delay ±50/100 ms (remembered per film, as on the PC).
+   - Subtitles and audio track: tap to cycle, showing the language.
+   - Next episode and skip, shown only when they apply.
+   - The six channel presets, and stop.
+   - "Are you still watching?" appears there with STILL HERE / THAT'S
+     ENOUGH.
+5. **Battery.** The state is asked for once a second ONLY while the Remote
+   screen is on screen and the app is in front. It stops on hide, and
+   nothing runs in the background.
+6. **Later, if wanted:**
+   - "Play on PC" from a tile's peek, starting it on the PC instead of the
+     phone (`/phone/remote/play {key}`).
+   - The phone's own volume buttons driving the PC's volume while the
+     Remote screen is open.
+7. **Tests.** The `/phone/remote/*` list (and that nothing else is
+   reachable), the proxy, and the page source checks. The seek and AFK
+   fields are tested in `wifi_stream_test` style against a loopback link.
+   Then a real try on the S24.
+
 ## The user's list, 2026-10-19
 
 Items 1–4 were done in v0.1.76. Item 5 (the look) is next: show mock-ups
