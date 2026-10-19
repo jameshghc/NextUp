@@ -16,6 +16,28 @@ at the top.
 
 ---
 
+## 2026-10-19 — v0.1.80, the pick's buttons stay put
+
+The user: "when you click next … the buttons move around. we need them to
+stay in the same place." Measured with headless Edge over CDP, pressing
+NEXT repeatedly: NEXT's top went 422/445/464/487 px as titles wrapped and
+the "why" line ran to one or two lines. Now everything above the buttons
+has a fixed height (PC only; the phone has its own layout):
+- **The title is one line**, a fixed 48 px. `fitPickTitle` shrinks a long
+  title 2 px at a time down to 26 px, and past that it ends in "…" with
+  the full title on hover.
+  - The first try measured the title's height in script and sometimes got
+    0, on a card drawn before layout (The Nice Guys landed 42 px high). The
+    height lives in the CSS now.
+  - `.pick > div{min-width:0}`: without it, a one-line title widened its
+    grid column past the card's edge.
+- **The line under the title is one line**, and **the "why" always takes
+  two lines of room** (clamped).
+- **Play has one width**, Play or Resume.
+
+Measured afterwards: 30 picks in a row, every button in the same place to
+the pixel.
+
 ## 2026-10-19 — v0.1.79, Glass darker; the black header; BACK beside NEXT
 
 The user: bright shows (The Simpsons, The White Lotus) still lit the page,

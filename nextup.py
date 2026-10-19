@@ -110,7 +110,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.79"
+APP_VERSION = "0.1.80"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -16108,6 +16108,18 @@ body:not(.android) .pick .ppwhy{max-width:62ch;margin:0 0 14px;padding:8px 12px;
   background:rgba(var(--accent-rgb),.07);font-size:13.5px;line-height:1.45;color:var(--paper)}
 body:not(.android) .pick .ppwhy:empty{display:none}
 body:not(.android) .pick .rowbtns{margin:0 0 14px}
+/* The buttons stay put from one pick to the next. Everything above them
+   is a fixed height: the title one line (fitPickTitle shrinks a long one),
+   the line under it one line, the "why" always two lines of room — they
+   jumped between 422 and 487 px as titles wrapped. And Play is one width,
+   so "Resume" doesn't nudge the others along. */
+body:not(.android) .pick > div{min-width:0}     /* or a one-line title widens its column past the card */
+body:not(.android) .pick h2{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  height:48px;line-height:48px}      /* one fixed line, however small fitPickTitle makes the words */
+body:not(.android) .pick .subline{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+body:not(.android) .pick .why{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;
+  overflow:hidden;line-height:1.45;height:2.9em}
+body:not(.android) .pick .rowbtns .play{min-width:104px}
 
 body.android #view-now:not(.hidden){display:flex;flex-direction:column}
 body.android #view-now > #unfinished-sec{order:1}
@@ -17826,11 +17838,25 @@ function paintBack(){
   document.querySelectorAll('.pickback').forEach(b => b.disabled = $('#spinback').disabled);
 }
 
+/* A long title gets smaller until it fits on its one line (down to 26px),
+   rather than wrapping and pushing the buttons below it down. */
+function fitPickTitle(h){
+  if(!h || document.body.classList.contains('android')) return;
+  h.style.fontSize = '';
+  h.title = h.textContent;
+  let size = parseFloat(getComputedStyle(h).fontSize);
+  while(h.scrollWidth > h.clientWidth + 1 && size > 26){
+    size -= 2;
+    h.style.fontSize = size + 'px';
+  }
+}
+
 function showPick(p){
   const out = $('#tonight-out');
   out.innerHTML = '';
   out.append(pickCard(p));
   setRoomArt(p.art || p.backdrop);
+  fitPickTitle(out.querySelector('.pick h2'));
   loadReasons(p);
   currentTop = p.type + ':' + p.id;
   offTrail = false;

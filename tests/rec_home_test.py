@@ -216,5 +216,18 @@ check("the tag counts are asked for as the page opens", "drawChooser();\nchooser
 check("a chosen tag is underlined, as well as filled",
       ".ptag.gchip.on{" in page and "text-decoration:underline" in page[page.find(".ptag.gchip.on{"):][:300])
 
+# The pick's buttons stay put from one pick to the next: they jumped
+# between 422 and 487 px as titles wrapped and the line under them grew.
+check("the title is one line, fitted to the card", "function fitPickTitle(" in page
+      and "fitPickTitle(" in page[page.find("function showPick("):][:600]
+      and "body:not(.android) .pick h2{white-space:nowrap" in page
+      and "height:48px;line-height:48px" in page)
+check("the line under the title is one line", "body:not(.android) .pick .subline{white-space:nowrap" in page)
+check("the why line always takes two lines of room", "body:not(.android) .pick .why{" in page
+      and "-webkit-line-clamp:2" in page[page.find("body:not(.android) .pick .why{"):][:300])
+check("the title's column can narrow, so a one-line title can't push past the card",
+      "body:not(.android) .pick > div{min-width:0}" in page)
+check("Play is one width, Play or Resume", "body:not(.android) .pick .rowbtns .play{min-width:" in page)
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
