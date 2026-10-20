@@ -63,6 +63,37 @@ builds on two things that exist:
    fields are tested in `wifi_stream_test` style against a loopback link.
    Then a real try on the S24.
 
+## 0.2 release: where it stands (2026-10-20, paused for usage)
+
+Done and committed on `android-shell`:
+- the phone Remote (v0.2.0), reviewed and fixed;
+- the layout review applied, one screen with no scrolling (measured at
+  360–412 portrait and in landscape);
+- the icon tab;
+- Glass on the phone;
+- the camera notch header;
+- the first-run fixes (`tests/first_run_test.py`).
+- The release agent wrote `README.md`, `build_windows.py` and
+  `docs/release-notes-0.2.0.md`, and built `dist/NextUp-0.2.0-windows.exe`
+  and `dist/NextUp-0.2.0-android.apk`. **Both builds predate the later
+  fixes, so rebuild them.**
+
+Still to do, in order:
+1. Read the picky-user QA agent's report, if it finished (screenshots in
+   `docs/mockups/shots/qa-*.png`), and fix what matters.
+2. Rebuild: `python build_windows.py` (from HEAD), and the APK
+   (`python androiduild.py`, or `--no-install` on a copy).
+3. On the S21: check the camera-notch header (it needs the real cutout)
+   and the Remote by eye.
+4. Run `python testsun_all.py` with nothing else running, since the
+   suites share ports 8794/8799.
+5. **Ask the user**, then create a PRIVATE releases-only repo (not public:
+   the user's choice), invite friends by GitHub username, and attach the
+   exe and APK to a 0.2.0 release.
+- Deferred: the remote's minors (see DEVELOPMENT_NOTES v0.2.0), the odd
+  phone profile name, and the LG TV options (a Google TV stick running Next
+  Up, or the TV's own player over DLNA).
+
 ## The user's list, 2026-10-19
 
 Items 1–4 were done in v0.1.76. Item 5 (the look) is next: show mock-ups
