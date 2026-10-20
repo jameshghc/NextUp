@@ -11969,6 +11969,12 @@ def remote_state():
         "audio_delay": 0,
         # Only an episode has a run to step along; a film has nowhere to go.
         "is_episode": (playing or {}).get("type") == "episode",
+        # For a phone drawing it: what's on, how far in, and any question
+        # the sleep timer is asking.
+        "title": (playing or {}).get("title"), "sub": (playing or {}).get("sub"),
+        "art": (playing or {}).get("art"),
+        "position": (playing or {}).get("position"), "duration": (playing or {}).get("duration"),
+        "afk": afk_state(),
         # SKIP works on a channel, or on anything with a queue behind it.
         "queue_count": queue_count(),
     }
@@ -11989,7 +11995,108 @@ def remote_state():
         # Reported in milliseconds: mpv keeps it in seconds, but the useful
         # steps are all well under one, and "-150" reads better than "-0.15".
         state["audio_delay"] = int(round((mpv_get("audio-delay", 0) or 0) * 1000))
+        # Asked of mpv when the monitor hasn't recorded it yet.
+        if state["position"] is None:
+            state["position"] = mpv_get("time-pos", None)
+        if state["duration"] is None:
+            state["duration"] = mpv_get("duration", None)
     return state
+
+
+# Everything a remote can do, for the desktop remote window and the paired
+# phone alike: one set, so the two can never drift apart.
+REMOTE_ACTIONS = ("volume", "toggle", "channel", "delay", "episode", "skip",
+                  "subtitles", "stop", "seek", "afk")
+
+
+def remote_do(action, data):
+    """Do one remote action and say what's true afterwards. Raises AppError
+    where there's nothing to act on, worded for the person holding it."""
+    if action not in REMOTE_ACTIONS:
+        raise AppError("No such control.")
+    data = data or {}
+    if action in ("volume", "toggle", "delay", "seek") and not mpv_alive():
+        raise AppError("Nothing is playing.")
+    if action == "volume":
+        if data.get("value") is not None:
+            level = int(data["value"])
+        else:
+            level = (int(round(mpv_get("volume", 0) or 0))
+                     + int(data.get("delta") or 0))
+        # mpv will amplify past 100 and it's genuinely useful on a
+        # quiet file, so the ceiling is its own rather than 100.
+        mpv_command("set_property", "volume", max(0, min(130, level)))
+    elif action == "toggle":
+        what = data.get("what")
+        if what in ("sub", "audio"):
+            # No error when there's nothing to move to: the button is
+            # already disabled and labelled for that case, so a red
+            # message would only explain something the window said.
+            remote_cycle_track(what)
+        elif what in ("pause", "mute"):
+            mpv_command("cycle", what)
+        else:
+            raise AppError("Nothing to toggle.")
+    elif action == "channel":
+        wanted = data.get("channel")
+        if wanted:
+            channel = next((c for c in CHANNELS if c["id"] == wanted), None)
+            if not channel:
+                raise AppError("No such channel.")
+            tune_channel(channel)
+        else:
+            remote_step_channel(1 if int(data.get("step") or 1) > 0 else -1)
+    elif action == "delay":
+        # Sent in milliseconds and stored in seconds. mpv's own
+        # Ctrl+- / Ctrl++ move in 100ms steps, and matching that
+        # means the two ways of doing it agree.
+        if data.get("value") is not None:
+            seconds = int(data["value"]) / 1000.0
+        else:
+            seconds = ((mpv_get("audio-delay", 0) or 0)
+                       + int(data.get("delta") or 0) / 1000.0)
+        seconds = max(-10.0, min(10.0, seconds))
+        mpv_command("set_property", "audio-delay", round(seconds, 3))
+        note_audio_delay()          # now, not at the monitor's next look
+    elif action == "episode":
+        step_episode(1 if int(data.get("step") or 1) > 0 else -1)
+    elif action == "skip":
+        playing = now_playing_snapshot() or {}
+        channel_id = playing.get("channel_id")
+        if not channel_id and queue_count():
+            # Not a channel, but there's a queue: skipping means the
+            # next thing in it, now.
+            play_from_queue()
+        elif not channel_id:
+            raise AppError("This isn't a channel and nothing is "
+                           "queued, so there's nothing to skip to.")
+        else:
+            # The same path a programme ending takes, told what to step
+            # past — so skipping by hand lands where waiting would have.
+            advance_channel(channel_id,
+                            after=(playing.get("type"), playing.get("id")))
+    elif action == "subtitles":
+        result = fetch_subtitle_for_playing(data.get("language"))
+        return dict(remote_state(), subtitles=result)
+    elif action == "stop":
+        stop_current_playback()
+    elif action == "seek":
+        # Absolute, always: a relative jump from a stale position would
+        # land somewhere else. Kept inside the file — dragging the bar to
+        # its very end shouldn't ask mpv for a place that isn't there.
+        position = float(mpv_get("time-pos", 0) or 0)
+        duration = float(mpv_get("duration", 0) or 0)
+        if data.get("to") is not None:
+            target = float(data["to"])
+        else:
+            target = position + float(data.get("by") or 0)
+        if duration:
+            target = min(target, duration - 1)
+        target = max(0, int(target))
+        mpv_command("seek", str(target), "absolute")
+    elif action == "afk":
+        afk_answer(bool(data.get("still")))
+    return remote_state()
 
 
 def mpv_track_list():
@@ -14184,81 +14291,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True})
 
             # -- the remote ------------------------------------------------
-            if route == "/api/remote/volume":
-                if not mpv_alive():
-                    raise AppError("Nothing is playing.")
-                if data.get("value") is not None:
-                    level = int(data["value"])
-                else:
-                    level = (int(round(mpv_get("volume", 0) or 0))
-                             + int(data.get("delta") or 0))
-                # mpv will amplify past 100 and it's genuinely useful on a
-                # quiet file, so the ceiling is its own rather than 100.
-                mpv_command("set_property", "volume", max(0, min(130, level)))
-                return self.send_json(remote_state())
-
-            if route == "/api/remote/toggle":
-                if not mpv_alive():
-                    raise AppError("Nothing is playing.")
-                what = data.get("what")
-                if what in ("sub", "audio"):
-                    # No error when there's nothing to move to: the button is
-                    # already disabled and labelled for that case, so a red
-                    # message would only explain something the window said.
-                    remote_cycle_track(what)
-                elif what in ("pause", "mute"):
-                    mpv_command("cycle", what)
-                else:
-                    raise AppError("Nothing to toggle.")
-                return self.send_json(remote_state())
-
-            if route == "/api/remote/channel":
-                wanted = data.get("channel")
-                if wanted:
-                    channel = next((c for c in CHANNELS if c["id"] == wanted), None)
-                    if not channel:
-                        raise AppError("No such channel.")
-                    tune_channel(channel)
-                else:
-                    remote_step_channel(1 if int(data.get("step") or 1) > 0 else -1)
-                return self.send_json(remote_state())
-
-            if route == "/api/remote/delay":
-                if not mpv_alive():
-                    raise AppError("Nothing is playing.")
-                # Sent in milliseconds and stored in seconds. mpv's own
-                # Ctrl+- / Ctrl++ move in 100ms steps, and matching that
-                # means the two ways of doing it agree.
-                if data.get("value") is not None:
-                    seconds = int(data["value"]) / 1000.0
-                else:
-                    seconds = ((mpv_get("audio-delay", 0) or 0)
-                               + int(data.get("delta") or 0) / 1000.0)
-                seconds = max(-10.0, min(10.0, seconds))
-                mpv_command("set_property", "audio-delay", round(seconds, 3))
-                note_audio_delay()          # now, not at the monitor's next look
-                return self.send_json(remote_state())
-
-            if route == "/api/remote/episode":
-                step_episode(1 if int(data.get("step") or 1) > 0 else -1)
-                return self.send_json(remote_state())
-
-            if route == "/api/remote/skip":
-                playing = now_playing_snapshot() or {}
-                channel_id = playing.get("channel_id")
-                if not channel_id and queue_count():
-                    # Not a channel, but there's a queue: skipping means the
-                    # next thing in it, now.
-                    play_from_queue()
-                    return self.send_json(remote_state())
-                if not channel_id:
-                    raise AppError("This isn't a channel and nothing is "
-                                   "queued, so there's nothing to skip to.")
-                # The same path a programme ending takes, told what to step
-                # past — so skipping by hand lands where waiting would have.
-                advance_channel(channel_id,
-                                after=(playing.get("type"), playing.get("id")))
-                return self.send_json(remote_state())
+            if route.startswith("/api/remote/") and route[len("/api/remote/"):] in REMOTE_ACTIONS:
+                # The same actions the paired phone uses (see remote_do).
+                return self.send_json(remote_do(route[len("/api/remote/"):], data))
 
             # -- the queue ---------------------------------------------------
             if route == "/api/offered":
@@ -14304,14 +14339,6 @@ class Handler(BaseHTTPRequestHandler):
                     _finish_current("skipped")
                 play_item(kind, item_id, path)
                 return self.send_json({"ok": True})
-
-            if route == "/api/remote/subtitles":
-                result = fetch_subtitle_for_playing(data.get("language"))
-                return self.send_json(dict(remote_state(), subtitles=result))
-
-            if route == "/api/remote/stop":
-                stop_current_playback()
-                return self.send_json(remote_state())
 
             if route == "/api/remote/presets":
                 known = set(c["id"] for c in CHANNELS)
