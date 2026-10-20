@@ -82,6 +82,22 @@ builds on two things that exist:
    - Maybe remember the last answer per session, or add a "PC by default"
      setting. Ask the user.
 
+3. **BUG: "▶ ON PC" on the phone appears to do nothing** (reported
+   2026-10-20; the PC was confirmed on 0.2.0). Debug first next time, on
+   the S21 over adb with the CDP eval script:
+   - Call `playOnPC(...)` from the page and read the reply. Does
+     `/api/pcremote/play` give `{error}`?
+   - Is `pc_link.up` true on the phone (does the Remote icon glow)?
+   - Does the PC log a play? Check `nextup_errors.log` and whether mpv
+     starts. `play_on_pc` → `play_local` → `require_media_file`, which may
+     be slow on a sleeping E: drive past the 90 s timeout, or fail the
+     tmdb lookup.
+   - Does the button's text change to "…" / "FAILED" at all? If not, the
+     click isn't reaching `playOnPC`; the peek's buttons are layered
+     (z-order or pointer-events).
+   - Is a local film's `tmdb_id` set on its row? `mark_on_pc` added it;
+     check rows from the phone's real library.
+
 ## 0.2 release: where it stands (2026-10-20, paused for usage)
 
 Done and committed on `android-shell`:
