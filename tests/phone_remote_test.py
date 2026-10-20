@@ -165,6 +165,51 @@ st, state = call("GET", "/phone/remote/state")
 check("the art is something the phone can fetch", state.get("art") == "/phone/art/abc123.jpg", state.get("art"))
 codes = {r: call("POST", "/phone/remote/" + r, {})[0] for r in ("../api/config", "presets", "state")}
 check("only the listed remote routes answer", all(c == 404 for c in codes.values()), codes)
+# --- Task 3: the phone's side ------------------------------------------------------------
+# This process plays the phone now, reaching the PC half above on loopback.
+n.PLATFORM = "android"
+n.CONFIG["pc_link"] = {"token": token, "pc": "Test PC", "pc_id": "", "port": PORT,
+                       "addresses": ["127.0.0.1"], "last_ip": None}
+n.pc_link_check(force=True)
+def desk_get(path):
+    with urllib.request.urlopen("http://127.0.0.1:8791" + path, timeout=10) as r:
+        return r.status, r.headers.get("Content-Type"), r.read()
+st, kind, body = desk_get("/api/pcremote/state")
+state = json.loads(body)
+check("the phone passes the state through", st == 200 and "volume" in state, list(state)[:5])
+check("with the picture as one the phone's own page can fetch",
+      state.get("art") == "/api/pcremote/art/abc123.jpg", state.get("art"))
+before = MPV["volume"]
+got = desk_post("/api/pcremote/volume", {"delta": 5})
+check("and a press", got.get("volume") == before + 5, got.get("volume"))
+art_dir = n.ART_DIR
+os.makedirs(art_dir, exist_ok=True)
+open(os.path.join(art_dir, "abc123.jpg"), "wb").write(b"\xff\xd8fakejpeg")
+st, kind, body = desk_get("/api/pcremote/art/abc123.jpg")
+check("the picture itself comes through", st == 200 and body == b"\xff\xd8fakejpeg" and kind == "image/jpeg", (st, kind))
+
+n.phone_link_stop()
+n.PC_LINK.update(checked=0)
+got = desk_post("/api/pcremote/volume", {"delta": 5})
+check("PC gone: said plainly, nothing thrown", got.get("error") == "The PC isn't on the Wi-Fi right now.", got)
+st, kind, body = desk_get("/api/pcremote/state")
+check("the state says so too", json.loads(body).get("error") == "The PC isn't on the Wi-Fi right now.")
+
+conn = n.db()
+row = conn.execute("SELECT tmdb_id, title FROM movies WHERE tmdb_id<>'' LIMIT 1").fetchone()
+conn.execute("INSERT OR REPLACE INTO snapshot_movies (tmdb_id,title,year) VALUES (?,?,2000)", (row["tmdb_id"], row["title"]))
+conn.commit(); conn.close()
+def mine():
+    n.LIB.loaded_at = 0; n.LOCAL.loaded_at = 0
+    out = n.browse_library("movie", row["title"], "title", "all", 50, 0)
+    items = out.get("items") if isinstance(out, dict) else out
+    return next((i for i in items if i.get("title") == row["title"] and not i.get("elsewhere")), {})
+check("a film the PC has is not marked while the PC is away", not mine().get("on_pc"))
+n.phone_link_start(PORT, "127.0.0.1")
+n.pc_link_check(force=True)
+check("and is marked on_pc while it's there", mine().get("on_pc") is True, {k: mine().get(k) for k in ("title", "on_pc")})
+n.PLATFORM = "windows"
+
 desk.shutdown()
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

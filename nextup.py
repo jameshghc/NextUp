@@ -5431,6 +5431,7 @@ def browse_library(kind, query, sort, shelf, limit, offset):
             progress = series_progress(episodes_by_show, s.get("tvshowid"))
             rows.append({
                 "score": score, "kind": "tvshow", "id": s.get("tvshowid"),
+                "tmdb_id": str((s.get("uniqueid") or {}).get("tmdb") or ""),
                 "title": s.get("title"), "year": s.get("year"),
                 "poster": s.get("art", {}).get("poster"),
                 "tmdb": round(s.get("rating") or 0, 1),
@@ -5460,6 +5461,7 @@ def browse_library(kind, query, sort, shelf, limit, offset):
                 percent = int(100 * resume["position"] / resume["total"])
             rows.append({
                 "score": score, "kind": "movie", "id": m.get("movieid"),
+                "tmdb_id": str((m.get("uniqueid") or {}).get("tmdb") or ""),
                 "title": m.get("title"), "year": m.get("year"),
                 "poster": m.get("art", {}).get("poster"),
                 "tmdb": round(m.get("rating") or 0, 1),
@@ -5486,6 +5488,8 @@ def browse_library(kind, query, sort, shelf, limit, offset):
             rows.extend(elsewhere_rows(kind, query))
         except Exception:
             pass        # a snapshot problem must never take the Library down
+
+    mark_on_pc(rows)
 
     # Shelves combine with "+": the Favourites section sends "favourite" and
     # the Show list can add one more beside it — "favourite+here" is your
@@ -13419,6 +13423,45 @@ def pc_stream_play(stream, resume=False):
     return {"ok": True}
 
 
+PC_AWAY = "The PC isn't on the Wi-Fi right now."
+
+
+def pc_remote_call(method, path, body=None):
+    """The PC's remote, from this phone: passed straight through to the
+    PC's /phone/remote/… so the page never holds the token. Says plainly
+    when the PC isn't there rather than raising."""
+    if not pc_link_check()["up"]:
+        return {"error": PC_AWAY}
+    status, reply = pc_link_call(method, "/phone/remote/" + path, body, timeout=20)
+    if status != 200 or not isinstance(reply, dict):
+        return {"error": PC_AWAY if status in (0, 401) else
+                (reply.get("error") if isinstance(reply, dict) else None) or PC_AWAY}
+    art = reply.get("art") or ""
+    if art.startswith("/phone/art/"):
+        # The page can't reach the PC's link itself; it asks this server,
+        # which fetches the picture with the token (see /api/pcremote/art/).
+        reply["art"] = "/api/pcremote/art/" + art[len("/phone/art/"):]
+    return reply
+
+
+def mark_on_pc(rows):
+    """On the phone, while the PC is on the Wi-Fi: which of these the PC
+    has, so the page can offer to play them there."""
+    if PLATFORM != "android" or not PC_LINK["up"]:
+        return rows
+    conn = db()
+    try:
+        films = set(str(r[0]) for r in conn.execute("SELECT tmdb_id FROM snapshot_movies"))
+        shows = set(str(r[0]) for r in conn.execute("SELECT tmdb_id FROM snapshot_shows"))
+    finally:
+        conn.close()
+    for r in rows:
+        tmdb = str(r.get("tmdb_id") or "")
+        if r.get("stream") or (tmdb and tmdb in (films if r.get("kind") == "movie" else shows)):
+            r["on_pc"] = True
+    return rows
+
+
 def pc_link_public():
     return {"up": PC_LINK["up"], "pc": PC_LINK["pc"], "needs_pairing": PC_LINK["needs_pairing"],
             "checking": PC_LINK["checking"]}
@@ -13923,6 +13966,25 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/remote/state":
                 return self.send_json(remote_state())
 
+            if route == "/api/pcremote/state":
+                if PLATFORM != "android":
+                    return self.send_json({"error": "only on the phone"}, 404)
+                return self.send_json(pc_remote_call("GET", "state"))
+
+            if route.startswith("/api/pcremote/art/"):
+                name = art_filename("/" + route[len("/api/pcremote/art/"):])
+                if PLATFORM != "android" or not name or not pc_link_check()["up"]:
+                    return self.send_error(404)
+                status, pic = pc_link_call("GET", "/phone/art/" + name)
+                if status != 200 or not isinstance(pic, bytes):
+                    return self.send_error(404)
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(pic)))
+                self.end_headers()
+                self.wfile.write(pic)
+                return
+
             if route == "/api/appearance":
                 st = appearance_settings()
                 return self.send_json({"settings": st, "look": appearance_look(st),
@@ -14325,6 +14387,14 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/play":
                 play_local(data.get("type"), int(data["id"]), bool(data.get("resume")))
                 return self.send_json({"ok": True})
+
+            if route.startswith("/api/pcremote/"):
+                if PLATFORM != "android":
+                    return self.send_json({"error": "only on the phone"}, 404)
+                action = route[len("/api/pcremote/"):]
+                if action != "play" and action not in REMOTE_ACTIONS:
+                    return self.send_json({"error": "no such thing"}, 404)
+                return self.send_json(pc_remote_call("POST", action, data))
 
             if route == "/api/appearance":
                 if data.get("reset"):
