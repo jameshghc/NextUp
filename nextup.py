@@ -12121,6 +12121,82 @@ def play_local(kind, item_id, resume=False):
     note_now_playing(proc, kind, item_id, title)
 
 
+def ident_for(kind, item_id):
+    """What a film or episode IS, in terms the phone can play it by — or
+    None when there's no TMDB id to say it with (then it's ON PC only)."""
+    if kind not in ("movie", "episode") or not item_id:
+        return None
+    conn = db()
+    try:
+        ident = sync_identity(conn, kind, item_id)
+    finally:
+        conn.close()
+    if not ident:
+        return None
+    out = {"kind": kind, "tmdb": ident[0]}
+    if kind == "episode":
+        out.update(season=ident[1], episode=ident[2])
+    return out
+
+
+def phone_art(url):
+    url = url or ""
+    return "/phone" + url if url.startswith("/art/") else url
+
+
+def _for_phone(item):
+    item = dict(item)
+    item["ident"] = ident_for(item.get("type"), item.get("id"))
+    if item.get("art"):
+        item["art"] = phone_art(item["art"])
+    return item
+
+
+def phone_now(args, exclude):
+    """The PC's Now for the phone: tonight's picks and Continue, each item
+    carrying its identity. What's offered here isn't remembered as offered
+    on the PC — the phone is somewhere else."""
+    picks = picks_with_cooldown(set(exclude), args)
+    reset = False
+    if not picks and exclude:
+        picks = build_tonight(**args)
+        reset = bool(picks)
+    return {"picks": [_for_phone(p) for p in picks], "reset": reset,
+            "continue": [_for_phone(c) for c in build_continue()]}
+
+
+def channel_ident(block, offset):
+    """The one file a channel is playing at `offset`, as an identity, and
+    how far into that file — a two-episode block is two files."""
+    if block.get("kind") not in ("movie", "episode"):
+        return None, 0
+    kind, item_id, at = channel_play_target(block, offset)
+    return ident_for(kind, item_id), int(at or 0)
+
+
+def phone_channels():
+    """The PC's channels and what's on, for the phone. A film or episode
+    channel says what to play and from where; live and YouTube ones don't
+    (they're watched on the PC)."""
+    resolved = resolve_all_channels_now()
+    out = []
+    for ch in CHANNELS:
+        if ch.get("type") == "live":
+            out.append({"id": ch["id"], "name": ch["name"], "live": True, "now": None})
+            continue
+        now = resolved.get(ch["id"])
+        entry = {"id": ch["id"], "name": ch["name"], "youtube": ch.get("type") == "youtube",
+                 "now": None}
+        if now:
+            summary = channel_summary(now)
+            summary["art"] = phone_art(summary.get("art"))
+            ident, at = (None, 0) if entry["youtube"] else channel_ident(now["block"], now["offset"])
+            summary["ident"], summary["offset"] = ident, at
+            entry["now"] = summary
+        out.append(entry)
+    return {"channels": out}
+
+
 def phone_remote_state(state=None):
     """remote_state for the phone: the picture as a path the phone's link
     can fetch (/phone/art/…), since /art/ is the desktop server's."""
@@ -13000,6 +13076,18 @@ class PhoneHandler(BaseHTTPRequestHandler):
                 return
             if route == "/phone/remote/state":
                 return self.send_json(phone_remote_state())
+            # The PC's library, as the phone's Now and Channels draw on it.
+            if route == "/phone/now":
+                one = lambda k, d="": (query.get(k) or [d])[0]
+                args = dict(kind=one("kind", "any"), mood=one("mood", "any"),
+                            max_mins=int(one("max", "0") or 0), genre=one("genre", ""),
+                            count=max(3, min(int(one("count", "3") or 3), 24)))
+                return self.send_json(phone_now(args, [x for x in one("exclude").split(",") if x]))
+            if route == "/phone/genres":
+                chosen = [g for g in ((query.get("with") or [""])[0]).split(",") if g]
+                return self.send_json({"genres": available_genres((query.get("kind") or ["any"])[0], chosen)})
+            if route == "/phone/channels":
+                return self.send_json(phone_channels())
             if route == "/phone/hello":
                 return self.send_json({"ok": True, "pc": snapshot_device_name(),
                                        "device_id": sync_device_id(),

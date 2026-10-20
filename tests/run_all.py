@@ -30,6 +30,7 @@ SUITES = [
     ("phone link", "phone_link_test.py"),
     ("streaming over wi-fi", "wifi_stream_test.py"),
     ("the phone as a remote", "phone_remote_test.py"),
+    ("the phone draws on the PC", "phone_pclib_test.py"),
     ("android core", "android_core_test.py"),
     ("phone over usb", "usb_phone_test.py"),
     ("phone as a drive", "phone_dock_test.py"),
