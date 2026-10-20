@@ -322,6 +322,16 @@ check("Remote: the sleep timer's question can be answered there", "STILL HERE" i
       or ("STILL HERE" in _rp and "ENOUGH" in _rp))
 check("Remote: a now-playing strip on the other screens", 'id="pcstrip"' in page_src and "function stripRender(" in page_src)
 check("Remote: ON PC in a tile's overlay", "'iconbtn peekonpc'" in page_src and "function playOnPC(" in page_src)
+_tick = page_src[page_src.find("async function remoteTick("):][:700]
+check("Remote: when the PC goes, the asking stops (no calling out on a timer)",
+      "pcGone(" in page_src and "function pcGone(" in page_src
+      and "stripPoll(false)" in page_src[page_src.find("function pcGone("):][:600])
+check("Remote: a tick doesn't start while the last is still out", "remoteBusy" in _tick)
+_pop = page_src[page_src.find("async function playOnPC("):][:600]
+check("Remote: ON PC brings the Remote to the front, closing what's over it",
+      "closePeeks()" in _pop and ".sheet" in _pop)
+check("Remote: the strip doesn't cover the last row", "body.pcstripon" in page_src
+      and "classList.toggle('pcstripon'" in page_src)
 check("a details panel can be swiped down to close", "function sheetSwipe(" in page_src
       and "sheetSwipe(back" in page_src)
 

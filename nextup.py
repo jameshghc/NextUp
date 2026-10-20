@@ -12184,6 +12184,12 @@ def remote_do(action, data):
             target = min(target, duration - 1)
         target = max(0, int(target))
         mpv_command("seek", str(target), "absolute")
+        # The monitor only reads the position once a second; without this
+        # the answer to a seek still says where it was, and the phone's bar
+        # snapped back before jumping forward.
+        with _PLAY_LOCK:
+            if NOW_PLAYING.get("type"):
+                NOW_PLAYING["position"] = float(target)
     elif action == "afk":
         afk_answer(bool(data.get("still")))
     return remote_state()
@@ -12876,6 +12882,11 @@ class PhoneHandler(BaseHTTPRequestHandler):
             data = {}
         seen_you()
         try:
+            for key in ("value", "delta", "to", "by", "step", "season", "episode"):
+                if key in data and data[key] is not None:
+                    number = float(data[key])
+                    if number != number or number in (float("inf"), float("-inf")):
+                        raise ValueError(key)
             if action == "play":
                 play_on_pc(str(data.get("kind") or ""), data.get("tmdb"), data.get("season"),
                            data.get("episode"), resume=data.get("resume", True) is not False)
@@ -12883,6 +12894,8 @@ class PhoneHandler(BaseHTTPRequestHandler):
             return self.send_json(phone_remote_state(remote_do(action, data)))
         except AppError as exc:
             return self.send_json({"error": str(exc)})
+        except (TypeError, ValueError, OverflowError):
+            return self.send_json({"error": "That control didn't make sense."})
 
     def send_stream(self, route):
         """/phone/stream/<ticket>, or /phone/stream/<ticket>/sub/<n>: what a
@@ -13302,6 +13315,10 @@ def pc_link_call(method, path, body=None, timeout=10, raw=None):
             status, raw, kind = r.status, r.read(), r.headers.get("Content-Type") or ""
     except urllib.error.HTTPError as exc:
         status, raw, kind = exc.code, exc.read(), exc.headers.get("Content-Type") or ""
+    except (socket.timeout, TimeoutError) as exc:
+        # Slow isn't gone: finding subtitles, or a drive spinning up, can
+        # take longer than we wait. The PC is still there.
+        return 0, {"error": "The PC is taking a while — try again in a moment."}
     except OSError as exc:
         PC_LINK.update(up=False, base=None, checked=time.time())
         return 0, {"error": str(exc)}
@@ -13432,7 +13449,10 @@ def pc_remote_call(method, path, body=None):
     when the PC isn't there rather than raising."""
     if not pc_link_check()["up"]:
         return {"error": PC_AWAY}
-    status, reply = pc_link_call(method, "/phone/remote/" + path, body, timeout=20)
+    status, reply = pc_link_call(method, "/phone/remote/" + path, body,
+                                 timeout=90 if path in ("subtitles", "play") else 20)
+    if status == 0 and isinstance(reply, dict) and PC_LINK["up"]:
+        return reply        # slow, not gone: said as such
     if status != 200 or not isinstance(reply, dict):
         return {"error": PC_AWAY if status in (0, 401) else
                 (reply.get("error") if isinstance(reply, dict) else None) or PC_AWAY}
@@ -17225,6 +17245,8 @@ body.customround :is(.settings,.pick,.alt,.hubcard,.card,.coll,.dirblock,.profil
   padding:8px 10px;border-radius:12px;background:rgba(14,14,18,.92);border:1px solid rgba(255,255,255,.12);
   box-shadow:0 10px 30px rgba(0,0,0,.5);cursor:pointer}
 #pcstrip.hidden{display:none}
+/* Room under everything for the strip, so it never sits on the last row. */
+body.pcstripon .wrap{padding-bottom:76px}
 #pcstrip img{width:30px;aspect-ratio:2/3;object-fit:cover;border-radius:3px}
 #pcstrip .pstext{flex:1;min-width:0}
 #pcstrip .pstext b{display:block;font-family:var(--display);font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -22990,9 +23012,28 @@ function remotePoll(on){
     remoteTimer = null;
   }
 }
+let remoteBusy = false;
 async function remoteTick(){
-  const r = await api('/api/pcremote/state');
-  remoteRender(r);
+  if(remoteBusy) return;        // the last ask is still out: don't pile more on
+  remoteBusy = true;
+  try{
+    const r = await api('/api/pcremote/state');
+    remoteRender(r);
+    if(r && r.error === PC_AWAY_COPY) pcGone();
+  } finally { remoteBusy = false; }
+}
+/* The PC has gone. Stop asking — calling out across the network on a timer
+   is what the battery work put an end to — and take the Remote tab away
+   until the app is next opened or comes back to the front (lookForPC). */
+const PC_AWAY_COPY = "The PC isn't on the Wi-Fi right now.";   // exactly the phone server's PC_AWAY
+function pcGone(){
+  pcLinkUp = false;
+  remotePoll(false);
+  stripPoll(false);
+  $('#remotetab').classList.add('hidden');
+  const strip = $('#pcstrip');
+  if(strip) strip.dataset.playing = '';
+  stripShow();
 }
 async function remoteSend(action, data){
   const r = await post('/api/pcremote/' + action, data || {});
@@ -23009,7 +23050,14 @@ function remoteSay(text){
 }
 async function playOnPC(what){
   const r = await post('/api/pcremote/play', Object.assign({resume: true}, what));
-  if(r && !r.error){ switchTo('remote'); remoteRender(r); }
+  if(r && !r.error){
+    /* The Remote to the front: an episode sheet or a tile's overlay over
+       it would hide the very thing that just opened. */
+    document.querySelectorAll('.sheet').forEach(x => x.remove());
+    closePeeks();
+    switchTo('remote');
+    remoteRender(r);
+  }
   return r;
 }
 function clock(sec){
@@ -23124,11 +23172,13 @@ function remoteRender(st){
    there. */
 let stripTimer = null;
 function stripPoll(on){
+  const ask = () => api('/api/pcremote/state').then(r => {
+    remoteRender(r);
+    if(r && r.error === PC_AWAY_COPY) pcGone();
+  });
   if(on && !stripTimer){
-    api('/api/pcremote/state').then(remoteRender);
-    stripTimer = setInterval(() => {
-      if(currentView !== 'remote') api('/api/pcremote/state').then(remoteRender);
-    }, 10000);
+    ask();
+    stripTimer = setInterval(() => { if(currentView !== 'remote') ask(); }, 10000);
   } else if(!on && stripTimer){
     clearInterval(stripTimer);
     stripTimer = null;
@@ -23155,7 +23205,9 @@ function stripRender(st){
 }
 function stripShow(){
   const strip = $('#pcstrip');
-  if(strip) strip.classList.toggle('hidden', !(strip.dataset.playing && currentView !== 'remote' && pcLinkUp));
+  const on = !!(strip && strip.dataset.playing && currentView !== 'remote' && pcLinkUp);
+  if(strip) strip.classList.toggle('hidden', !on);
+  document.body.classList.toggle('pcstripon', on);
 }
 
 /* The phone looks for the PC on the Wi-Fi when the app opens and each time

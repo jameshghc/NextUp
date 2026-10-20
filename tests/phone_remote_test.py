@@ -160,6 +160,17 @@ check("a show seen to the end starts again at the first episode", PLAYED[-1][0] 
 st, got = call("POST", "/phone/remote/play", {"kind": "movie", "tmdb": "1"})
 check("something this PC hasn't got is said", got.get("error") == "The PC doesn't have that any more.", got)
 
+# Final review fixes.
+n.NOW_PLAYING.update(position=600.0, duration=6000.0)   # as the monitor last saw it
+st, got = call("POST", "/phone/remote/seek", {"to": 3600})
+check("a seek answers with where it went, not where it was", got.get("position") == 3600, got.get("position"))
+bad = [call("POST", "/phone/remote/play", {"kind": "episode", "tmdb": "990011", "season": "x", "episode": 1}),
+       call("POST", "/phone/remote/seek", {"to": float("nan")}),
+       call("POST", "/phone/remote/volume", {"value": "loud"})]
+check("nonsense numbers are refused politely, never a 500 with Python's words",
+      all(st == 200 and got.get("error") and "invalid literal" not in got["error"]
+          and "could not convert" not in got["error"] for st, got in bad), bad)
+
 n.NOW_PLAYING["art"] = "/art/abc123.jpg"
 st, state = call("GET", "/phone/remote/state")
 check("the art is something the phone can fetch", state.get("art") == "/phone/art/abc123.jpg", state.get("art"))
@@ -188,6 +199,15 @@ open(os.path.join(art_dir, "abc123.jpg"), "wb").write(b"\xff\xd8fakejpeg")
 st, kind, body = desk_get("/api/pcremote/art/abc123.jpg")
 check("the picture itself comes through", st == 200 and body == b"\xff\xd8fakejpeg" and kind == "image/jpeg", (st, kind))
 
+import socket as _socket
+_real_urlopen = urllib.request.urlopen
+def _slow(*a, **k):
+    raise _socket.timeout("timed out")
+n.urllib.request.urlopen = _slow
+r = n.pc_link_call("POST", "/phone/remote/subtitles", {})
+n.urllib.request.urlopen = _real_urlopen
+check("a slow answer isn't the PC going away", n.PC_LINK["up"] is True and r[0] == 0, (n.PC_LINK["up"], r))
+
 n.phone_link_stop()
 n.PC_LINK.update(checked=0)
 got = desk_post("/api/pcremote/volume", {"delta": 5})
@@ -209,6 +229,10 @@ n.phone_link_start(PORT, "127.0.0.1")
 n.pc_link_check(force=True)
 check("and is marked on_pc while it's there", mine().get("on_pc") is True, {k: mine().get(k) for k in ("title", "on_pc")})
 n.PLATFORM = "windows"
+
+_copy = re.search(r'const PC_AWAY_COPY = "([^"]*)";', n.PAGE)
+check("the page recognises the phone server's 'PC gone' words exactly",
+      _copy and _copy.group(1).replace("\u2019", "’") == n.PC_AWAY, (_copy and _copy.group(1), n.PC_AWAY))
 
 desk.shutdown()
 print("\n%d/%d passed" % (sum(results), len(results)))
