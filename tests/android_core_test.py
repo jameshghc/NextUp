@@ -307,6 +307,21 @@ check("Wi-Fi: the page looks again while the phone is still finding the PC",
 check("Wi-Fi: why a stream didn't start is on screen, not in a tooltip",
       "function streamProblem(" in page_src and page_src.count("streamProblem(") >= 3
       and "go.title = r.error" not in page_src)
+# The phone as a remote for the PC (v0.2.0).
+_rp = page_src[page_src.find("function remoteRender("):][:6000]
+check("Remote: a tab of its own, hidden unless the PC is on the Wi-Fi",
+      'data-view="remote"' in page_src and 'id="remotetab"' in page_src and 'id="view-remote"' in page_src
+      and "$('#remotetab').classList.toggle('hidden', !pcLinkUp)" in page_src)
+check("Remote: asks once a second only while showing, and stops when hidden",
+      "function remotePoll(" in page_src and "clearInterval(remoteTimer)" in page_src
+      and "remotePoll(false)" in page_src[page_src.find("'visibilitychange'"):][:2500]
+      and "remotePoll(view === 'remote')" in page_src)
+_rb = page_src[page_src.find("function remoteBuild("):][:5000]
+check("Remote: the bar seeks when let go, not while dragging", "seek.onchange" in _rb and "seek.oninput" not in _rb)
+check("Remote: the sleep timer's question can be answered there", "STILL HERE" in _rp and "THAT\\u2019S ENOUGH" in _rp
+      or ("STILL HERE" in _rp and "ENOUGH" in _rp))
+check("Remote: a now-playing strip on the other screens", 'id="pcstrip"' in page_src and "function stripRender(" in page_src)
+check("Remote: ON PC in a tile's overlay", "'iconbtn peekonpc'" in page_src and "function playOnPC(" in page_src)
 check("a details panel can be swiped down to close", "function sheetSwipe(" in page_src
       and "sheetSwipe(back" in page_src)
 

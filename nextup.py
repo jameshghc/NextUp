@@ -17194,6 +17194,42 @@ body.glass .watchtoggle.on{background-color:rgba(var(--accent-rgb),.22);border-c
   color:var(--marigold-2)}
 body.glass .iconbtn:disabled{opacity:.45}
 body.customround :is(.settings,.pick,.alt,.hubcard,.card,.coll,.dirblock,.profile,.ratecard,.channelcard,.toplist,.resumecard,.reccard,.sheetbody,.sheetpanel,.simcard,.askcard,.ctxmenu,.queuerail,.syncoffer,.fitcard,.nowfits,#playingbar,.gap,.notice,.tile,.kchip,.iconbtn,.play,.tab){border-radius:var(--r-user)!important}
+/* ---- the Remote (the phone controlling the PC) ---- */
+#view-remote{padding:10px 2px 90px;display:flex;flex-direction:column;gap:16px;max-width:560px;margin:0 auto}
+#view-remote.hidden{display:none}
+.rmnow{display:flex;align-items:center;gap:14px}
+.rmnow img{width:64px;aspect-ratio:2/3;object-fit:cover;border-radius:6px;box-shadow:0 8px 20px rgba(0,0,0,.5)}
+.rmnow img.hidden{display:none}
+.rmtitle{font-family:var(--display);font-size:20px;line-height:1.2}
+.rmsub{font-family:var(--mono);font-size:12px;color:var(--muted);margin-top:3px}
+.rmseek{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:12px;color:var(--muted)}
+.rmseek input{flex:1}
+.rmrow{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.rmrow.hidden{display:none}
+.rmrow > span{font-family:var(--mono);font-size:13px;min-width:64px;text-align:center}
+.rmtransport{justify-content:center;gap:16px}
+.rmtransport .play{font-size:22px;min-width:84px;padding:12px 0}
+.rmtransport .iconbtn{padding:12px 16px;font-size:14px}
+.rmgrid{display:grid;grid-template-columns:96px minmax(0,1fr);gap:12px 12px;align-items:center}
+.rmgrid > label{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+#view-remote .iconbtn{padding:10px 14px;color:var(--paper);border:1px solid rgba(255,255,255,.24);
+  background:rgba(255,255,255,.06)}       /* obvious, in either style: this screen is all buttons */
+#view-remote .iconbtn:disabled{opacity:.4}
+.rmchannels{display:flex;flex-wrap:wrap;gap:8px}
+.rmchannels .kchip{flex:0 0 auto;padding:8px 14px}
+.rmafk{background:rgba(var(--accent-rgb),.12);border:1px solid rgba(var(--accent-rgb),.45);border-radius:12px;padding:14px;
+  display:flex;flex-direction:column;gap:10px}
+.rmafk.hidden{display:none}
+.rmmsg{font-size:13px;color:#ff8f7a;min-height:1.2em}
+#pcstrip{position:fixed;left:10px;right:10px;bottom:10px;z-index:60;display:flex;align-items:center;gap:10px;
+  padding:8px 10px;border-radius:12px;background:rgba(14,14,18,.92);border:1px solid rgba(255,255,255,.12);
+  box-shadow:0 10px 30px rgba(0,0,0,.5);cursor:pointer}
+#pcstrip.hidden{display:none}
+#pcstrip img{width:30px;aspect-ratio:2/3;object-fit:cover;border-radius:3px}
+#pcstrip .pstext{flex:1;min-width:0}
+#pcstrip .pstext b{display:block;font-family:var(--display);font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#pcstrip .pstext small{font-family:var(--mono);font-size:11px;color:var(--muted)}
+.tab.hidden{display:none}
 /* The Appearance tab's own controls. */
 .apgrid{display:grid;grid-template-columns:150px minmax(0,1fr);gap:16px 18px;align-items:center;margin-top:14px}
 .apgrid > label{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
@@ -17281,6 +17317,9 @@ body.customround :is(.settings,.pick,.alt,.hubcard,.card,.coll,.dirblock,.profil
     <button class="tab" role="tab" aria-selected="true" data-view="library" title="view your collection">Library</button>
     <button class="tab" role="tab" aria-selected="false" data-view="rate" title="Rate your collection">Rate</button>
     <button class="tab" role="tab" aria-selected="false" data-view="channels" title="What's on right now.">Channels</button>
+    <!-- The phone only, and only while the PC is on the Wi-Fi (lookForPC). -->
+    <button class="tab hidden" role="tab" aria-selected="false" data-view="remote" id="remotetab"
+            title="Control what's playing on the PC">Remote</button>
     <!-- The one tab that isn't somewhere you browse. It's a thing you go and
          adjust, so it wears the gear everything else uses for that and gives
          its width back to the tabs that name places. The label lives in
@@ -17542,6 +17581,8 @@ body.customround :is(.settings,.pick,.alt,.hubcard,.card,.coll,.dirblock,.profil
 </div>
 
 <!-- ================= CHANNELS ================= -->
+<div id="view-remote" class="hidden"></div>
+<div id="pcstrip" class="hidden"></div>
 <div id="view-channels" class="hidden">
   <div class="chtop">
     <button class="iconbtn" id="shufflechannels" title="Redeal every channel: a new running order for each, and each dropped somewhere new in it — with a good few landing at the start of something, so there's always a way in. For when there's nothing on you fancy, or when you've just added a pile of files and want them in the mix.">SHUFFLE ALL</button>
@@ -17848,7 +17889,9 @@ function switchTo(view){
      neutral grey glass (see #roomart). */
   document.body.classList.toggle('onnow', view === 'now');
   document.querySelectorAll('.tab').forEach(x => x.setAttribute('aria-selected', x.dataset.view===view));
-  ['now','library','rate','channels','settings'].forEach(v => $('#view-'+v).classList.toggle('hidden', v!==view));
+  ['now','library','rate','channels','settings','remote'].forEach(v => $('#view-'+v).classList.toggle('hidden', v!==view));
+  remotePoll(view === 'remote');
+  stripShow();
   $('#libnav').classList.toggle('offview', view!=='library');
   $('#libplaces').classList.toggle('offview', view!=='library');
   if(view==='now' && staleNow){ staleNow = false; loadTonight(); }
@@ -19321,6 +19364,20 @@ function tile(item){
       peek.append(more);
     }
   }
+  /* On the phone, while the PC is on the Wi-Fi and has this: play it
+     there, on the big screen, and open the Remote. */
+  if(item.on_pc){
+    const pcb = el('button','iconbtn peekonpc','\u25B6 ON PC');
+    pcb.onclick = async (e) => {
+      e.stopPropagation();
+      pcb.textContent = '\u2026';
+      const r = await playOnPC(item.kind === 'tvshow'
+        ? {kind: 'tvshow', tmdb: item.tmdb_id} : {kind: 'movie', tmdb: item.tmdb_id});
+      pcb.textContent = r && r.error ? 'FAILED' : '\u25B6 ON PC';
+      if(r && r.error) streamProblem(peek, r.error);
+    };
+    peek.append(pcb);
+  }
   /* The heart and the watchlist, on the phone: here a tap marks it in the
      library; on a greyed tile, on the catalogue's copy — the PC hears at the
      next swap. Hidden on the PC, whose hover panel has its own toggles. */
@@ -19526,6 +19583,14 @@ async function openElsewhereShow(tmdbId){
         streamProblem(row, r && r.error);
       };
       row.append(go);
+      if(pcLinkUp){
+        const pc = el('button','iconbtn','ON PC');
+        pc.onclick = async () => {
+          const r = await playOnPC({kind: 'episode', tmdb: tmdbId, season: se.season, episode: ep.episode});
+          streamProblem(row, r && r.error);
+        };
+        row.append(pc);
+      }
       body.append(row);
     });
   });
@@ -22908,6 +22973,191 @@ async function pickerBoot(){
   $('#picker').classList.remove('hidden');
 }
 
+/* ---------- the Remote: the PC, from the phone ----------
+   Everything goes through this phone's own server (/api/pcremote/…), which
+   holds the PC's token. Asked once a second only while the Remote tab is
+   showing and the app is in front; every press answers with the new state,
+   so it shows at once rather than at the next ask. */
+let remoteTimer = null, remoteState = null, remoteBuilt = false, remoteSeeking = false;
+
+function remotePoll(on){
+  if(on && !remoteTimer){
+    remoteBuild();
+    remoteTick();
+    remoteTimer = setInterval(remoteTick, 1000);
+  } else if(!on && remoteTimer){
+    clearInterval(remoteTimer);
+    remoteTimer = null;
+  }
+}
+async function remoteTick(){
+  const r = await api('/api/pcremote/state');
+  remoteRender(r);
+}
+async function remoteSend(action, data){
+  const r = await post('/api/pcremote/' + action, data || {});
+  if(r && r.error && !('volume' in r)){ remoteSay(r.error); return r; }
+  remoteRender(r);
+  return r;
+}
+function remoteSay(text){
+  const m = $('#rm_msg');
+  if(!m) return;
+  m.textContent = text || '';
+  clearTimeout(m.clearing);
+  if(text) m.clearing = setTimeout(() => { m.textContent = ''; }, 5000);
+}
+async function playOnPC(what){
+  const r = await post('/api/pcremote/play', Object.assign({resume: true}, what));
+  if(r && !r.error){ switchTo('remote'); remoteRender(r); }
+  return r;
+}
+function clock(sec){
+  sec = Math.max(0, Math.round(sec || 0));
+  const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), ss = sec % 60;
+  return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(ss).padStart(2, '0');
+}
+
+function remoteBuild(){
+  if(remoteBuilt) return;
+  remoteBuilt = true;
+  const v = $('#view-remote');
+  v.innerHTML = `
+    <div class="rmafk hidden" id="rm_afk"></div>
+    <div class="rmnow">
+      <img id="rm_art" alt="">
+      <div><div class="rmtitle" id="rm_title"></div><div class="rmsub" id="rm_sub"></div></div>
+    </div>
+    <div class="rmseek"><span id="rm_pos">0:00</span><input type="range" id="rm_seek" min="0" max="1" step="1" value="0"><span id="rm_left">0:00</span></div>
+    <div class="rmrow rmtransport">
+      <button class="iconbtn" data-a="back10">\u23EA 10</button>
+      <button class="play" id="rm_pause" data-a="pause">\u23EF</button>
+      <button class="iconbtn" data-a="fwd30">30 \u23E9</button>
+    </div>
+    <div class="rmgrid">
+      <label>Volume</label><div class="rmrow"><button class="iconbtn" data-a="voldown">\u2212</button><span id="rm_vol">\u2013</span><button class="iconbtn" data-a="volup">+</button><button class="iconbtn" id="rm_mute" data-a="mute">MUTE</button></div>
+      <label>Audio delay</label><div class="rmrow"><button class="iconbtn" data-a="delaydown">\u2212100</button><span id="rm_delay">0 ms</span><button class="iconbtn" data-a="delayup">+100</button></div>
+      <label>Subtitles</label><div class="rmrow"><button class="iconbtn" id="rm_sub_t" data-a="subs">OFF</button><button class="iconbtn" data-a="findsubs">FIND</button></div>
+      <label>Audio</label><div class="rmrow"><button class="iconbtn" id="rm_audio" data-a="audio">\u2013</button></div>
+    </div>
+    <div class="rmrow" id="rm_eps"><button class="iconbtn" data-a="prevep">\u2039 EPISODE</button><button class="iconbtn" data-a="nextep">EPISODE \u203A</button></div>
+    <div class="rmrow" id="rm_skip"><button class="iconbtn" data-a="skip">SKIP \u203A</button></div>
+    <div class="rmchannels" id="rm_presets"></div>
+    <div class="rmrow"><button class="iconbtn" data-a="stop">STOP</button></div>
+    <div class="rmmsg" id="rm_msg"></div>`;
+  const acts = {
+    back10: ['seek', {by: -10}], fwd30: ['seek', {by: 30}], pause: ['toggle', {what: 'pause'}],
+    voldown: ['volume', {delta: -5}], volup: ['volume', {delta: 5}], mute: ['toggle', {what: 'mute'}],
+    delaydown: ['delay', {delta: -100}], delayup: ['delay', {delta: 100}],
+    subs: ['toggle', {what: 'sub'}], findsubs: ['subtitles', {}], audio: ['toggle', {what: 'audio'}],
+    prevep: ['episode', {step: -1}], nextep: ['episode', {step: 1}], skip: ['skip', {}], stop: ['stop', {}],
+  };
+  v.querySelectorAll('[data-a]').forEach(b => {
+    b.onclick = () => remoteSend(...acts[b.dataset.a]);
+  });
+  const seek = $('#rm_seek');
+  seek.onpointerdown = () => { remoteSeeking = true; };
+  seek.onpointerup = seek.onpointercancel = () => { remoteSeeking = false; };
+  /* Sent when let go, not while dragging: one jump, not a hundred. */
+  seek.onchange = () => { remoteSeeking = false; remoteSend('seek', {to: +seek.value}); };
+}
+
+function remoteRender(st){
+  remoteState = st;
+  stripRender(st);
+  if(!remoteBuilt) return;
+  const away = !st || st.error;
+  const alive = !away && st.alive;
+  $('#rm_title').textContent = away ? (st && st.error) || 'The PC isn\u2019t on the Wi-Fi right now.'
+    : alive ? (st.title || 'Playing') : 'Nothing playing on the PC';
+  $('#rm_sub').textContent = alive ? (st.sub || '') : '';
+  const art = $('#rm_art');
+  if(alive && st.art){ if(art.getAttribute('src') !== st.art) art.src = st.art; art.classList.remove('hidden'); }
+  else art.classList.add('hidden');
+  $('#view-remote').classList.toggle('rmidle', !alive);
+  const dur = alive ? (st.duration || 0) : 0, pos = alive ? (st.position || 0) : 0;
+  const seek = $('#rm_seek');
+  seek.max = Math.max(1, Math.round(dur));
+  if(!remoteSeeking) seek.value = Math.round(pos);
+  $('#rm_pos').textContent = clock(remoteSeeking ? +seek.value : pos);
+  $('#rm_left').textContent = dur ? '\u2212' + clock(dur - pos) : '';
+  $('#rm_pause').textContent = alive && st.paused ? '\u25B6' : '\u23F8';
+  $('#rm_vol').textContent = alive ? st.volume + (st.muted ? ' (muted)' : '') : '\u2013';
+  $('#rm_delay').textContent = alive ? st.audio_delay + ' ms' : '0 ms';
+  $('#rm_sub_t').textContent = alive && st.sub_on ? (st.sub_lang || 'ON') : 'OFF';
+  $('#rm_sub_t').disabled = !alive || !st.sub_count;
+  $('#rm_audio').textContent = alive ? (st.audio_lang || (st.audio_count ? 'TRACK' : '\u2013')) : '\u2013';
+  $('#rm_audio').disabled = !alive || (st.audio_count || 0) < 2;
+  $('#rm_eps').classList.toggle('hidden', !(alive && st.is_episode));
+  $('#rm_skip').classList.toggle('hidden', !(alive && (st.channel_id || st.queue_count)));
+  const presets = $('#rm_presets');
+  presets.innerHTML = '';
+  if(!away){
+    const names = Object.fromEntries((st.channels || []).map(c => [c.id, c.name]));
+    (st.presets || []).forEach(id => {
+      const b = el('button', 'kchip' + (st.channel_id === id ? ' on' : ''), esc(names[id] || id));
+      b.type = 'button';
+      b.onclick = () => remoteSend('channel', {channel: id});
+      presets.append(b);
+    });
+  }
+  /* "Are you still watching?" — answered from here as well as on the PC. */
+  const afk = $('#rm_afk');
+  afk.classList.toggle('hidden', !(alive && st.afk));
+  if(alive && st.afk && !afk.dataset.up){
+    afk.dataset.up = '1';
+    afk.innerHTML = '';
+    afk.append(el('b', null, 'Are you still watching?'));
+    const yes = el('button', 'play', 'STILL HERE'), no = el('button', 'iconbtn', 'THAT\u2019S ENOUGH');
+    yes.onclick = () => { delete afk.dataset.up; remoteSend('afk', {still: true}); };
+    no.onclick = () => { delete afk.dataset.up; remoteSend('afk', {still: false}); };
+    const row = el('div', 'rmrow'); row.append(yes, no); afk.append(row);
+  }
+  if(!(alive && st.afk)) delete afk.dataset.up;
+  $('#view-remote').querySelectorAll('.rmtransport button,.rmgrid button,.rmseek input,#rm_eps button,#rm_skip button')
+    .forEach(b => { if(b.id !== 'rm_sub_t' && b.id !== 'rm_audio') b.disabled = !alive; });
+}
+
+/* ---------- now playing on the PC, on the other screens ----------
+   A strip at the bottom while the PC is playing; a tap opens the Remote.
+   Asked every ten seconds, only while the app is in front and the PC is
+   there. */
+let stripTimer = null;
+function stripPoll(on){
+  if(on && !stripTimer){
+    api('/api/pcremote/state').then(remoteRender);
+    stripTimer = setInterval(() => {
+      if(currentView !== 'remote') api('/api/pcremote/state').then(remoteRender);
+    }, 10000);
+  } else if(!on && stripTimer){
+    clearInterval(stripTimer);
+    stripTimer = null;
+  }
+}
+function stripRender(st){
+  const strip = $('#pcstrip');
+  if(!strip) return;
+  const playing = st && !st.error && st.alive && st.title;
+  strip.dataset.playing = playing ? '1' : '';
+  if(playing){
+    strip.innerHTML = '';
+    if(st.art){ const i = el('img'); i.src = st.art; i.alt = ''; strip.append(i); }
+    const t = el('div', 'pstext');
+    t.append(el('b', null, esc(st.title)));
+    t.append(el('small', null, 'On the PC' + (st.sub ? ' \u00B7 ' + esc(st.sub) : '')));
+    strip.append(t);
+    const pp = el('button', 'iconbtn', st.paused ? '\u25B6' : '\u23F8');
+    pp.onclick = (e) => { e.stopPropagation(); remoteSend('toggle', {what: 'pause'}); };
+    strip.append(pp);
+    strip.onclick = () => switchTo('remote');
+  }
+  stripShow();
+}
+function stripShow(){
+  const strip = $('#pcstrip');
+  if(strip) strip.classList.toggle('hidden', !(strip.dataset.playing && currentView !== 'remote' && pcLinkUp));
+}
+
 /* The phone looks for the PC on the Wi-Fi when the app opens and each time
    it comes back to the front — never on a timer, which would keep a phone
    in a pocket calling out to a PC that's off. The answer comes a moment
@@ -22926,12 +23176,21 @@ function lookForPC(){
       if(s && s.pc_link && s.pc_link.checking && ++looks < 6){ setTimeout(look, 2000); return; }
       const up = !!(s && s.pc_link && s.pc_link.up);
       if(up !== pcLinkUp){ pcLinkUp = up; loadLibrary(true); }
+      $('#remotetab').classList.toggle('hidden', !pcLinkUp);
+      stripPoll(pcLinkUp && document.visibilityState === 'visible');
     };
     setTimeout(look, 4000);
   });
 }
 document.addEventListener('visibilitychange', () => {
-  if(document.visibilityState === 'visible') lookForPC();
+  if(document.visibilityState === 'visible'){
+    lookForPC();
+    remotePoll(currentView === 'remote');
+  } else {
+    /* In the background nothing asks the PC anything. */
+    remotePoll(false);
+    stripPoll(false);
+  }
 });
 lookForPC();
 

@@ -21,6 +21,33 @@ from devserve import isolate
 port, phone = int(ARGS[0]), ARGS[1]
 isolate(n, os.path.join(tempfile.gettempdir(), "nextup_wifistream_pc"))
 REAL_CHECK = n.media_file_check
+if os.environ.get("NEXTUP_FAKE_MPV"):
+    # For tests/phone_serve.py --with-pc: a pretend player, so the phone's
+    # Remote has something to drive and Play on PC never opens the real mpv.
+    import time as _t
+    MPV = {"volume": 70, "mute": False, "pause": False, "audio-delay": 0.0, "time-pos": 1250.0,
+           "duration": 7400.0, "track-list": [{"type": "sub", "id": 1, "lang": "eng", "selected": True},
+                                              {"type": "audio", "id": 1, "lang": "eng", "selected": True}]}
+    def _cmd(*a):
+        if a[0] == "set_property":
+            MPV[a[1]] = {"yes": True, "no": False}.get(a[2], a[2])
+        elif a[0] == "cycle" and a[1] in ("pause", "mute"):
+            MPV[a[1]] = not MPV[a[1]]
+        elif a[0] == "seek":
+            MPV["time-pos"] = float(a[1])
+    class _Alive:
+        def poll(self): return None
+    n.mpv_get = lambda name, default=None: MPV.get(name, default)
+    n.mpv_command = _cmd
+    n.mpv_alive = lambda: True
+    n.note_audio_delay = lambda: None
+    n.require_media_file = lambda path: path
+    n.mpv_play = lambda path, start=0, keep_open=False: _Alive()
+    n._PLAY_PROC[0] = _Alive()
+    _row = n.db().execute("SELECT id, title, year FROM movies WHERE title LIKE 'Ben-Hur%' LIMIT 1").fetchone()
+    n.NOW_PLAYING.update(type="movie", id=_row["id"], title=_row["title"], sub=str(_row["year"]),
+                         art="/art/m4WQ1dBIrEIHZNCoAjdpxwSKWyH.jpg", started_at=_t.time(), channel=None,
+                         channel_id=None, position=None, duration=None)
 n.phone_link_start(port, "127.0.0.1")
 print(n.phone_pair_direct(phone, "Test Phone"), flush=True)
 for line in sys.stdin:

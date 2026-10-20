@@ -98,9 +98,13 @@ if WITH_PC:
     # A phone's own id, not the PC's: both sandboxes start from one config.
     n.CONFIG["device_id"] = uuid.uuid4().hex[:16]
     PC_PORT = 8794
+    # The pretend PC is a PC: not this process's Android, and with a pretend
+    # player so nothing plays for real.
+    pc_env = dict(os.environ, NEXTUP_FAKE_MPV="1")
+    pc_env.pop("NEXTUP_PLATFORM", None)
     pc = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                                         "wifi_pc_helper.py"), str(PC_PORT), n.CONFIG["device_id"]],
-                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=pc_env)
     n.CONFIG["pc_link"] = {"token": pc.stdout.readline().strip(), "pc": n.snapshot_device_name(),
                            "pc_id": "", "port": PC_PORT, "addresses": ["127.0.0.1"], "last_ip": None}
     print("pretend PC on %d: %s" % (PC_PORT, "up" if n.pc_link_check(force=True)["up"] else "NOT up"), flush=True)
