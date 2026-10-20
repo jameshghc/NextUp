@@ -12003,6 +12003,92 @@ def remote_state():
     return state
 
 
+def play_local(kind, item_id, resume=False):
+    """Play a film or episode from this machine's library — the PLAY button,
+    and Play on PC from the phone. Raises AppError when the file can't be
+    played."""
+    path = require_media_file(LOCAL.path_for(kind, item_id))
+    # Asked for by name rather than assumed: pressing PLAY on a
+    # film's page means play it, and the one place that means
+    # "pick it up where I stopped" is a button that says so.
+    start = resume_position(kind, item_id) if resume else 0
+    if PLATFORM == "android" and not start:
+        # On the PC, mpv's own watch-later file picks PLAY up
+        # where you stopped. The phone's mpv keeps none for us,
+        # so the same start is handed over by hand.
+        start = resume_position(kind, item_id)
+        if not start:
+            # Nothing on the row: perhaps it was watched before
+            # it was here — streamed from the PC, or on another
+            # device — which history knows by what it is.
+            conn = db()
+            try:
+                ident = sync_identity(conn, kind, item_id)
+            finally:
+                conn.close()
+            if ident:
+                start = elsewhere_progress(kind, ident[0], ident[1], ident[2])["position"]
+    # An episode holds the window open so the next one can follow
+    # it. A film doesn't: when it's finished, it's finished.
+    # Held open for an episode (the run follows it) and for
+    # anything at all while the queue has something in it — see
+    # the note above the queue, on why only idle can be trusted.
+    proc = mpv_play(path, start=start,
+                    keep_open=(kind == "episode" or queue_count() > 0))
+    title = LOCAL.field(kind, item_id, "title")
+    LOCAL.set_field(kind, item_id, "last_played", now_stamp())
+    log_event(kind, item_id, title, "played")
+    note_now_playing(proc, kind, item_id, title)
+
+
+def phone_remote_state(state=None):
+    """remote_state for the phone: the picture as a path the phone's link
+    can fetch (/phone/art/…), since /art/ is the desktop server's."""
+    state = dict(state or remote_state())
+    art = state.get("art") or ""
+    if art.startswith("/art/"):
+        state["art"] = "/phone" + art
+    return state
+
+
+def play_on_pc(kind, tmdb, season=None, episode=None, resume=True):
+    """Start something here because the phone asked: a film, an episode, or
+    a show — this PC's next-up episode of it, the one its own PLAY would
+    pick, else the first. Played exactly as the PLAY button plays it."""
+    conn = db()
+    try:
+        item_id = None
+        if kind == "movie":
+            row = conn.execute("SELECT id FROM movies WHERE tmdb_id=? ORDER BY id LIMIT 1",
+                               (str(tmdb),)).fetchone()
+            item_id = row["id"] if row else None
+        elif kind in ("episode", "tvshow"):
+            show = conn.execute("SELECT id FROM shows WHERE tmdb_id=? ORDER BY id LIMIT 1",
+                                (str(tmdb),)).fetchone()
+            if show and kind == "episode":
+                row = conn.execute("SELECT id FROM episodes WHERE show_id=? AND season=? AND episode=?"
+                                   " ORDER BY id LIMIT 1",
+                                   (show["id"], int(season), int(episode))).fetchone()
+                item_id = row["id"] if row else None
+            elif show:
+                conn.close()
+                conn = None
+                item_id = (show_detail(show["id"]) or {}).get("next_up")
+                if not item_id:
+                    conn = db()
+                    row = conn.execute("SELECT id FROM episodes WHERE show_id=?"
+                                       " ORDER BY (season = 0), season, episode LIMIT 1",
+                                       (show["id"],)).fetchone()
+                    item_id = row["id"] if row else None
+                kind = "episode"
+    finally:
+        if conn is not None:
+            conn.close()
+    if not item_id:
+        raise AppError("The PC doesn't have that any more.")
+    play_local(kind, int(item_id), resume)
+
+
 # Everything a remote can do, for the desktop remote window and the paired
 # phone alike: one set, so the two can never drift apart.
 REMOTE_ACTIONS = ("volume", "toggle", "channel", "delay", "episode", "skip",
@@ -12772,6 +12858,28 @@ class PhoneHandler(BaseHTTPRequestHandler):
                 _PHONE_CONNS[self.connection] = device["id"]
         return device
 
+    def remote(self, action):
+        """The PC's remote, from the paired phone: the same actions as the
+        remote window (remote_do), and Play on PC. A press here is somebody
+        being there, as far as the sleep timer is concerned."""
+        if action != "play" and action not in REMOTE_ACTIONS:
+            return self.send_json({"error": "no such thing"}, 404)
+        try:
+            data = json.loads((self.read_raw(4096) or b"{}").decode("utf-8") or "{}")
+        except ValueError:
+            return self.send_json({"error": "that wasn't a remote request"}, 400)
+        if not isinstance(data, dict):
+            data = {}
+        seen_you()
+        try:
+            if action == "play":
+                play_on_pc(str(data.get("kind") or ""), data.get("tmdb"), data.get("season"),
+                           data.get("episode"), resume=data.get("resume", True) is not False)
+                return self.send_json(phone_remote_state())
+            return self.send_json(phone_remote_state(remote_do(action, data)))
+        except AppError as exc:
+            return self.send_json({"error": str(exc)})
+
     def send_stream(self, route):
         """/phone/stream/<ticket>, or /phone/stream/<ticket>/sub/<n>: what a
         ticket names, to whatever on the home network has it. The ticket is
@@ -12797,6 +12905,8 @@ class PhoneHandler(BaseHTTPRequestHandler):
             device = self.gate()
             if not device:
                 return
+            if route == "/phone/remote/state":
+                return self.send_json(phone_remote_state())
             if route == "/phone/hello":
                 return self.send_json({"ok": True, "pc": snapshot_device_name(),
                                        "device_id": sync_device_id(),
@@ -12852,6 +12962,8 @@ class PhoneHandler(BaseHTTPRequestHandler):
             device = self.gate()
             if not device:
                 return
+            if route.startswith("/phone/remote/"):
+                return self.remote(route[len("/phone/remote/"):])
             if route == "/phone/play":
                 try:
                     key = str(json.loads((self.read_raw(4096) or b"{}").decode("utf-8")).get("key") or "")
@@ -14211,41 +14323,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(pc_stream_play(data["stream"], bool(data.get("resume"))))
 
             if route == "/api/play":
-                path = require_media_file(
-                    LOCAL.path_for(data.get("type"), int(data["id"])))
-                kind = data.get("type")
-                item_id = int(data["id"])
-                # Asked for by name rather than assumed: pressing PLAY on a
-                # film's page means play it, and the one place that means
-                # "pick it up where I stopped" is a button that says so.
-                start = resume_position(kind, item_id) if data.get("resume") else 0
-                if PLATFORM == "android" and not start:
-                    # On the PC, mpv's own watch-later file picks PLAY up
-                    # where you stopped. The phone's mpv keeps none for us,
-                    # so the same start is handed over by hand.
-                    start = resume_position(kind, item_id)
-                    if not start:
-                        # Nothing on the row: perhaps it was watched before
-                        # it was here — streamed from the PC, or on another
-                        # device — which history knows by what it is.
-                        conn = db()
-                        try:
-                            ident = sync_identity(conn, kind, item_id)
-                        finally:
-                            conn.close()
-                        if ident:
-                            start = elsewhere_progress(kind, ident[0], ident[1], ident[2])["position"]
-                # An episode holds the window open so the next one can follow
-                # it. A film doesn't: when it's finished, it's finished.
-                # Held open for an episode (the run follows it) and for
-                # anything at all while the queue has something in it — see
-                # the note above the queue, on why only idle can be trusted.
-                proc = mpv_play(path, start=start,
-                                keep_open=(kind == "episode" or queue_count() > 0))
-                title = LOCAL.field(kind, item_id, "title")
-                LOCAL.set_field(kind, item_id, "last_played", now_stamp())
-                log_event(kind, item_id, title, "played")
-                note_now_playing(proc, kind, item_id, title)
+                play_local(data.get("type"), int(data["id"]), bool(data.get("resume")))
                 return self.send_json({"ok": True})
 
             if route == "/api/appearance":

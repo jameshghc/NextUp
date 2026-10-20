@@ -95,6 +95,76 @@ got = desk_post("/api/remote/volume", {"delta": 5})
 check("the desktop remote goes through the same actions", got["volume"] == before + 5, got.get("volume"))
 
 # The rest of the suite (tasks 2 and 3) appends below this line.
+
+# --- Task 2: the remote over the Wi-Fi ----------------------------------------------------
+PHONE = "fedcba9876543210"
+PORT = 8792
+n.phone_link_start(PORT, "127.0.0.1")
+token = n.phone_pair_direct(PHONE, "S21 Ultra")
+def call(method, path, body=None, tok=token):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request("http://127.0.0.1:%d%s" % (PORT, path), data=data, method=method)
+    if tok:
+        req.add_header("Authorization", "Bearer " + tok)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read() or b"{}")
+        except ValueError:
+            return e.code, {}
+
+PLAYED = []
+n.require_media_file = lambda path: path
+n.mpv_play = lambda path, start=0, keep_open=False: PLAYED.append((path, int(start or 0))) or Alive()
+n.note_now_playing = lambda proc, kind, item_id, title, **k: n.NOW_PLAYING.update(
+    type=kind, id=item_id, title=title, position=None, duration=None, channel=None, channel_id=None)
+
+check("no token, no remote", call("GET", "/phone/remote/state", tok=None)[0] == 401)
+st, state = call("GET", "/phone/remote/state")
+check("the state over the wire", st == 200 and "volume" in state and "position" in state, (st, list(state)[:6]))
+before = MPV["volume"]
+st, got = call("POST", "/phone/remote/volume", {"delta": 5})
+check("a control over the wire is the same action", st == 200 and got["volume"] == before + 5, (st, got.get("volume")))
+check("an unknown control is 404", call("POST", "/phone/remote/selfdestruct", {})[0] == 404)
+ALIVE[0] = False
+st, got = call("POST", "/phone/remote/volume", {"delta": 5})
+check("nothing playing: said, with the app's usual 200", st == 200 and got.get("error") == "Nothing is playing.", (st, got))
+ALIVE[0] = True
+n._LAST_SEEN[0] = time.time() - 4 * 3600
+call("POST", "/phone/remote/toggle", {"what": "pause"})
+check("a press on the phone counts as being there", n.afk_idle() < 5, round(n.afk_idle()))
+
+conn = n.db()
+mv = conn.execute("SELECT id, tmdb_id, path, title FROM movies WHERE tmdb_id<>'' AND path IS NOT NULL LIMIT 1").fetchone()
+show_id = conn.execute("INSERT INTO shows (name,title,tmdb_id) VALUES ('remote test show','Remote Test Show','990011')").lastrowid
+e1 = conn.execute("INSERT INTO episodes (path,show_id,season,episode,title) VALUES ('X:/rt/s1e1.mkv',?,1,1,'One')", (show_id,)).lastrowid
+e2 = conn.execute("INSERT INTO episodes (path,show_id,season,episode,title) VALUES ('X:/rt/s1e2.mkv',?,1,2,'Two')", (show_id,)).lastrowid
+conn.commit(); conn.close()
+n.LIB.loaded_at = 0; n.LOCAL.loaded_at = 0
+PLAYED.clear()
+st, got = call("POST", "/phone/remote/play", {"kind": "movie", "tmdb": mv["tmdb_id"]})
+check("Play on PC: a film", st == 200 and PLAYED and PLAYED[-1][0] == mv["path"], (st, got.get("error"), PLAYED[-1:]))
+st, got = call("POST", "/phone/remote/play", {"kind": "episode", "tmdb": "990011", "season": 1, "episode": 2})
+check("Play on PC: an episode", PLAYED[-1][0] == "X:/rt/s1e2.mkv", (got.get("error"), PLAYED[-1:]))
+conn = n.db(); conn.execute("UPDATE episodes SET playcount=1, last_played='2026-10-01 20:00:00' WHERE id=?", (e1,)); conn.commit(); conn.close()
+n.LIB.loaded_at = 0; n.LOCAL.loaded_at = 0
+call("POST", "/phone/remote/play", {"kind": "tvshow", "tmdb": "990011"})
+check("Play on PC: a show plays its next-up episode", PLAYED[-1][0] == "X:/rt/s1e2.mkv", PLAYED[-1:])
+conn = n.db(); conn.execute("UPDATE episodes SET playcount=1, last_played='2026-10-02 20:00:00' WHERE id=?", (e2,)); conn.commit(); conn.close()
+n.LIB.loaded_at = 0; n.LOCAL.loaded_at = 0
+st, got = call("POST", "/phone/remote/play", {"kind": "tvshow", "tmdb": "990011"})
+check("a show seen to the end starts again at the first episode", PLAYED[-1][0] == "X:/rt/s1e1.mkv",
+      (got.get("error"), PLAYED[-1:]))
+st, got = call("POST", "/phone/remote/play", {"kind": "movie", "tmdb": "1"})
+check("something this PC hasn't got is said", got.get("error") == "The PC doesn't have that any more.", got)
+
+n.NOW_PLAYING["art"] = "/art/abc123.jpg"
+st, state = call("GET", "/phone/remote/state")
+check("the art is something the phone can fetch", state.get("art") == "/phone/art/abc123.jpg", state.get("art"))
+codes = {r: call("POST", "/phone/remote/" + r, {})[0] for r in ("../api/config", "presets", "state")}
+check("only the listed remote routes answer", all(c == 404 for c in codes.values()), codes)
 desk.shutdown()
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
