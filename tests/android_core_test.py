@@ -348,7 +348,16 @@ check("Remote layout: buttons at least 48px", "#view-remote .iconbtn{" in page_s
       and "min-height:48px" in page_src[page_src.find("#view-remote .iconbtn{"):][:300])
 check("Remote layout: the still-watching card sits at the bottom, moving nothing", ".rmafk{position:fixed" in page_src)
 check("Remote layout: mute shows whether it's on", "$('#rm_mute').classList.toggle('on'" in page_src)
-check("Remote layout: STOP is dead when nothing plays", "[data-a=stop]" in page_src[page_src.find("function remoteRender("):][:6000])
+_tmpl = page_src[page_src.find("function remoteBuild("):][:4000]
+_trans = _tmpl[_tmpl.find('rmtransport'):][:700]
+check("Remote fits one screen: STOP sits in the main row (and so goes dead with it)", 'data-a="stop"' in _trans)
+check("Remote fits one screen: subtitles and audio share a row", "<label>Tracks</label>" in _tmpl
+      and "<label>Subtitles</label>" not in _tmpl and "<label>Audio</label>" not in _tmpl)
+check("Remote fits one screen: episode and skip share one row", 'id="rm_moves"' in _tmpl
+      and 'id="rm_eps"' not in _tmpl and 'id="rm_skip"' not in _tmpl)
+check("Remote fits one screen: the channels are one row that slides sideways",
+      ".rmchannels{" in page_src and "flex-wrap:nowrap" in page_src[page_src.find(".rmchannels{"):][:200]
+      and "overflow-x:auto" in page_src[page_src.find(".rmchannels{"):][:200])
 check("Remote layout: messages show under the main buttons, in the app's warning colour",
       page_src.find('id="rm_msg"') < page_src.find('class="rmgrid"') and ".rmmsg{" in page_src
       and "var(--rust)" in page_src[page_src.find(".rmmsg{"):][:120])

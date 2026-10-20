@@ -17213,11 +17213,11 @@ body.glass .watchtoggle.on{background-color:rgba(var(--accent-rgb),.22);border-c
 body.glass .iconbtn:disabled{opacity:.45}
 body.customround :is(.settings,.pick,.alt,.hubcard,.card,.coll,.dirblock,.profile,.ratecard,.channelcard,.toplist,.resumecard,.reccard,.sheetbody,.sheetpanel,.simcard,.askcard,.ctxmenu,.queuerail,.syncoffer,.fitcard,.nowfits,#playingbar,.gap,.notice,.tile,.kchip,.iconbtn,.play,.tab){border-radius:var(--r-user)!important}
 /* ---- the Remote (the phone controlling the PC) ---- */
-#view-remote{width:100%;box-sizing:border-box;flex:1 1 100%;padding:10px 2px 90px;display:flex;
-  flex-direction:column;gap:16px;max-width:560px;margin:0 auto}
+#view-remote{width:100%;box-sizing:border-box;flex:1 1 100%;padding:8px 2px 12px;display:flex;
+  flex-direction:column;gap:12px;max-width:560px;margin:0 auto}
 #view-remote.hidden{display:none}
 .rmnow{display:flex;align-items:center;gap:14px}
-.rmnow img{width:64px;aspect-ratio:2/3;object-fit:cover;border-radius:6px;box-shadow:0 8px 20px rgba(0,0,0,.5)}
+.rmnow img{width:46px;aspect-ratio:2/3;object-fit:cover;border-radius:5px;box-shadow:0 8px 20px rgba(0,0,0,.5)}
 .rmnow img.hidden{display:none}
 .rmtitle{font-family:var(--display);font-size:20px;line-height:1.2}
 .rmsub{font-family:var(--mono);font-size:12px;color:var(--muted);margin-top:3px}
@@ -17235,16 +17235,22 @@ body.customround :is(.settings,.pick,.alt,.hubcard,.card,.coll,.dirblock,.profil
 .rmrow{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .rmrow.hidden{display:none}
 .rmrow > span{font-family:var(--mono);font-size:14px;min-width:3.5em;text-align:center}
-.rmtransport{justify-content:center;gap:16px}
+.rmtransport{justify-content:center;gap:10px;flex-wrap:nowrap}
+.rmmoves{justify-content:center}
+.rmmoves .hidden{display:none}
 .rmtransport .play{font-size:22px;min-width:84px;padding:12px 0}
 .rmtransport .iconbtn{padding:12px 16px;font-size:15px;min-height:54px}
 .rmgrid{display:grid;grid-template-columns:auto minmax(0,1fr);gap:12px 14px;align-items:center}
-.rmgrid .rmrow{flex-wrap:nowrap}
+.rmgrid .rmrow{flex-wrap:nowrap;gap:8px}
+/* Never wider than the phone: a sideways scroll here is as bad as a long one. */
+#view-remote{overflow-x:hidden}
+.rmgrid .iconbtn{padding:8px 10px}
+#view-remote .iconbtn{white-space:nowrap}      /* a label on one line; never two */
 .rmgrid > label{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
 #view-remote .iconbtn{padding:10px 14px;color:var(--paper);border:1px solid rgba(255,255,255,.24);
   background:rgba(255,255,255,.06);min-height:48px;min-width:48px;font-size:13px}   /* obvious, and thumb-sized */
 #view-remote .iconbtn:disabled{opacity:.4}
-#view-remote [data-a=voldown],#view-remote [data-a=volup]{font-size:20px;min-width:56px}
+#view-remote [data-a=voldown],#view-remote [data-a=volup]{font-size:20px;min-width:52px}
 #view-remote .iconbtn.on{background:rgba(var(--accent-rgb),.22);border-color:rgba(var(--accent-rgb),.6);color:var(--marigold-2)}
 #view-remote .iconbtn.rmplain:disabled{opacity:1;border-color:transparent;background:none;color:var(--paper)}
 .rmlabel{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:-6px}
@@ -17252,14 +17258,16 @@ body.customround :is(.settings,.pick,.alt,.hubcard,.card,.coll,.dirblock,.profil
 .rmstop{justify-content:center}
 /* Two groups: what's on and the main buttons, then everything else. One
    column on a portrait phone; side by side in landscape. */
-.rmcol{display:flex;flex-direction:column;gap:16px;min-width:0}
+.rmcol{display:flex;flex-direction:column;gap:12px;min-width:0}
 .rmhint{display:none;font-size:14px;line-height:1.5;color:var(--muted)}
 /* Nothing playing, or the PC away: say what to do, not a wall of dead
    buttons. The channels stay — they're a way to start something. */
 #view-remote.rmidle .rmhint{display:block}
 #view-remote.rmidle :is(.rmseek,.rmgrid,.rmtransport,.rmstop){display:none}
-.rmchannels{display:flex;flex-wrap:wrap;gap:8px}
-.rmchannels .kchip{flex:0 0 auto;padding:8px 14px;min-height:44px;font-family:var(--mono);font-size:12px;letter-spacing:.04em}
+.rmchannels{display:flex;flex-wrap:nowrap;overflow-x:auto;gap:8px;scroll-snap-type:x proximity;
+  scrollbar-width:none;padding-bottom:2px}
+.rmchannels::-webkit-scrollbar{display:none}
+.rmchannels .kchip{flex:0 0 auto;padding:8px 14px;min-height:44px;scroll-snap-align:start;font-family:var(--mono);font-size:12px;letter-spacing:.04em}
 /* Pinned to the bottom, in thumb reach, so appearing moves nothing you
    were about to press. */
 .rmafk{position:fixed;left:10px;right:10px;bottom:calc(10px + env(safe-area-inset-bottom));z-index:70;
@@ -17283,7 +17291,11 @@ body.pcstripon .wrap{padding-bottom:calc(76px + env(safe-area-inset-bottom))}
     gap:10px 24px;align-items:start}
   #view-remote .rmnow img{display:none}
   #view-remote .rmtitle{font-size:17px}
-  #view-remote .rmcol{gap:10px}
+  #view-remote .rmcol{gap:8px}
+  #view-remote{padding-top:4px}
+  #view-remote .iconbtn{min-height:42px;padding:6px 12px}
+  .rmtransport .iconbtn,.rmtransport .play{min-height:46px}
+  .rmseek input{height:32px}
 }
 #pcstrip img{width:30px;aspect-ratio:2/3;object-fit:cover;border-radius:3px}
 #pcstrip .pstext{flex:1;min-width:0}
@@ -23134,6 +23146,9 @@ function remoteBuild(){
   if(remoteBuilt) return;
   remoteBuilt = true;
   const v = $('#view-remote');
+  /* One screen, never a scroll: STOP in the main row, the two track
+     buttons on one row, episode and skip on one row (only when they
+     apply), and the channels one row that slides sideways. */
   v.innerHTML = `
     <div class="rmafk hidden" id="rm_afk"></div>
     <div class="rmcol rmleft">
@@ -23147,21 +23162,23 @@ function remoteBuild(){
       <button class="iconbtn" data-a="back10" aria-label="Back 10 seconds">\u23EA\uFE0E 10</button>
       <button class="play" id="rm_pause" data-a="pause" aria-label="Play or pause">\u23EF\uFE0E</button>
       <button class="iconbtn" data-a="fwd30" aria-label="Forward 30 seconds">30 \u23E9\uFE0E</button>
+      <button class="iconbtn" data-a="stop" aria-label="Stop">\u25A0\uFE0E</button>
     </div>
     <div class="rmmsg" id="rm_msg"></div>
+    <div class="rmrow rmmoves" id="rm_moves">
+      <button class="iconbtn" id="rm_prevep" data-a="prevep">\u2039 EPISODE</button>
+      <button class="iconbtn" id="rm_nextep" data-a="nextep">EPISODE \u203A</button>
+      <button class="iconbtn" id="rm_skipb" data-a="skip">SKIP \u203A</button>
+    </div>
     </div>
     <div class="rmcol rmright">
     <div class="rmgrid">
-      <label>Volume</label><div class="rmrow"><button class="iconbtn" data-a="voldown" aria-label="Volume down">\u2212</button><span id="rm_vol">\u2013</span><button class="iconbtn" data-a="volup" aria-label="Volume up">+</button><button class="iconbtn" id="rm_mute" data-a="mute">MUTE</button></div>
-      <label>Audio delay</label><div class="rmrow"><button class="iconbtn" data-a="delaydown">\u2212100</button><span id="rm_delay">0 ms</span><button class="iconbtn" data-a="delayup">+100</button></div>
-      <label>Subtitles</label><div class="rmrow"><button class="iconbtn" id="rm_sub_t" data-a="subs">OFF</button><button class="iconbtn" data-a="findsubs">FIND</button></div>
-      <label>Audio</label><div class="rmrow"><button class="iconbtn" id="rm_audio" data-a="audio">\u2013</button></div>
+      <label>Vol</label><div class="rmrow"><button class="iconbtn" data-a="voldown" aria-label="Volume down">\u2212</button><span id="rm_vol">\u2013</span><button class="iconbtn" data-a="volup" aria-label="Volume up">+</button><button class="iconbtn" id="rm_mute" data-a="mute">MUTE</button></div>
+      <label>Delay</label><div class="rmrow"><button class="iconbtn" data-a="delaydown">\u2212100</button><span id="rm_delay">0 ms</span><button class="iconbtn" data-a="delayup">+100</button></div>
+      <label>Tracks</label><div class="rmrow"><button class="iconbtn" id="rm_sub_t" data-a="subs">SUBS</button><button class="iconbtn" data-a="findsubs">FIND</button><button class="iconbtn" id="rm_audio" data-a="audio" aria-label="Audio track">♪</button></div>
     </div>
-    <div class="rmrow" id="rm_eps"><button class="iconbtn" data-a="prevep">\u2039 EPISODE</button><button class="iconbtn" data-a="nextep">EPISODE \u203A</button></div>
-    <div class="rmrow" id="rm_skip"><button class="iconbtn" data-a="skip">SKIP \u203A</button></div>
     <div class="rmlabel" id="rm_chlabel">Channels</div>
     <div class="rmchannels" id="rm_presets"></div>
-    <div class="rmrow rmstop"><button class="iconbtn" data-a="stop">STOP</button></div>
     </div>`;
   const acts = {
     back10: ['seek', {by: -10}], fwd30: ['seek', {by: 30}], pause: ['toggle', {what: 'pause'}],
@@ -23207,16 +23224,19 @@ function remoteRender(st){
   $('#rm_mute').setAttribute('aria-pressed', String(!!(alive && st.muted)));
   seek.style.setProperty('--p', (dur ? Math.min(100, 100 * (remoteSeeking ? +seek.value : pos) / dur) : 0) + '%');
   $('#rm_delay').textContent = alive ? st.audio_delay + ' ms' : '0 ms';
-  $('#rm_sub_t').textContent = (alive && st.sub_on ? (st.sub_lang || 'ON') : 'OFF') + ' \u203A';
+  $('#rm_sub_t').textContent = 'SUBS ' + (alive && st.sub_on ? (st.sub_lang || 'ON') : 'OFF') + ' \u203A';
   $('#rm_sub_t').disabled = !alive || !st.sub_count;
   const oneAudio = (st && st.audio_count || 0) < 2;
-  $('#rm_audio').textContent = (alive ? (st.audio_lang || (st.audio_count ? 'TRACK' : '\u2013')) : '\u2013')
+  $('#rm_audio').textContent = '♪ ' + (alive ? (st.audio_lang || (st.audio_count ? 'TRACK' : '\u2013')) : '\u2013')
     + (alive && !oneAudio ? ' \u203A' : '');
   $('#rm_audio').disabled = !alive || oneAudio;
   /* One track is a fact, not a broken button. */
   $('#rm_audio').classList.toggle('rmplain', !!(alive && oneAudio));
-  $('#rm_eps').classList.toggle('hidden', !(alive && st.is_episode));
-  $('#rm_skip').classList.toggle('hidden', !(alive && (st.channel_id || st.queue_count)));
+  const eps = !!(alive && st.is_episode), skip = !!(alive && (st.channel_id || st.queue_count));
+  $('#rm_prevep').classList.toggle('hidden', !eps);
+  $('#rm_nextep').classList.toggle('hidden', !eps);
+  $('#rm_skipb').classList.toggle('hidden', !skip);
+  $('#rm_moves').classList.toggle('hidden', !(eps || skip));
   const presets = $('#rm_presets');
   presets.innerHTML = '';
   $('#rm_chlabel').classList.toggle('hidden', !!away);
@@ -23243,7 +23263,7 @@ function remoteRender(st){
     const row = el('div', 'rmrow'); row.append(yes, no); afk.append(row);
   }
   if(!(alive && st.afk)) delete afk.dataset.up;
-  $('#view-remote').querySelectorAll('.rmtransport button,.rmgrid button,.rmseek input,#rm_eps button,#rm_skip button,[data-a=stop]')
+  $('#view-remote').querySelectorAll('.rmtransport button,.rmgrid button,.rmseek input,#rm_moves button')
     .forEach(b => { if(b.id !== 'rm_sub_t' && b.id !== 'rm_audio') b.disabled = !alive; });
 }
 
