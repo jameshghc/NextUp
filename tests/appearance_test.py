@@ -22,7 +22,7 @@ check("defaults on the PC: Glass, marigold, middling strength",
       d["theme"] == "glass" and d["accent"] == "marigold" and 0 <= d["glass"] <= 100
       and 0 <= d["art"] <= 100 and d["round"] is None, d)
 n.PLATFORM = "android"
-check("on the phone, Classic unless chosen (blur costs battery)", n.appearance_settings()["theme"] == "classic")
+check("on the phone too, Glass unless chosen (the user's call, 2026-10-20)", n.appearance_settings()["theme"] == "glass")
 n.PLATFORM = "windows"
 n.CONFIG["appearance"] = {"theme": "evil", "accent": "#ff0000", "glass": 500, "art": "abc", "round": -40}
 d = n.appearance_settings()

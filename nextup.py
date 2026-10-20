@@ -4819,12 +4819,10 @@ APPEARANCE_DEFAULTS = {"theme": "glass", "accent": "marigold", "glass": 60, "art
 
 
 def appearance_settings():
-    """The look's settings, every one checked. Glass is the PC's default;
-    the phone starts on Classic, since blurring behind every panel costs a
-    phone battery for something it shows on a small screen."""
+    """The look's settings, every one checked. Glass is the default on the
+    PC and the phone alike (the user's call, 2026-10-20); Classic is a tap
+    away in Settings -> Appearance."""
     out = dict(APPEARANCE_DEFAULTS)
-    if PLATFORM == "android":
-        out["theme"] = "classic"
     saved = CONFIG.get("appearance")
     if not isinstance(saved, dict):
         return out
@@ -17215,7 +17213,8 @@ body.glass .watchtoggle.on{background-color:rgba(var(--accent-rgb),.22);border-c
 body.glass .iconbtn:disabled{opacity:.45}
 body.customround :is(.settings,.pick,.alt,.hubcard,.card,.coll,.dirblock,.profile,.ratecard,.channelcard,.toplist,.resumecard,.reccard,.sheetbody,.sheetpanel,.simcard,.askcard,.ctxmenu,.queuerail,.syncoffer,.fitcard,.nowfits,#playingbar,.gap,.notice,.tile,.kchip,.iconbtn,.play,.tab){border-radius:var(--r-user)!important}
 /* ---- the Remote (the phone controlling the PC) ---- */
-#view-remote{padding:10px 2px 90px;display:flex;flex-direction:column;gap:16px;max-width:560px;margin:0 auto}
+#view-remote{width:100%;box-sizing:border-box;flex:1 1 100%;padding:10px 2px 90px;display:flex;
+  flex-direction:column;gap:16px;max-width:560px;margin:0 auto}
 #view-remote.hidden{display:none}
 .rmnow{display:flex;align-items:center;gap:14px}
 .rmnow img{width:64px;aspect-ratio:2/3;object-fit:cover;border-radius:6px;box-shadow:0 8px 20px rgba(0,0,0,.5)}
@@ -17223,35 +17222,87 @@ body.customround :is(.settings,.pick,.alt,.hubcard,.card,.coll,.dirblock,.profil
 .rmtitle{font-family:var(--display);font-size:20px;line-height:1.2}
 .rmsub{font-family:var(--mono);font-size:12px;color:var(--muted);margin-top:3px}
 .rmseek{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:12px;color:var(--muted)}
-.rmseek input{flex:1}
+/* A thin track inside a thumb-sized hit area: 3px tall was the hardest
+   thing on the screen to catch. The part played is filled (--p). */
+.rmseek input{height:40px;margin:0;flex:1;background:transparent}
+.rmseek input::-webkit-slider-runnable-track{height:6px;border-radius:3px;
+  background:linear-gradient(90deg,var(--marigold) var(--p,0%),var(--ink-3) 0)}
+.rmseek input::-webkit-slider-thumb{width:24px;height:24px;margin-top:-9px}
+.rmseek input::-moz-range-track{height:6px;border-radius:3px;background:var(--ink-3)}
+.rmseek input::-moz-range-progress{height:6px;border-radius:3px;background:var(--marigold)}
+.rmseek input::-moz-range-thumb{width:24px;height:24px}
+.rmseek input:disabled{opacity:.35}
 .rmrow{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .rmrow.hidden{display:none}
-.rmrow > span{font-family:var(--mono);font-size:13px;min-width:64px;text-align:center}
+.rmrow > span{font-family:var(--mono);font-size:14px;min-width:3.5em;text-align:center}
 .rmtransport{justify-content:center;gap:16px}
 .rmtransport .play{font-size:22px;min-width:84px;padding:12px 0}
-.rmtransport .iconbtn{padding:12px 16px;font-size:14px}
-.rmgrid{display:grid;grid-template-columns:96px minmax(0,1fr);gap:12px 12px;align-items:center}
+.rmtransport .iconbtn{padding:12px 16px;font-size:15px;min-height:54px}
+.rmgrid{display:grid;grid-template-columns:auto minmax(0,1fr);gap:12px 14px;align-items:center}
+.rmgrid .rmrow{flex-wrap:nowrap}
 .rmgrid > label{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
 #view-remote .iconbtn{padding:10px 14px;color:var(--paper);border:1px solid rgba(255,255,255,.24);
-  background:rgba(255,255,255,.06)}       /* obvious, in either style: this screen is all buttons */
+  background:rgba(255,255,255,.06);min-height:48px;min-width:48px;font-size:13px}   /* obvious, and thumb-sized */
 #view-remote .iconbtn:disabled{opacity:.4}
+#view-remote [data-a=voldown],#view-remote [data-a=volup]{font-size:20px;min-width:56px}
+#view-remote .iconbtn.on{background:rgba(var(--accent-rgb),.22);border-color:rgba(var(--accent-rgb),.6);color:var(--marigold-2)}
+#view-remote .iconbtn.rmplain:disabled{opacity:1;border-color:transparent;background:none;color:var(--paper)}
+.rmlabel{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:-6px}
+.rmlabel.hidden{display:none}
+.rmstop{justify-content:center}
+/* Two groups: what's on and the main buttons, then everything else. One
+   column on a portrait phone; side by side in landscape. */
+.rmcol{display:flex;flex-direction:column;gap:16px;min-width:0}
+.rmhint{display:none;font-size:14px;line-height:1.5;color:var(--muted)}
+/* Nothing playing, or the PC away: say what to do, not a wall of dead
+   buttons. The channels stay — they're a way to start something. */
+#view-remote.rmidle .rmhint{display:block}
+#view-remote.rmidle :is(.rmseek,.rmgrid,.rmtransport,.rmstop){display:none}
 .rmchannels{display:flex;flex-wrap:wrap;gap:8px}
-.rmchannels .kchip{flex:0 0 auto;padding:8px 14px}
-.rmafk{background:rgba(var(--accent-rgb),.12);border:1px solid rgba(var(--accent-rgb),.45);border-radius:12px;padding:14px;
+.rmchannels .kchip{flex:0 0 auto;padding:8px 14px;min-height:44px;font-family:var(--mono);font-size:12px;letter-spacing:.04em}
+/* Pinned to the bottom, in thumb reach, so appearing moves nothing you
+   were about to press. */
+.rmafk{position:fixed;left:10px;right:10px;bottom:calc(10px + env(safe-area-inset-bottom));z-index:70;
+  background:rgba(16,16,20,.97);box-shadow:var(--shadow-panel);   /* solid: it sits over buttons */
+  backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+  border:1px solid rgba(var(--accent-rgb),.55);border-radius:var(--r-card);padding:14px;
   display:flex;flex-direction:column;gap:10px}
+.rmafk .rmbig{min-height:48px;font-size:14px;flex:1}
 .rmafk.hidden{display:none}
-.rmmsg{font-size:13px;color:#ff8f7a;min-height:1.2em}
-#pcstrip{position:fixed;left:10px;right:10px;bottom:10px;z-index:60;display:flex;align-items:center;gap:10px;
+.rmmsg{font-size:13px;color:var(--rust);min-height:1.2em;text-align:center}
+#pcstrip{position:fixed;left:10px;right:10px;bottom:calc(10px + env(safe-area-inset-bottom));z-index:60;display:flex;align-items:center;gap:10px;
   padding:8px 10px;border-radius:12px;background:rgba(14,14,18,.92);border:1px solid rgba(255,255,255,.12);
   box-shadow:0 10px 30px rgba(0,0,0,.5);cursor:pointer}
 #pcstrip.hidden{display:none}
 /* Room under everything for the strip, so it never sits on the last row. */
-body.pcstripon .wrap{padding-bottom:76px}
+body.pcstripon .wrap{padding-bottom:calc(76px + env(safe-area-inset-bottom))}
+/* Landscape: two columns — what's on and the main buttons on the left, the
+   rest on the right — so the controls fit without a scroll. */
+@media (orientation:landscape) and (max-height:500px){
+  #view-remote{max-width:none;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+    gap:10px 24px;align-items:start}
+  #view-remote .rmnow img{display:none}
+  #view-remote .rmtitle{font-size:17px}
+  #view-remote .rmcol{gap:10px}
+}
 #pcstrip img{width:30px;aspect-ratio:2/3;object-fit:cover;border-radius:3px}
 #pcstrip .pstext{flex:1;min-width:0}
 #pcstrip .pstext b{display:block;font-family:var(--display);font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #pcstrip .pstext small{font-family:var(--mono);font-size:11px;color:var(--muted)}
+#pcstrip .iconbtn{min-width:48px;min-height:44px;font-size:16px;color:var(--paper);
+  border:1px solid rgba(255,255,255,.24);background:rgba(255,255,255,.08)}
+body.glass #pcstrip{backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
 .tab.hidden{display:none}
+/* The Remote's tab: the phone's only. Dim while the PC isn't on the Wi-Fi,
+   and lit in the accent, with a soft glow, while it is. */
+body:not(.android) #remotetab{display:none}
+.remoteicon{opacity:.38;transition:opacity .3s ease,color .3s ease,filter .3s ease}
+.remoteicon.live{opacity:1;color:var(--marigold);filter:drop-shadow(0 0 6px rgba(var(--accent-rgb),.75))}
+/* Two pulses as it lights, then a steady glow: an endless animation would
+   keep the phone redrawing for as long as the app is open. */
+.remoteicon.live svg{animation:remoteglow 1.6s ease-in-out 2}
+@keyframes remoteglow{0%,100%{filter:drop-shadow(0 0 2px rgba(var(--accent-rgb),.5))}
+  50%{filter:drop-shadow(0 0 7px rgba(var(--accent-rgb),.95))}}
 /* The Appearance tab's own controls. */
 .apgrid{display:grid;grid-template-columns:150px minmax(0,1fr);gap:16px 18px;align-items:center;margin-top:14px}
 .apgrid > label{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
@@ -17339,9 +17390,15 @@ body.pcstripon .wrap{padding-bottom:76px}
     <button class="tab" role="tab" aria-selected="true" data-view="library" title="view your collection">Library</button>
     <button class="tab" role="tab" aria-selected="false" data-view="rate" title="Rate your collection">Rate</button>
     <button class="tab" role="tab" aria-selected="false" data-view="channels" title="What's on right now.">Channels</button>
-    <!-- The phone only, and only while the PC is on the Wi-Fi (lookForPC). -->
-    <button class="tab hidden" role="tab" aria-selected="false" data-view="remote" id="remotetab"
-            title="Control what's playing on the PC">Remote</button>
+    <!-- The phone only. Always there; lit while the PC answers on the Wi-Fi
+         (lookForPC), dim while it doesn't. -->
+    <button class="tab icon remoteicon" role="tab" aria-selected="false" data-view="remote" id="remotetab"
+            title="Remote: control what's playing on the PC" aria-label="Remote">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="7" y="2.5" width="10" height="19" rx="3"/><circle cx="12" cy="7.5" r="1.8"/>
+        <path d="M10 12h4M10 15h4M10 18h4"/></svg>
+    </button>
     <!-- The one tab that isn't somewhere you browse. It's a thing you go and
          adjust, so it wears the gear everything else uses for that and gives
          its width back to the tabs that name places. The label lives in
@@ -17604,7 +17661,7 @@ body.pcstripon .wrap{padding-bottom:76px}
 
 <!-- ================= CHANNELS ================= -->
 <div id="view-remote" class="hidden"></div>
-<div id="pcstrip" class="hidden"></div>
+<div id="pcstrip" class="hidden" role="button" tabindex="0" aria-label="Now playing on the PC: open the Remote"></div>
 <div id="view-channels" class="hidden">
   <div class="chtop">
     <button class="iconbtn" id="shufflechannels" title="Redeal every channel: a new running order for each, and each dropped somewhere new in it — with a good few landing at the start of something, so there's always a way in. For when there's nothing on you fancy, or when you've just added a pile of files and want them in the mix.">SHUFFLE ALL</button>
@@ -17912,7 +17969,14 @@ function switchTo(view){
   document.body.classList.toggle('onnow', view === 'now');
   document.querySelectorAll('.tab').forEach(x => x.setAttribute('aria-selected', x.dataset.view===view));
   ['now','library','rate','channels','settings','remote'].forEach(v => $('#view-'+v).classList.toggle('hidden', v!==view));
-  remotePoll(view === 'remote');
+  remotePoll(view === 'remote' && pcLinkUp);
+  if(view === 'remote' && !pcLinkUp){
+    /* Tapped while the PC isn't answering: say so, and look once — not a
+       poll that would call out across the network every second. */
+    remoteBuild();
+    remoteRender({error: PC_AWAY_COPY});
+    lookForPC();
+  }
   stripShow();
   $('#libnav').classList.toggle('offview', view!=='library');
   $('#libplaces').classList.toggle('offview', view!=='library');
@@ -23030,7 +23094,7 @@ function pcGone(){
   pcLinkUp = false;
   remotePoll(false);
   stripPoll(false);
-  $('#remotetab').classList.add('hidden');
+  $('#remotetab').classList.remove('live');
   const strip = $('#pcstrip');
   if(strip) strip.dataset.playing = '';
   stripShow();
@@ -23072,27 +23136,33 @@ function remoteBuild(){
   const v = $('#view-remote');
   v.innerHTML = `
     <div class="rmafk hidden" id="rm_afk"></div>
+    <div class="rmcol rmleft">
     <div class="rmnow">
       <img id="rm_art" alt="">
       <div><div class="rmtitle" id="rm_title"></div><div class="rmsub" id="rm_sub"></div></div>
     </div>
-    <div class="rmseek"><span id="rm_pos">0:00</span><input type="range" id="rm_seek" min="0" max="1" step="1" value="0"><span id="rm_left">0:00</span></div>
+    <div class="rmhint" id="rm_hint">Pick something in Library and choose \u25B6\uFE0E ON PC, or start a channel below.</div>
+    <div class="rmseek"><span id="rm_pos">0:00</span><input type="range" id="rm_seek" min="0" max="1" step="1" value="0" aria-label="Position"><span id="rm_left">0:00</span></div>
     <div class="rmrow rmtransport">
-      <button class="iconbtn" data-a="back10">\u23EA 10</button>
-      <button class="play" id="rm_pause" data-a="pause">\u23EF</button>
-      <button class="iconbtn" data-a="fwd30">30 \u23E9</button>
+      <button class="iconbtn" data-a="back10" aria-label="Back 10 seconds">\u23EA\uFE0E 10</button>
+      <button class="play" id="rm_pause" data-a="pause" aria-label="Play or pause">\u23EF\uFE0E</button>
+      <button class="iconbtn" data-a="fwd30" aria-label="Forward 30 seconds">30 \u23E9\uFE0E</button>
     </div>
+    <div class="rmmsg" id="rm_msg"></div>
+    </div>
+    <div class="rmcol rmright">
     <div class="rmgrid">
-      <label>Volume</label><div class="rmrow"><button class="iconbtn" data-a="voldown">\u2212</button><span id="rm_vol">\u2013</span><button class="iconbtn" data-a="volup">+</button><button class="iconbtn" id="rm_mute" data-a="mute">MUTE</button></div>
+      <label>Volume</label><div class="rmrow"><button class="iconbtn" data-a="voldown" aria-label="Volume down">\u2212</button><span id="rm_vol">\u2013</span><button class="iconbtn" data-a="volup" aria-label="Volume up">+</button><button class="iconbtn" id="rm_mute" data-a="mute">MUTE</button></div>
       <label>Audio delay</label><div class="rmrow"><button class="iconbtn" data-a="delaydown">\u2212100</button><span id="rm_delay">0 ms</span><button class="iconbtn" data-a="delayup">+100</button></div>
       <label>Subtitles</label><div class="rmrow"><button class="iconbtn" id="rm_sub_t" data-a="subs">OFF</button><button class="iconbtn" data-a="findsubs">FIND</button></div>
       <label>Audio</label><div class="rmrow"><button class="iconbtn" id="rm_audio" data-a="audio">\u2013</button></div>
     </div>
     <div class="rmrow" id="rm_eps"><button class="iconbtn" data-a="prevep">\u2039 EPISODE</button><button class="iconbtn" data-a="nextep">EPISODE \u203A</button></div>
     <div class="rmrow" id="rm_skip"><button class="iconbtn" data-a="skip">SKIP \u203A</button></div>
+    <div class="rmlabel" id="rm_chlabel">Channels</div>
     <div class="rmchannels" id="rm_presets"></div>
-    <div class="rmrow"><button class="iconbtn" data-a="stop">STOP</button></div>
-    <div class="rmmsg" id="rm_msg"></div>`;
+    <div class="rmrow rmstop"><button class="iconbtn" data-a="stop">STOP</button></div>
+    </div>`;
   const acts = {
     back10: ['seek', {by: -10}], fwd30: ['seek', {by: 30}], pause: ['toggle', {what: 'pause'}],
     voldown: ['volume', {delta: -5}], volup: ['volume', {delta: 5}], mute: ['toggle', {what: 'mute'}],
@@ -23129,17 +23199,27 @@ function remoteRender(st){
   if(!remoteSeeking) seek.value = Math.round(pos);
   $('#rm_pos').textContent = clock(remoteSeeking ? +seek.value : pos);
   $('#rm_left').textContent = dur ? '\u2212' + clock(dur - pos) : '';
-  $('#rm_pause').textContent = alive && st.paused ? '\u25B6' : '\u23F8';
-  $('#rm_vol').textContent = alive ? st.volume + (st.muted ? ' (muted)' : '') : '\u2013';
+  $('#rm_pause').textContent = alive && st.paused ? '\u25B6\uFE0E' : '\u23F8\uFE0E';
+  $('#rm_vol').textContent = alive ? st.volume : '\u2013';
+  /* Mute shows on its own button, so the number never changes width and
+     the row never wraps under your thumb. */
+  $('#rm_mute').classList.toggle('on', !!(alive && st.muted));
+  $('#rm_mute').setAttribute('aria-pressed', String(!!(alive && st.muted)));
+  seek.style.setProperty('--p', (dur ? Math.min(100, 100 * (remoteSeeking ? +seek.value : pos) / dur) : 0) + '%');
   $('#rm_delay').textContent = alive ? st.audio_delay + ' ms' : '0 ms';
-  $('#rm_sub_t').textContent = alive && st.sub_on ? (st.sub_lang || 'ON') : 'OFF';
+  $('#rm_sub_t').textContent = (alive && st.sub_on ? (st.sub_lang || 'ON') : 'OFF') + ' \u203A';
   $('#rm_sub_t').disabled = !alive || !st.sub_count;
-  $('#rm_audio').textContent = alive ? (st.audio_lang || (st.audio_count ? 'TRACK' : '\u2013')) : '\u2013';
-  $('#rm_audio').disabled = !alive || (st.audio_count || 0) < 2;
+  const oneAudio = (st && st.audio_count || 0) < 2;
+  $('#rm_audio').textContent = (alive ? (st.audio_lang || (st.audio_count ? 'TRACK' : '\u2013')) : '\u2013')
+    + (alive && !oneAudio ? ' \u203A' : '');
+  $('#rm_audio').disabled = !alive || oneAudio;
+  /* One track is a fact, not a broken button. */
+  $('#rm_audio').classList.toggle('rmplain', !!(alive && oneAudio));
   $('#rm_eps').classList.toggle('hidden', !(alive && st.is_episode));
   $('#rm_skip').classList.toggle('hidden', !(alive && (st.channel_id || st.queue_count)));
   const presets = $('#rm_presets');
   presets.innerHTML = '';
+  $('#rm_chlabel').classList.toggle('hidden', !!away);
   if(!away){
     const names = Object.fromEntries((st.channels || []).map(c => [c.id, c.name]));
     (st.presets || []).forEach(id => {
@@ -23157,12 +23237,13 @@ function remoteRender(st){
     afk.innerHTML = '';
     afk.append(el('b', null, 'Are you still watching?'));
     const yes = el('button', 'play', 'STILL HERE'), no = el('button', 'iconbtn', 'THAT\u2019S ENOUGH');
+    yes.classList.add('rmbig'); no.classList.add('rmbig');
     yes.onclick = () => { delete afk.dataset.up; remoteSend('afk', {still: true}); };
     no.onclick = () => { delete afk.dataset.up; remoteSend('afk', {still: false}); };
     const row = el('div', 'rmrow'); row.append(yes, no); afk.append(row);
   }
   if(!(alive && st.afk)) delete afk.dataset.up;
-  $('#view-remote').querySelectorAll('.rmtransport button,.rmgrid button,.rmseek input,#rm_eps button,#rm_skip button')
+  $('#view-remote').querySelectorAll('.rmtransport button,.rmgrid button,.rmseek input,#rm_eps button,#rm_skip button,[data-a=stop]')
     .forEach(b => { if(b.id !== 'rm_sub_t' && b.id !== 'rm_audio') b.disabled = !alive; });
 }
 
@@ -23196,7 +23277,8 @@ function stripRender(st){
     t.append(el('b', null, esc(st.title)));
     t.append(el('small', null, 'On the PC' + (st.sub ? ' \u00B7 ' + esc(st.sub) : '')));
     strip.append(t);
-    const pp = el('button', 'iconbtn', st.paused ? '\u25B6' : '\u23F8');
+    const pp = el('button', 'iconbtn', st.paused ? '\u25B6\uFE0E' : '\u23F8\uFE0E');
+    pp.setAttribute('aria-label', 'Play or pause on the PC');
     pp.onclick = (e) => { e.stopPropagation(); remoteSend('toggle', {what: 'pause'}); };
     strip.append(pp);
     strip.onclick = () => switchTo('remote');
@@ -23228,7 +23310,8 @@ function lookForPC(){
       if(s && s.pc_link && s.pc_link.checking && ++looks < 6){ setTimeout(look, 2000); return; }
       const up = !!(s && s.pc_link && s.pc_link.up);
       if(up !== pcLinkUp){ pcLinkUp = up; loadLibrary(true); }
-      $('#remotetab').classList.toggle('hidden', !pcLinkUp);
+      $('#remotetab').classList.toggle('live', !!pcLinkUp);
+      if(currentView === 'remote') remotePoll(!!pcLinkUp);
       stripPoll(pcLinkUp && document.visibilityState === 'visible');
     };
     setTimeout(look, 4000);
@@ -23237,7 +23320,7 @@ function lookForPC(){
 document.addEventListener('visibilitychange', () => {
   if(document.visibilityState === 'visible'){
     lookForPC();
-    remotePoll(currentView === 'remote');
+    remotePoll(currentView === 'remote' && pcLinkUp);
   } else {
     /* In the background nothing asks the PC anything. */
     remotePoll(false);

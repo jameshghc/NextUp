@@ -309,13 +309,19 @@ check("Wi-Fi: why a stream didn't start is on screen, not in a tooltip",
       and "go.title = r.error" not in page_src)
 # The phone as a remote for the PC (v0.2.0).
 _rp = page_src[page_src.find("function remoteRender("):][:6000]
-check("Remote: a tab of its own, hidden unless the PC is on the Wi-Fi",
-      'data-view="remote"' in page_src and 'id="remotetab"' in page_src and 'id="view-remote"' in page_src
-      and "$('#remotetab').classList.toggle('hidden', !pcLinkUp)" in page_src)
+_tabtag = page_src[page_src.find('id="remotetab"') - 200:][:600]
+check("Remote: an icon tab, always there, that lights up while the PC is on the Wi-Fi",
+      'data-view="remote"' in _tabtag and "remoteicon" in _tabtag and "tab hidden" not in _tabtag
+      and "<svg" in _tabtag and 'id="view-remote"' in page_src
+      and "$('#remotetab').classList.toggle('live', !!pcLinkUp)" in page_src
+      and ".remoteicon.live{" in page_src
+      and "infinite" not in page_src[page_src.find(".remoteicon{"):][:700])
+check("Remote: tapping it while the PC is away says so and looks again, rather than polling",
+      "remotePoll(view === 'remote' && pcLinkUp)" in page_src)
 check("Remote: asks once a second only while showing, and stops when hidden",
       "function remotePoll(" in page_src and "clearInterval(remoteTimer)" in page_src
       and "remotePoll(false)" in page_src[page_src.find("'visibilitychange'"):][:2500]
-      and "remotePoll(view === 'remote')" in page_src)
+      and "remotePoll(view === 'remote' && pcLinkUp)" in page_src)
 _rb = page_src[page_src.find("function remoteBuild("):][:5000]
 check("Remote: the bar seeks when let go, not while dragging", "seek.onchange" in _rb and "seek.oninput" not in _rb)
 check("Remote: the sleep timer's question can be answered there", "STILL HERE" in _rp and "THAT\\u2019S ENOUGH" in _rp
@@ -332,6 +338,25 @@ check("Remote: ON PC brings the Remote to the front, closing what's over it",
       "closePeeks()" in _pop and ".sheet" in _pop)
 check("Remote: the strip doesn't cover the last row", "body.pcstripon" in page_src
       and "classList.toggle('pcstripon'" in page_src)
+# The layout review of the Remote (2026-10-20): measured problems, each pinned.
+check("Remote layout: the seek bar has a thumb-sized hit area", ".rmseek input{height:40px" in page_src)
+check("Remote layout: full width, so it doesn't shift sideways as things change",
+      "#view-remote{width:100%" in page_src)
+check("Remote layout: the volume row never wraps (mute shown on its button, not in the number)",
+      ".rmgrid .rmrow{flex-wrap:nowrap}" in page_src and "(muted)" not in page_src[page_src.find("function remoteRender("):][:5000])
+check("Remote layout: buttons at least 48px", "#view-remote .iconbtn{" in page_src
+      and "min-height:48px" in page_src[page_src.find("#view-remote .iconbtn{"):][:300])
+check("Remote layout: the still-watching card sits at the bottom, moving nothing", ".rmafk{position:fixed" in page_src)
+check("Remote layout: mute shows whether it's on", "$('#rm_mute').classList.toggle('on'" in page_src)
+check("Remote layout: STOP is dead when nothing plays", "[data-a=stop]" in page_src[page_src.find("function remoteRender("):][:6000])
+check("Remote layout: messages show under the main buttons, in the app's warning colour",
+      page_src.find('id="rm_msg"') < page_src.find('class="rmgrid"') and ".rmmsg{" in page_src
+      and "var(--rust)" in page_src[page_src.find(".rmmsg{"):][:120])
+check("Remote layout: landscape gets two columns", "#view-remote{max-width:none;display:grid" in page_src)
+check("Remote layout: the symbols ask for their plain form, not emoji", "\\u23EF\\uFE0E" in page_src
+      or "\u23ef\ufe0e" in page_src.lower())
+check("Remote layout: idle screens say what to do instead of showing dead controls",
+      'id="rm_hint"' in page_src and "#view-remote.rmidle" in page_src)
 check("a details panel can be swiped down to close", "function sheetSwipe(" in page_src
       and "sheetSwipe(back" in page_src)
 
