@@ -63,6 +63,25 @@ builds on two things that exist:
    fields are tested in `wifi_stream_test` style against a loopback link.
    Then a real try on the S24.
 
+## The user's notes for next time (2026-10-20): phone + PC as one
+
+1. **When the phone and PC are connected, the phone works from the main
+   library.** The phone's library "just integrates": Now picks, Channels
+   and so on draw on the PC's full library, not only what's on the phone.
+   - Today the phone's Now and Channels use only local files (plus greyed
+     catalogue rows).
+   - To design: what the phone draws from while the PC answers (the
+     snapshot + streamable, or live from the PC); how Now's picks and
+     Channels choose between playing here (stream) and on the PC; what
+     happens when the link drops mid-session.
+2. **Starting something on the PC should be easy and obvious.** Instead of
+   a separate "▶ ON PC" button, PLAY asks "Where? This phone / The PC".
+   - While the PC isn't reachable, PLAY just plays here: no question.
+   - Applies everywhere PLAY appears: tile peek, details sheet, episode
+     rows, the Now pick, Continue cards, Channels.
+   - Maybe remember the last answer per session, or add a "PC by default"
+     setting. Ask the user.
+
 ## 0.2 release: where it stands (2026-10-20, paused for usage)
 
 Done and committed on `android-shell`:
