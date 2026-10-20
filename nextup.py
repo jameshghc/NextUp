@@ -1118,7 +1118,7 @@ def build_tonight(kind, mood, max_mins, genre, count=3, exclude=None,
                 why = "a favourite, so any episode will do — %s tonight" % code
             elif progress and progress["state"] == "resume":
                 score += 2.0
-                why = "you're %s%% through %s — pick it back up" % (progress["percent"], code)
+                why = resume_phrase(progress["percent"], code)
             elif progress:
                 score += 1.5
                 why = "%s is where you got to" % code
@@ -1204,6 +1204,14 @@ RESUME_FLOOR_SECONDS = 300
 # Past this it isn't unfinished, it's finished — you stopped over the
 # credits, or two minutes from the end and never went back.
 RESUME_CEILING_PERCENT = 95
+
+
+def resume_phrase(percent, code):
+    """Where you got to in an episode, said as a person would: "0% through"
+    is what a few minutes in rounds down to, and reads like a mistake."""
+    if not percent or percent < 1:
+        return "you'd only just started %s — pick it back up" % code
+    return "you're %s%% through %s — pick it back up" % (percent, code)
 
 
 def build_resume_row(limit=4):
@@ -16369,7 +16377,7 @@ body:not(.android) .nowfits .fitgrid{grid-template-columns:repeat(2,minmax(0,1fr
    squeezing it. */
 @media (max-width:900px){
   body:not(.android) #view-now:not(.hidden){grid-template-columns:minmax(0,1fr);
-    grid-template-areas:"cont" "side" "pick";grid-template-rows:none}
+    grid-template-areas:"cont" "pick" "side";grid-template-rows:none}
   body:not(.android) .nowfits .fitgrid{grid-template-columns:repeat(auto-fill,minmax(110px,1fr))}
 }
 body:not(.android) .pick .plot.clamp{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;cursor:pointer}
@@ -16772,9 +16780,13 @@ label.f span b{color:var(--marigold);font-weight:400;font-family:var(--mono)}
 }
 .spin:hover{filter:none;box-shadow:inset 0 1px 0 rgba(255,255,255,.4),0 8px 26px rgba(var(--accent-rgb),.38)}
 .iconbtn,.spinback,.favtoggle,.watchtoggle,.seasontab{
-  background:rgba(255,255,255,.055);border-color:transparent;border-radius:var(--r-btn);
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.04);
+  background:rgba(255,255,255,.07);border-color:rgba(255,255,255,.13);border-radius:var(--r-btn);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.04);color:rgba(236,230,220,.88);
 }
+/* Only a button that can't be pressed looks faded. Working ones used to
+   share that grey and edgeless look, so NEXT read as disabled beside a
+   disabled BACK. */
+.iconbtn:disabled,.spinback:disabled,.favtoggle:disabled,.watchtoggle:disabled{opacity:.4;cursor:default}
 .iconbtn:hover,.spinback:hover:not(:disabled),.favtoggle:hover,.watchtoggle:hover,
 .seasontab:hover{background:rgba(255,255,255,.095);border-color:transparent;color:var(--paper)}
 .favtoggle.on{background:rgba(194,89,60,.16);color:#e8876a;border-color:transparent}
@@ -17395,6 +17407,9 @@ body.pcstripon .wrap{padding-bottom:calc(76px + env(safe-area-inset-bottom))}
   border:1px solid rgba(255,255,255,.24);background:rgba(255,255,255,.08)}
 body.glass #pcstrip{backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
 .tab.hidden{display:none}
+/* Settings that only mean something on the PC — mpv's path, the downloads
+   sorter — aren't shown on the phone. */
+body.android .pconly{display:none!important}
 /* The Remote's tab: the phone's only. Dim while the PC isn't on the Wi-Fi,
    and lit in the accent, with a soft glow, while it is. */
 body:not(.android) #remotetab{display:none}
@@ -17782,15 +17797,15 @@ body:not(.android) #remotetab{display:none}
       <div><label>Media folders</label>
         <textarea id="c_folders" rows="4" placeholder="D:\Films&#10;D:\TV Shows"
           style="width:100%;padding:9px 10px;font-family:var(--mono);font-size:13px"></textarea></div>
-      <div><label>Path to mpv.exe</label><input id="c_mpv" placeholder="C:\Program Files\MPV Player\mpv.exe"></div>
-      <div><label>Downloads folder</label><input id="c_downloads" placeholder="D:\Downloads"></div>
+      <div class="pconly"><label>Path to mpv.exe</label><input id="c_mpv" placeholder="C:\Program Files\MPV Player\mpv.exe"></div>
+      <div class="pconly"><label>Downloads folder</label><input id="c_downloads" placeholder="D:\Downloads"></div>
     </div>
-    <p class="empty" id="sortnote">Where finished downloads land. Next Up runs the <code>process_new_movies.py</code> sorter kept in that folder, and shows you what it plans to do before anything moves.</p>
+    <p class="empty pconly" id="sortnote">Where finished downloads land. Next Up runs the <code>process_new_movies.py</code> sorter kept in that folder, and shows you what it plans to do before anything moves.</p>
     <div class="rowbtns">
       <button class="play" id="savelocal">SAVE</button>
       <button class="iconbtn" id="scanlib">SCAN MY FOLDERS</button>
-      <button class="iconbtn" id="sortnew">SORT NEW DOWNLOADS</button>
-      <button class="iconbtn" id="testmpv">TEST MPV</button>
+      <button class="iconbtn pconly" id="sortnew">SORT NEW DOWNLOADS</button>
+      <button class="iconbtn pconly" id="testmpv">TEST MPV</button>
       <button class="iconbtn" id="rematch">RETRY UNIDENTIFIED</button>
     </div>
     <div id="libstatus"></div>

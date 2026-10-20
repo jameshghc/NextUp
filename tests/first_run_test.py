@@ -72,5 +72,22 @@ check("the scan summary says plurals properly", "plural(" in _msg)
 check("without a TMDB key it doesn't claim things failed to match", "STATUS.has_key" in _msg[:_msg.find("didn")]
       or "c.unidentified && STATUS.has_key" in _msg)
 
+# The picky-user review's four glaring ones (2026-10-21).
+check("just started: not '0% through'", n.resume_phrase(0, "S01E04") == "you'd only just started S01E04 — pick it back up"
+      and n.resume_phrase(37, "S01E04") == "you're 37% through S01E04 — pick it back up",
+      (n.resume_phrase(0, "S01E04"), n.resume_phrase(37, "S01E04")))
+_shared = re.search(r"\.iconbtn,\.spinback,\.favtoggle,\.watchtoggle,\.seasontab\{([^}]*)\}", page)
+check("Classic: a working button has an edge and bright text, not the disabled look",
+      _shared and "border-color:transparent" not in _shared.group(1) and "color:" in _shared.group(1), _shared and _shared.group(1))
+check("Classic: disabled buttons are the faded ones", re.search(r"(^|\n)\.iconbtn:disabled[^{]*\{[^}]*opacity", page))
+check("narrow PC window: the pick comes before the chooser",
+      'grid-template-areas:"cont" "pick" "side"' in page and 'grid-template-areas:"cont" "side" "pick"' not in page)
+_settings = page[page.find('<div id="view-settings"'):][:20000]
+check("the phone doesn't show PC-only settings", "body.android .pconly{display:none" in page
+      and all(re.search(r'class="[^"]*pconly[^"]*"[^>]*>(?:(?!</div>).)*' + k, _settings, re.S) or
+              re.search(r'id="%s"[^>]*class="[^"]*pconly' % k.split('"')[1], _settings) or
+              re.search(r'class="[^"]*pconly[^"]*"[^>]*id="%s"' % k.split('"')[1], _settings)
+              for k in ('id="c_mpv"', 'id="c_downloads"', 'id="sortnote"', 'id="sortnew"', 'id="testmpv"')))
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
