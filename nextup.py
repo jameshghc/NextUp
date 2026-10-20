@@ -16043,7 +16043,13 @@ body.android .tile .peek .peekdetails{display:block;margin-top:8px;padding:5px 1
   letter-spacing:.1em;color:var(--paper);text-decoration:underline;text-underline-offset:3px;
   text-decoration-thickness:1px}
 body.android .tile.peeking .peek .peekplay,
-body.android .tile.peeking .peek .peekdetails{pointer-events:auto}
+body.android .tile.peeking .peek .peekdetails,
+body.android .tile.peeking .peek .peekonpc{pointer-events:auto}
+/* Play on the PC: its own clear button, spaced from DETAILS and thumb-sized.
+   (It once sat off this list above, so every tap on it fell through to the
+   poster underneath and nothing happened.) */
+body.android .tile .peek .peekonpc{display:block;margin-top:10px;min-height:40px;padding:8px 16px;
+  font-size:12px;color:var(--paper);border:1px solid rgba(255,255,255,.3);background:rgba(255,255,255,.1)}
 
 /* Corners: what the world thinks on the left, what you think on the right.
    Progress is a bar rather than a badge, and it's the only state shown at

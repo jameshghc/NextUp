@@ -328,6 +328,10 @@ check("Remote: the sleep timer's question can be answered there", "STILL HERE" i
       or ("STILL HERE" in _rp and "ENOUGH" in _rp))
 check("Remote: a now-playing strip on the other screens", 'id="pcstrip"' in page_src and "function stripRender(" in page_src)
 check("Remote: ON PC in a tile's overlay", "'iconbtn peekonpc'" in page_src and "function playOnPC(" in page_src)
+# The overlay is click-through except for the buttons it names: ON PC was
+# left off that list, so a tap fell through to the poster (2026-10-21).
+_auto = re.search(r"([^{}]*)\{pointer-events:auto\}", page_src[page_src.find("body.android .tile.peeking .peek .peekplay"):])
+check("Remote: ON PC in a tile's overlay takes a tap", _auto and ".peekonpc" in _auto.group(1), _auto and _auto.group(1)[-160:])
 _tick = page_src[page_src.find("async function remoteTick("):][:700]
 check("Remote: when the PC goes, the asking stops (no calling out on a timer)",
       "pcGone(" in page_src and "function pcGone(" in page_src
