@@ -4,7 +4,7 @@ server started headless, and PLATFORM saying android.
 Run in a SUBPROCESS with NEXTUP_HOME pointed at a scratch folder, because
 the data paths are decided when the module is imported — the same moment
 the app on the phone decides them."""
-import sys, os, json, subprocess, tempfile, shutil
+import sys, os, re, json, subprocess, tempfile, shutil
 
 here = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(here)
@@ -343,9 +343,9 @@ check("Remote layout: the seek bar has a thumb-sized hit area", ".rmseek input{h
 check("Remote layout: full width, so it doesn't shift sideways as things change",
       "#view-remote{width:100%" in page_src)
 check("Remote layout: the volume row never wraps (mute shown on its button, not in the number)",
-      ".rmgrid .rmrow{flex-wrap:nowrap}" in page_src and "(muted)" not in page_src[page_src.find("function remoteRender("):][:5000])
-check("Remote layout: buttons at least 48px", "#view-remote .iconbtn{" in page_src
-      and "min-height:48px" in page_src[page_src.find("#view-remote .iconbtn{"):][:300])
+      re.search(r"\.rmgrid \.rmrow\{[^}]*flex-wrap:nowrap", page_src) and "(muted)" not in page_src[page_src.find("function remoteRender("):][:5000])
+check("Remote layout: buttons at least 48px (42 in landscape, to fit one screen)",
+      re.search(r"#view-remote \.iconbtn\{[^}]*min-height:48px", page_src))
 check("Remote layout: the still-watching card sits at the bottom, moving nothing", ".rmafk{position:fixed" in page_src)
 check("Remote layout: mute shows whether it's on", "$('#rm_mute').classList.toggle('on'" in page_src)
 _tmpl = page_src[page_src.find("function remoteBuild("):][:4000]
