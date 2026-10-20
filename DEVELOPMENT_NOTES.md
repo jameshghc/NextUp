@@ -16,6 +16,62 @@ at the top.
 
 ---
 
+## 2026-10-20 — v0.2.0, the phone as a remote for the PC
+
+The version moves to 0.2 at the user's request: the phone now controls the
+big screen as well as playing on its own. Spec:
+`docs/superpowers/specs/2026-10-20-phone-remote-design.md`. Plan beside it
+in `plans/`.
+
+- **One set of remote actions** (`remote_do`, `REMOTE_ACTIONS`).
+  - The desktop remote routes' bodies moved there unchanged, and
+    `/api/remote/<action>` now just calls it. The remote window and the
+    phone can't drift apart.
+  - New: `seek` (`to`/`by`, always sent absolute, clamped to
+    0…duration−1) and `afk` (answers "are you still watching?").
+  - `remote_state` adds title, sub, art, position, duration and afk.
+- **The phone reaches it over the Wi-Fi.** `PhoneHandler`:
+  - GET `/phone/remote/state`, POST `/phone/remote/<action>` and
+    `/phone/remote/play`.
+  - Bearer, home network only, an unknown action 404, and AppError as
+    `{error}`. Every press calls `seen_you()`, so the phone counts as being
+    there for the sleep timer.
+- **Play on PC** (`play_on_pc`).
+  - A film, an episode, or a show's next-up episode on this PC, falling
+    back to the first episode when everything's been seen.
+  - It plays through `play_local`, the local `/api/play` path factored
+    out, so it's exactly what PLAY does.
+- **The phone's side.**
+  - `/api/pcremote/*` passes through `pc_remote_call` (the page never holds
+    the token), with "The PC isn't on the Wi-Fi right now." when it's
+    away.
+  - `/api/pcremote/art/<name>` fetches the picture via the link.
+  - Rows gain `on_pc` (`mark_on_pc`), and local rows now carry `tmdb_id`
+    for it.
+- **The page (phone).**
+  - A **Remote** tab appears while the PC answers. Top to bottom:
+    - art and title
+    - a seek bar that seeks on release
+    - ⏪10 ⏯ 30⏩
+    - volume and mute, audio delay
+    - subtitles (cycle, FIND) and audio track
+    - episode ‹ › and skip, where they apply
+    - the six channel presets, and STOP
+    - "Are you still watching?", with STILL HERE / THAT'S ENOUGH
+  - A **now-playing strip** on the other screens; tap it to open the
+    Remote.
+  - **▶ ON PC** in a tile's overlay, and per episode in the elsewhere-show
+    sheet.
+- **Battery.** The Remote asks once a second only while showing; the strip
+  every 10 s while the app is in front; both stop on hide.
+- **Tests.** `tests/phone_remote_test.py` (34). It drives a real loopback
+  link with mpv faked: every action, seek clamps, afk, Play on PC (film,
+  episode, show, all-seen show, unknown), art, only-listed routes, the
+  passthrough with the PC away, and `on_pc`.
+  - Checked in `phone_serve.py --with-pc`: the pretend PC now has a fake
+    mpv (`NEXTUP_FAKE_MPV`) and starts as a PC. It had inherited Android
+    and treated Play on PC as a phone play.
+
 ## 2026-10-20 — v0.1.81, the pick's art is Now's alone
 
 The user: the Library shouldn't be tinted by whatever the Now page last

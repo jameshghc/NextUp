@@ -16,7 +16,7 @@ summarised away and files don't.
 in `docs/mockups/shots/`. Once the user picks, build it as a choice under a
 new Settings → Appearance tab, keeping today's look available.
 
-## Sketch: a remote for the PC, in the phone app (asked 2026-10-19, not started)
+## A remote for the PC, in the phone app (built in v0.2.0; the sketch below is history)
 
 Control what's playing on the PC from the phone, on the same Wi-Fi. It
 builds on two things that exist:
