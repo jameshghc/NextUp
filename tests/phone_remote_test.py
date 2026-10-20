@@ -157,6 +157,9 @@ n.LIB.loaded_at = 0; n.LOCAL.loaded_at = 0
 st, got = call("POST", "/phone/remote/play", {"kind": "tvshow", "tmdb": "990011"})
 check("a show seen to the end starts again at the first episode", PLAYED[-1][0] == "X:/rt/s1e1.mkv",
       (got.get("error"), PLAYED[-1:]))
+st, got = call("POST", "/phone/remote/play", {"kind": "pcid", "type": "movie", "id": mv["id"]})
+check("Play on PC by the PC's own id (a title with no TMDB id)", st == 200 and PLAYED[-1][0] == mv["path"],
+      (got.get("error"), PLAYED[-1:]))
 st, got = call("POST", "/phone/remote/play", {"kind": "movie", "tmdb": "1"})
 check("something this PC hasn't got is said", got.get("error") == "The PC doesn't have that any more.", got)
 

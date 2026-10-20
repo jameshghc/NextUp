@@ -12215,6 +12215,11 @@ def play_on_pc(kind, tmdb, season=None, episode=None, resume=True):
     """Start something here because the phone asked: a film, an episode, or
     a show — this PC's next-up episode of it, the one its own PLAY would
     pick, else the first. Played exactly as the PLAY button plays it."""
+    if kind == "pcid":
+        # Something with no TMDB id, named by this PC's own id — the phone
+        # got it from this PC's lists and only passes it back.
+        play_local(str(season) if season in ("movie", "episode") else "movie", int(tmdb), resume)
+        return
     conn = db()
     try:
         item_id = None
@@ -13044,8 +13049,12 @@ class PhoneHandler(BaseHTTPRequestHandler):
                     if number != number or number in (float("inf"), float("-inf")):
                         raise ValueError(key)
             if action == "play":
-                play_on_pc(str(data.get("kind") or ""), data.get("tmdb"), data.get("season"),
-                           data.get("episode"), resume=data.get("resume", True) is not False)
+                if data.get("kind") == "pcid":
+                    play_on_pc("pcid", data.get("id"), data.get("type"), None,
+                               resume=data.get("resume", True) is not False)
+                else:
+                    play_on_pc(str(data.get("kind") or ""), data.get("tmdb"), data.get("season"),
+                               data.get("episode"), resume=data.get("resume", True) is not False)
                 return self.send_json(phone_remote_state())
             return self.send_json(phone_remote_state(remote_do(action, data)))
         except AppError as exc:
@@ -13586,10 +13595,13 @@ def pc_stream_play(stream, resume=False, start=None, channel=None):
     # HERE, when the phone has it itself: its own copy, not a stream.
     mine = local_for_ident(kind, tmdb_id, season, episode)
     if mine:
-        play_local(kind, mine, resume, start=start)
-        if channel:
-            _ANDROID_SITTING["channel"] = channel
-        return {"ok": True, "local": True}
+        try:
+            play_local(kind, mine, resume, start=start)
+            if channel:
+                _ANDROID_SITTING["channel"] = channel
+            return {"ok": True, "local": True}
+        except AppError:
+            pass        # the phone's copy has gone: stream it from the PC instead
     if not pc_link_check()["up"]:
         raise AppError("The PC isn't on the Wi-Fi right now.")
     key = phone_file_key(kind, tmdb_id, season, episode)
@@ -18638,7 +18650,16 @@ function playChoice(p, small){
     };
     box.append(here, pc);
   } else {
-    box.append(el('span', 'empty', 'Only playable on the PC itself'));
+    /* No TMDB id to stream it by: ON PC only, named by the PC's own id. */
+    const pc = el('button', 'iconbtn onpc', '\u25B6 ON PC');
+    pc.onclick = async (e) => {
+      e.stopPropagation();
+      pc.textContent = '\u2026';
+      const r = await playOnPC({kind: 'pcid', type: p.type, id: p.id});
+      pc.textContent = '\u25B6 ON PC';
+      problem.textContent = r && r.error || '';
+    };
+    box.append(pc);
   }
   box.append(problem);
   return box;
@@ -18756,6 +18777,7 @@ function pcCardOrder(p, right, btns, problem, meta, rateSlot){
    reasons — the cards the page used to show at length. */
 function shortWhy(p){
   const why = el('p', 'ppwhy');
+  if(p._pc){ why.textContent = p.why || ''; return why; }   // reasons are asked by id: the PC's
   (p._why || api('/api/why?type=' + encodeURIComponent(p.type) + '&id=' + p.id))
     .then(r => {
       const cards = (r && r.cards || []).slice().sort((a, b) => (b.weight || 0) - (a.weight || 0));
@@ -18798,6 +18820,7 @@ function phonePick(p, poster, right, btns, problem, meta, rateSlot){
   });
   top.onclick = () => {
     if(Math.abs(dx) > 10) return;       // the end of a swipe, not a tap
+    if(p._pc) return;                   // the PC's id: the phone's page for it would be the wrong title
     p.type === 'episode' ? openShow(p.rate_id) : openFilm(p.id);
   };
   card.append(top, btns, problem);
@@ -18950,7 +18973,7 @@ function drawFits(data){
     else b.append(el('div', 'blank', esc(p.title || '')));
     b.append(el('b', null, esc(p.title || '')));
     b.onclick = () => {
-      post('/api/offered', {key: p.type + ':' + p.id});
+      if(!p._pc) post('/api/offered', {key: p.type + ':' + p.id});
       showPick(p);
       $('#view-now').scrollTop = 0;
     };
@@ -19017,8 +19040,7 @@ async function loadTonight(){
     if(p && !p._pc) post('/api/offered', {key: p.type + ':' + p.id});
   }
   if(!data || data.error){
-    data = await api(nowSource() + '?' + q);
-    if(nowSource() !== '/api/tonight') data = await nowFetch(q);
+    data = await nowFetch(q);
     /* No look-ahead to use — the first pick, or a filter just changed. Give
        the picture a moment to arrive so the card appears with it, but only
        a moment. */
@@ -22204,6 +22226,7 @@ async function loadPcChannels(){
      seconds: say so rather than a bare "Loading…". */
   out.innerHTML = '<p class="empty">Asking the PC what’s on…</p>';
   const data = await api('/api/pcchannels');
+  const loadedAt = Date.now();
   if(!data || data.error){ out.innerHTML = ''; return false; }
   out.innerHTML = '';
   out.append(el('div', 'nowsource', 'From the PC\u2019s channels'));
@@ -22223,7 +22246,9 @@ async function loadPcChannels(){
       const here = el('button', 'iconbtn', '\u25B6 HERE');
       here.onclick = async () => {
         here.textContent = '\u2026';
-        const r = await post('/api/play', {stream: now.ident, start: now.offset || 0, channel: ch.id});
+        /* Where the channel has got to by now, not when the list loaded. */
+        const at = (now.offset || 0) + Math.round((Date.now() - loadedAt) / 1000);
+        const r = await post('/api/play', {stream: now.ident, start: at, channel: ch.id});
         here.textContent = r && r.error ? 'FAILED' : '\u25B6 HERE';
       };
       row.append(here);
@@ -24752,14 +24777,35 @@ def android_play_finished(position=None, duration=None, completed=False):
     """mpv on the phone has closed: record the sitting, then, if the PC is on
     the Wi-Fi, tell it — so stopping half way in bed is known on the sofa."""
     channel = _ANDROID_SITTING.get("channel")
+    ran_for = time.time() - (_ANDROID_SITTING.get("started_at") or time.time())
+    if channel:
+        _LAST_CHANNEL_IDENT[0] = _sitting_ident(_ANDROID_SITTING)
     try:
         _android_play_finished(position, duration, completed)
     finally:
         pc_link_sync_soon()
     # A channel watched here, seen to the end of its programme: on to
     # whatever the channel has on now. Stopped by hand, it just ends.
-    if channel and completed:
+    # Not when it closed at once: mpv says "completed" when a file won't play
+    # or was opened past its end, and carrying on from there would open the
+    # same thing again, and again.
+    if channel and completed and ran_for >= MIN_WATCH_SECONDS:
         _carry_on_soon(channel)
+
+
+_LAST_CHANNEL_IDENT = [None]
+
+
+def _sitting_ident(sitting):
+    """What a sitting on the phone was, as an identity ({kind, tmdb, season,
+    episode}), whether it was a stream or the phone's own file."""
+    if sitting.get("stream"):
+        tmdb, season, episode, _show = sitting["stream"]
+        out = {"kind": sitting.get("kind"), "tmdb": str(tmdb)}
+        if out["kind"] == "episode":
+            out.update(season=season, episode=episode)
+        return out
+    return ident_for(sitting.get("kind"), sitting.get("id"))
 
 
 def _carry_on_soon(channel):
@@ -24774,7 +24820,12 @@ def channel_carry_on(channel):
         listing = pc_library_call("/phone/channels")
         ch = next((c for c in listing.get("channels") or [] if c.get("id") == channel), None)
         now = (ch or {}).get("now") or {}
-        if now.get("ident"):
+        last = _LAST_CHANNEL_IDENT[0]
+        same = last and now.get("ident") and all(
+            str(now["ident"].get(k)) == str(last.get(k)) for k in ("kind", "tmdb", "season", "episode"))
+        # The schedule still on the one that just ended (it reckons a few
+        # minutes longer than the file runs): stop rather than reopen it.
+        if now.get("ident") and not same:
             pc_stream_play(now["ident"], start=now.get("offset") or 0, channel=channel)
     except Exception:
         log_problem("carrying a channel on")

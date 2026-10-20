@@ -373,7 +373,16 @@ check("Remote layout: idle screens say what to do instead of showing dead contro
 # The phone draws on the PC's library (v0.2.1).
 check("PC library: Now asks the PC while it's there, the phone otherwise",
       "function nowSource(" in page_src and "'/api/pcnow'" in page_src
-      and "api(nowSource() + '?'" in page_src and "api('/api/tonight?'" in page_src)
+      and "data = await nowFetch(q);" in page_src and "api(nowSource() + '?'" not in page_src)
+_pp = page_src[page_src.find("function phonePick("):][:6000]
+check("PC library: a PC pick's poster doesn't open a phone title by the PC's id", "if(p._pc)" in _pp)
+check("PC library: the short why isn't asked of the phone for a PC pick",
+      "if(p._pc)" in page_src[page_src.find("function shortWhy("):][:400])
+check("PC library: an alternative from the PC isn't recorded as offered on the phone",
+      "if(!p._pc) post('/api/offered'" in page_src[page_src.find("function drawFits("):][:3000])
+check("PC library: no TMDB id still offers ON PC, by the PC's own id", "kind: 'pcid'" in page_src)
+check("PC library: a channel joined later starts where it has got to by now",
+      "(Date.now() - loadedAt) / 1000" in page_src)
 check("PC library: the genre counts too", "'/api/pcgenres'" in page_src)
 # Asked before its line has run (the Now page loads first): a 'let' there
 # throws even under typeof, which the S21 showed at start-up.

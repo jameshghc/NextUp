@@ -119,6 +119,40 @@ check("the channel is kept with the sitting", n._ANDROID_SITTING.get("channel") 
 n.android_play_finished(position=600, duration=6000)
 check("stopping by hand ends the channel", carried == [], carried)
 
+# Final review fixes.
+carried.clear()
+dpost("/api/play", {"stream": {"kind": "movie", "tmdb": local["tmdb_id"]}, "start": 0, "channel": "cult"})
+n._ANDROID_SITTING["started_at"] = time.time() - 5
+n.android_play_finished(completed=True)
+check("a channel programme that closes at once doesn't carry on (no relaunch loop)", carried == [], carried)
+played.clear()
+n._carry_on_soon = lambda chan: n.channel_carry_on(chan)
+real_lib = n.pc_library_call
+same = {"kind": "movie", "tmdb": local["tmdb_id"]}
+n.pc_library_call = lambda path: {"channels": [{"id": "cult", "now": {"ident": same, "offset": 9999}}]}
+n._LAST_CHANNEL_IDENT[0] = same
+n.channel_carry_on("cult")
+check("the channel still on the one that just ended isn't relaunched", played == [], played)
+n.pc_library_call = real_lib
+# A local copy whose file has gone: HERE streams from the PC instead.
+conn = n.db()
+gone = conn.execute("INSERT INTO movies (path,title,year,tmdb_id) VALUES ('X:/gone/film.mkv','Gone Film',2020,?)",
+                    ("777001",)).lastrowid
+conn.commit(); conn.close()
+real_req = n.require_media_file
+def _req(path):
+    if "gone" in str(path):
+        raise n.AppError("That file isn't there any more.")
+    return path
+n.require_media_file = _req
+streamed = []
+real_call = n.pc_link_call
+n.pc_link_call = lambda m, path, body=None, timeout=10, raw=None: (streamed.append(path) or (200, {"url": "/phone/stream/x", "subs": [], "title": "t", "resume": 0}))
+r = dpost("/api/play", {"stream": {"kind": "movie", "tmdb": "777001"}})
+n.pc_link_call = real_call
+n.require_media_file = real_req
+check("HERE streams when the phone's own copy has gone", "/phone/play" in streamed and not r.get("error"), (r, streamed))
+
 n.phone_link_stop()
 n.PC_LINK.update(checked=0)
 got = dget("/api/pcnow?kind=film")
