@@ -12170,7 +12170,9 @@ def phone_now(args, exclude):
 def channel_ident(block, offset):
     """The one file a channel is playing at `offset`, as an identity, and
     how far into that file — a two-episode block is two files."""
-    if block.get("kind") not in ("movie", "episode"):
+    # Blocks are "movie", "youtube" or a run of episodes ("episodes"); only
+    # YouTube has nothing in the library to play.
+    if not block.get("kind") or block.get("kind") == "youtube":
         return None, 0
     kind, item_id, at = channel_play_target(block, offset)
     return ident_for(kind, item_id), int(at or 0)
@@ -17571,6 +17573,24 @@ body:not(.android) #remotetab{display:none}
 .remoteicon.live svg{animation:remoteglow 1.6s ease-in-out 2}
 @keyframes remoteglow{0%,100%{filter:drop-shadow(0 0 2px rgba(var(--accent-rgb),.5))}
   50%{filter:drop-shadow(0 0 7px rgba(var(--accent-rgb),.95))}}
+/* The phone drawing on the PC's library. */
+.playchoice{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.playchoice .rmmsg:empty{display:none}
+.playchoice .rmmsg{flex-basis:100%;text-align:left}
+.playchoice .onpc{color:var(--paper);border:1px solid rgba(255,255,255,.3);background:rgba(255,255,255,.1)}
+.playchoice.small{flex-wrap:nowrap;gap:6px}
+.playchoice.small .iconbtn{min-height:34px;padding:4px 8px;font-size:11px;white-space:nowrap}
+.nowsource{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--marigold);margin:2px 0 8px}
+.nowsource.hidden{display:none}
+.pcchannels{display:flex;flex-direction:column;gap:10px}
+.pcchannel{display:flex;gap:12px;align-items:flex-start;padding:10px;border-radius:var(--r-card);
+  background:var(--surface);border:1px solid var(--line)}
+.pcchannel img{width:54px;aspect-ratio:2/3;object-fit:cover;border-radius:4px;flex:none}
+.pcchannel .pctext{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px}
+.pcchannel .pctext b{font-family:var(--display);font-size:15px}
+.pcchannel .pcnow{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pcchannel small{font-family:var(--mono);font-size:11px;color:var(--muted)}
 /* The Appearance tab's own controls. */
 .apgrid{display:grid;grid-template-columns:150px minmax(0,1fr);gap:16px 18px;align-items:center;margin-top:14px}
 .apgrid > label{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
@@ -17692,6 +17712,7 @@ body:not(.android) #remotetab{display:none}
        their colours, then what fits. At the foot of the phone's page; along
        the top of the PC's, beside a Back. -->
   <div id="nowside">
+  <div class="nowsource hidden" id="nowsource">From the PC’s library</div>
   <div class="nowchooser" id="nowchooser">
     <button class="kchip chooserback" id="chooserback" type="button" disabled
             title="Back to the one before">‹</button>
@@ -18445,6 +18466,7 @@ function showPick(p){
   out.innerHTML = '';
   out.append(pickCard(p));
   setRoomArt(p.art || p.backdrop);
+  if(p._pc) p._why = Promise.resolve(null);   // reasons are asked by id: the PC's
   fitPickTitle(out.querySelector('.pick h2'));
   loadReasons(p);
   currentTop = p.type + ':' + p.id;
@@ -18502,15 +18524,36 @@ function withinMs(promise, ms){
   return Promise.race([promise, new Promise(done => setTimeout(done, ms))]);
 }
 
+/* On the phone while the PC is on the Wi-Fi, Now draws on the PC's whole
+   library (its picks, its Continue); otherwise on the phone's own. The
+   PC's picks carry the PC's ids, so they're marked (_pc) and played by
+   what they are (playChoice), never by id. */
+function nowSource(){
+  return document.body.classList.contains('android') && typeof pcLinkUp !== 'undefined' && pcLinkUp
+    ? '/api/pcnow' : '/api/tonight';
+}
+async function nowFetch(q){
+  const src = nowSource();
+  let data = await api(src + '?' + q);
+  if(src !== '/api/tonight' && (!data || data.error)){
+    data = await api('/api/tonight?' + q);       // the PC went away: the phone's own
+  } else if(src !== '/api/tonight' && data){
+    (data.picks || []).forEach(x => x._pc = true);
+    (data['continue'] || []).forEach(x => x._pc = true);
+    data._pc = true;
+  }
+  return data;
+}
+
 function fetchAhead(){
   const exclude = new Set(rejected);
   if(currentTop) exclude.add(currentTop);
   const key = aheadKey(exclude);
   if(pickAhead && pickAhead.key === key) return;
-  const promise = api('/api/tonight?' + tonightParams(exclude, true))
+  const promise = nowFetch(tonightParams(exclude, true))
     .then(async data => {
       const p = data && data.picks && data.picks[0];
-      if(p){
+      if(p && !p._pc){
         p._why = api('/api/why?type='+encodeURIComponent(p.type)+'&id='+p.id).catch(() => null);
         await preloadArt(p);
       }
@@ -18569,6 +18612,38 @@ function posterNode(src, alt){
   return el('div','noposter', esc(alt||'no artwork'));
 }
 
+/* HERE and/or ON PC for something from the PC's library: HERE plays the
+   phone's own copy when it has one, or streams it; ON PC starts it there
+   and opens the Remote. Only the ones that can work are shown. */
+function playChoice(p, small){
+  const box = el('div', 'playchoice' + (small ? ' small' : ''));
+  const id = p.ident;
+  const problem = el('div', 'rmmsg');
+  if(id){
+    const here = el('button', small ? 'iconbtn' : 'play', '\u25B6 HERE');
+    here.onclick = async (e) => {
+      e.stopPropagation();
+      here.textContent = '\u2026';
+      const r = await withWaking(here, () => post('/api/play', {stream: id, resume: true}));
+      here.textContent = r && r.error ? 'FAILED' : '\u25B6 HERE';
+      problem.textContent = r && r.error || '';
+    };
+    const pc = el('button', 'iconbtn onpc', '\u25B6 ON PC');
+    pc.onclick = async (e) => {
+      e.stopPropagation();
+      pc.textContent = '\u2026';
+      const r = await playOnPC({kind: id.kind, tmdb: id.tmdb, season: id.season, episode: id.episode});
+      pc.textContent = '\u25B6 ON PC';
+      problem.textContent = r && r.error || '';
+    };
+    box.append(here, pc);
+  } else {
+    box.append(el('span', 'empty', 'Only playable on the PC itself'));
+  }
+  box.append(problem);
+  return box;
+}
+
 function pickCard(p){
   const card = el('div','pick'+(p.type==='episode'?' tv':''));
   const hero = heroNode(p.backdrop);
@@ -18587,7 +18662,9 @@ function pickCard(p){
   right.append(meta);
 
   const rateSlot = el('div');
-  rateSlot.append(rateControl(p));
+  /* The PC's picks carry the PC's ids: rating one here would rate whatever
+     the phone has under that number. Rated on the PC, or from the Library. */
+  if(!p._pc) rateSlot.append(rateControl(p));
   right.append(rateSlot);
 
   const btns = el('div','rowbtns');
@@ -18647,7 +18724,11 @@ function pickCard(p){
     libraryChanged();
   };
 
-  btns.append(play, back, skip, watch);
+  if(p._pc){
+    btns.append(playChoice(p), back, skip);      // no watchlist: that id is the PC's
+  } else {
+    btns.append(play, back, skip, watch);
+  }
   right.append(btns);
   right.append(problem);
   card.append(right);
@@ -18782,7 +18863,8 @@ function drawChooser(){
 
 /* Which genres are still possible with the kind and genres chosen. */
 async function chooserAvail(){
-  const r = await api('/api/genres?' + new URLSearchParams({kind: $('#kind').value, with: chosenGenres.join(',')}));
+  const gsrc = nowSource() === '/api/pcnow' ? '/api/pcgenres' : '/api/genres';
+  const r = await api(gsrc + '?' + new URLSearchParams({kind: $('#kind').value, with: chosenGenres.join(',')}));
   genreAvail = r && r.genres || null;
   drawChooser();
 }
@@ -18887,6 +18969,11 @@ function altCard(p){
   const b = el('div');
   b.append(el('h3',null,esc(p.title)));
   b.append(el('p',null,esc([p.sub, p.why].filter(Boolean).join(' · '))));
+  if(p._pc){                         // from the PC's library: play by what it is
+    b.append(playChoice(p, true));
+    a.append(b);
+    return a;
+  }
   const play = el('button','iconbtn','PLAY');
   const why = el('p','empty');
   play.onclick = async () => {
@@ -18927,10 +19014,11 @@ async function loadTonight(){
        pictures and all; if not, it's at least already on its way. */
     data = await ahead.promise;
     const p = data && data.picks && data.picks[0];
-    if(p) post('/api/offered', {key: p.type + ':' + p.id});
+    if(p && !p._pc) post('/api/offered', {key: p.type + ':' + p.id});
   }
   if(!data || data.error){
-    data = await api('/api/tonight?'+q);
+    data = await api(nowSource() + '?' + q);
+    if(nowSource() !== '/api/tonight') data = await nowFetch(q);
     /* No look-ahead to use — the first pick, or a filter just changed. Give
        the picture a moment to arrive so the card appears with it, but only
        a moment. */
@@ -18941,6 +19029,8 @@ async function loadTonight(){
   reasons.classList.remove('swapping');
   if(data.error){ out.innerHTML = '<div class="notice bad"><h3>Something went wrong</h3><p>'+esc(data.error)+'</p></div>'; return; }
   if(data.reset) rejected.clear();
+  const src = $('#nowsource');
+  if(src) src.classList.toggle('hidden', !data._pc);
   drawFits(data);
   out.innerHTML = '';
   if(!data.picks.length){
@@ -22105,7 +22195,56 @@ $('#shufflechannels').onclick = async () => {
   btn.disabled = false;
 };
 
+/* On the phone while the PC is on the Wi-Fi: the PC's channels, each to
+   watch here (from where it has got to, carrying on when the programme
+   ends) or on the PC. */
+async function loadPcChannels(){
+  const out = $('#channels-out');
+  /* The PC works the schedule out on the first ask, which can take a few
+     seconds: say so rather than a bare "Loading…". */
+  out.innerHTML = '<p class="empty">Asking the PC what’s on…</p>';
+  const data = await api('/api/pcchannels');
+  if(!data || data.error){ out.innerHTML = ''; return false; }
+  out.innerHTML = '';
+  out.append(el('div', 'nowsource', 'From the PC\u2019s channels'));
+  const grid = el('div', 'pcchannels');
+  data.channels.forEach(ch => {
+    const card = el('div', 'pcchannel');
+    const now = ch.now || {};
+    if(now.art){ const i = el('img'); i.src = now.art; i.alt = ''; i.loading = 'lazy'; card.append(i); }
+    const t = el('div', 'pctext');
+    t.append(el('b', null, esc(ch.name)));
+    t.append(el('div', 'pcnow', ch.live ? 'Live' : esc(now.title || 'Nothing on')
+      + (now.sub ? ' \u00B7 ' + esc(now.sub) : '')));
+    if(now.duration) t.append(el('small', null, Math.round((now.elapsed || 0) / 60) + ' of '
+      + Math.round(now.duration / 60) + ' min' + (now.next_title ? ' \u00B7 next: ' + esc(now.next_title) : '')));
+    const row = el('div', 'playchoice small');
+    if(now.ident){
+      const here = el('button', 'iconbtn', '\u25B6 HERE');
+      here.onclick = async () => {
+        here.textContent = '\u2026';
+        const r = await post('/api/play', {stream: now.ident, start: now.offset || 0, channel: ch.id});
+        here.textContent = r && r.error ? 'FAILED' : '\u25B6 HERE';
+      };
+      row.append(here);
+    }
+    const pc = el('button', 'iconbtn onpc', '\u25B6 ON PC');
+    pc.onclick = async () => {
+      const r = await remoteSend('channel', {channel: ch.id});
+      if(r && !r.error) switchTo('remote');
+    };
+    row.append(pc);
+    t.append(row);
+    card.append(t);
+    grid.append(card);
+  });
+  out.append(grid);
+  return true;
+}
+
 async function loadChannels(){
+  if(document.body.classList.contains('android') && typeof pcLinkUp !== 'undefined' && pcLinkUp
+     && await loadPcChannels()) return;
   const out = $('#channels-out');
   const data = await api('/api/channels');
   let grid = out.querySelector('.channelgrid');

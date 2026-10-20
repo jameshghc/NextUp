@@ -68,7 +68,7 @@ eps = conn.execute("SELECT e.id, e.runtime FROM episodes e JOIN shows s ON s.id=
                    " WHERE s.tmdb_id<>'' AND e.season>0 ORDER BY e.show_id, e.season, e.episode LIMIT 2").fetchall()
 conn.close()
 first = eps[0]["runtime"] or n.DEFAULT_EPISODE_RUNTIME
-ident, at = n.channel_ident({"kind": "episode", "episode_ids": [eps[0]["id"], eps[1]["id"]]}, first + 1200)
+ident, at = n.channel_ident({"kind": "episodes", "episode_ids": [eps[0]["id"], eps[1]["id"]]}, first + 1200)
 want = n.ident_for("episode", eps[1]["id"])
 check("two episodes in a block: the one playing now, and how far into it", ident == want and at == 1200, (ident, at, want))
 

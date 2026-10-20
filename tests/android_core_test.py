@@ -370,6 +370,19 @@ check("Remote layout: the symbols ask for their plain form, not emoji", "\\u23EF
       or "\u23ef\ufe0e" in page_src.lower())
 check("Remote layout: idle screens say what to do instead of showing dead controls",
       'id="rm_hint"' in page_src and "#view-remote.rmidle" in page_src)
+# The phone draws on the PC's library (v0.2.1).
+check("PC library: Now asks the PC while it's there, the phone otherwise",
+      "function nowSource(" in page_src and "'/api/pcnow'" in page_src
+      and "api(nowSource() + '?'" in page_src and "api('/api/tonight?'" in page_src)
+check("PC library: the genre counts too", "'/api/pcgenres'" in page_src)
+check("PC library: a title that plays both ways offers HERE and ON PC", "function playChoice(" in page_src
+      and "\\u25B6 HERE" in page_src)
+check("PC library: the PC's picks never use the phone's ids for rating, watchlist or reasons",
+      "if(p._pc)" in page_src[page_src.find("function pickCard("):][:6000])
+check("PC library: says where the picks come from", 'id="nowsource"' in page_src
+      and "From the PC\u2019s library" in page_src)
+check("PC library: Channels from the PC, each to watch here or on the PC", "function loadPcChannels(" in page_src
+      and "'/api/pcchannels'" in page_src and "channel: ch.id" in page_src)
 check("a details panel can be swiped down to close", "function sheetSwipe(" in page_src
       and "sheetSwipe(back" in page_src)
 
