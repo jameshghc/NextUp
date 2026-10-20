@@ -114,7 +114,7 @@ ASSET_DIR = getattr(sys, "_MEIPASS", HERE)
 LOGO_PATH = os.path.join(ASSET_DIR, "nextup_logo.png")
 ICON_PATH = os.path.join(ASSET_DIR, "nextup.ico")
 
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -23732,7 +23732,7 @@ function stripShow(){
    it comes back to the front — never on a timer, which would keep a phone
    in a pocket calling out to a PC that's off. The answer comes a moment
    later, and the library is redrawn only if it changed what can play. */
-let pcLinkUp = null;
+var pcLinkUp = null;      // var: the Now page asks before this line runs
 function lookForPC(){
   if(!document.body.classList.contains('android')) return;
   post('/api/link/check').then(r => {

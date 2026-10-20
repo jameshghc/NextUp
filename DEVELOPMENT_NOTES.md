@@ -16,6 +16,54 @@ at the top.
 
 ---
 
+## 2026-10-21 — v0.2.1, the phone draws on the PC's library
+
+The user: when the phone and PC are connected, the phone should work from
+the main library. Now, Continue and Channels were chosen; Recommendations
+and Rate were not. Where a title can play both ways, offer the choice
+rather than a default. Spec:
+`docs/superpowers/specs/2026-10-21-phone-uses-pc-library-design.md`; plan
+beside it.
+
+- **Ask the PC.** The phone asks the PC for its lists while it's reachable,
+  rather than folding the PC's titles into its own library. The PC has the
+  full library, the picking logic, and the phone's history (swapped after
+  every sitting).
+  - PhoneHandler `/phone/now` (`phone_now`: `build_tonight` +
+    `build_continue`, and no `remember_offer`), `/phone/genres` and
+    `/phone/channels` (`phone_channels`).
+  - Every item carries an `ident` (`ident_for`, from `sync_identity`).
+    None means ON PC only.
+  - A channel's `ident` and `offset` come from `channel_ident` →
+    `channel_play_target`. Real blocks are "episodes"; the first version
+    looked for "episode" and gave TV channels no `ident`.
+- **The phone:**
+  - `/api/pcnow`, `/api/pcgenres` and `/api/pcchannels` go through
+    `pc_library_call`.
+  - `pc_stream_play` plays the phone's own copy when it has one
+    (`local_for_ident` → `play_local`), takes an explicit `start`, and keeps
+    a `channel` on the sitting.
+  - A channel watched here and seen to the end carries on
+    (`channel_carry_on`); stopped by hand, it ends.
+- **The page.**
+  - `nowSource()` / `nowFetch()` use the PC while `pcLinkUp`, and fall back
+    to `/api/tonight`.
+  - The PC's picks are marked `_pc`. They get `playChoice` (▶ HERE /
+    ▶ ON PC), and no rating, WATCHLIST, why or offered calls, since their
+    ids are the PC's.
+  - There's a "From the PC's library" line.
+  - Channels (`loadPcChannels`) shows "Asking the PC what's on…" while the
+    PC works the schedule out (12 s cold in the sandbox).
+- **Found on the S21:**
+  - "Cannot access 'pcLinkUp' before initialization". The Now page asks
+    before the `let` line ran, and `typeof` doesn't protect a `let` in its
+    dead zone. It's now `var`.
+  - The ▶ ON PC tile fix (also in this version): the overlay is
+    click-through except for named buttons, and ON PC wasn't one.
+- **A display bug the test caught:** PAGE is a raw string, so `\u2019` in
+  HTML markup shows literally. Use the real character in markup; only JS
+  strings may use `\u` escapes.
+
 ## 2026-10-20 — v0.2.0, the phone as a remote for the PC
 
 The version moves to 0.2 at the user's request: the phone now controls the

@@ -375,6 +375,10 @@ check("PC library: Now asks the PC while it's there, the phone otherwise",
       "function nowSource(" in page_src and "'/api/pcnow'" in page_src
       and "api(nowSource() + '?'" in page_src and "api('/api/tonight?'" in page_src)
 check("PC library: the genre counts too", "'/api/pcgenres'" in page_src)
+# Asked before its line has run (the Now page loads first): a 'let' there
+# throws even under typeof, which the S21 showed at start-up.
+check("PC library: the PC-is-there flag can be asked before it's set", "var pcLinkUp = null;" in page_src
+      and "let pcLinkUp" not in page_src)
 check("PC library: a title that plays both ways offers HERE and ON PC", "function playChoice(" in page_src
       and "\\u25B6 HERE" in page_src)
 check("PC library: the PC's picks never use the phone's ids for rating, watchlist or reasons",
