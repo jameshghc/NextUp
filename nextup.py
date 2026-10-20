@@ -13292,6 +13292,29 @@ def phone_link_set(on):
     return phone_link_state()
 
 
+def phone_link_bring_up(wait=2.0, tries=30):
+    """Turn the link on at start. Restarted, the old copy can still hold the
+    port for a few seconds while it closes, and giving up then left the
+    phone unable to see the PC until the next restart: so keep trying, in
+    the background, for a minute or so."""
+    phone_link_set(True)
+    if not PHONE_LINK_ERROR[0]:
+        return
+
+    def again():
+        for _ in range(tries):
+            time.sleep(wait)
+            if _PHONE_SERVER[0] or not phone_cfg()["enabled"]:
+                return
+            try:
+                phone_link_start(PHONE_PORT, PHONE_HOST)
+                PHONE_LINK_ERROR[0] = None
+                return
+            except OSError:
+                pass
+    threading.Thread(target=again, daemon=True, name="phone link retry").start()
+
+
 def phone_link_start(port=None, host="0.0.0.0", udp_port=None):
     """Start listening for the phone, and answering its call. Ports default
     to PHONE_PORT as it is now, not as it was when this was defined — the
@@ -25088,7 +25111,7 @@ def main():
         startup_failure("Next Up couldn't open port %d: %s" % (APP_PORT, exc))
         return
     if phone_cfg()["enabled"]:
-        phone_link_set(True)            # a port that won't open is reported, not fatal
+        phone_link_bring_up()           # a port that won't open is reported, not fatal
 
     mode = (WINDOW or "auto").lower()
 

@@ -312,6 +312,25 @@ try:
 except Exception:
     second = None
 c.close()
+# A restart: the old copy still holds the port for a few seconds while it
+# closes. The new one keeps trying rather than giving up for the session.
+import socket, threading
+n.phone_link_stop()
+n.phone_cfg()["enabled"] = True
+held = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+held.bind((n.PHONE_HOST, PORT))
+n.phone_link_bring_up(wait=0.2, tries=40)
+check("a port still held at start is reported", n.PHONE_LINK_ERROR[0], n.PHONE_LINK_ERROR[0])
+time.sleep(0.5)
+held.close()
+for _ in range(40):
+    if n._PHONE_SERVER[0]:
+        break
+    time.sleep(0.1)
+check("the link comes up once the old copy lets go of the port",
+      n._PHONE_SERVER[0] is not None and not n.PHONE_LINK_ERROR[0], n.PHONE_LINK_ERROR[0])
+n.phone_link_stop()
+
 check("off means off, even mid-connection", first.status == 200 and second is None, (first.status, second))
 
 js = "\n;\n".join(re.findall(r"<script>(.*?)</script>", n.PAGE, re.S))
