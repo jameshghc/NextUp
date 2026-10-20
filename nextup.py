@@ -107,8 +107,12 @@ YOUTUBE_PATH = os.path.join(DATA, "nextup_youtube.json")
 # Where a paired phone's history lands when cloud sharing is off — the same
 # one-file-per-device shape as the sharing folder, kept on this machine.
 PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
-LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
-ICON_PATH = os.path.join(HERE, "nextup.ico")
+# What ships WITH the app — fonts, logo, icon — rather than what it writes.
+# Inside the exe when frozen (PyInstaller unpacks them to _MEIPASS); beside
+# the code otherwise.
+ASSET_DIR = getattr(sys, "_MEIPASS", HERE)
+LOGO_PATH = os.path.join(ASSET_DIR, "nextup_logo.png")
+ICON_PATH = os.path.join(ASSET_DIR, "nextup.ico")
 
 APP_VERSION = "0.2.0"
 
@@ -3192,7 +3196,7 @@ _ART_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:jpg|jpeg|png|webp)$"
 # way with no connection at all. Same rule as the artwork: everything the
 # page needs is local. The same tight-name discipline as _ART_NAME_RE,
 # because these names arrive from a URL too.
-FONTS_DIR = os.path.join(HERE, "nextup_fonts")
+FONTS_DIR = os.path.join(ASSET_DIR, "nextup_fonts")
 _FONT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:woff2|css)$")
 
 
@@ -3574,6 +3578,14 @@ def find_mpv():
     found = shutil.which("mpv")
     if found:
         return found
+    # winget only updates the registry's PATH, which this already-running
+    # app won't see until it restarts; look where winget actually put it.
+    local = os.environ.get("LOCALAPPDATA", "")
+    if local:
+        for pattern in (("*mpv*", "mpv.exe"), ("*mpv*", "*", "mpv.exe")):
+            hits = glob.glob(os.path.join(local, "Microsoft", "WinGet", "Packages", *pattern))
+            if hits:
+                return hits[0]
     if os.name == "nt":
         raise AppError(
             "Can't find mpv anywhere. Install it with "
@@ -5364,6 +5376,24 @@ def read_resume_points():
 _RESUME_UNREADABLE_SAID = [False]
 
 
+def _any_resume_points():
+    conn = db()
+    try:
+        return bool(conn.execute("SELECT 1 FROM movies WHERE resume_pos > 0 UNION ALL"
+                                 " SELECT 1 FROM episodes WHERE resume_pos > 0 LIMIT 1").fetchone())
+    finally:
+        conn.close()
+
+
+def library_is_empty():
+    """No films and no shows yet: a first run."""
+    conn = db()
+    try:
+        return not conn.execute("SELECT 1 FROM movies UNION ALL SELECT 1 FROM shows LIMIT 1").fetchone()
+    finally:
+        conn.close()
+
+
 def sync_playback_state():
     """Fold mpv's resume files back into the library.
 
@@ -5380,6 +5410,14 @@ def sync_playback_state():
     if PLATFORM == "android":
         return
     points = read_resume_points()
+    if points is None and not os.path.exists(WATCH_LATER) and not _any_resume_points():
+        # A fresh install: mpv hasn't saved anything yet, so there's no
+        # folder — make it, and there's nothing to say about it.
+        try:
+            os.makedirs(WATCH_LATER, exist_ok=True)
+        except OSError:
+            pass
+        return
     if points is None:
         # Can't read mpv's saved places right now: change nothing rather
         # than take every missing file as "watched to the end".
@@ -10250,7 +10288,10 @@ def sync_state():
         "client_running": sync_client_running(service) if service else None,
         "device": snapshot_device_name(),
         "detected": detected,
-        "offer": (not base) and bool(detected) and not CONFIG.get("sync_offer_dismissed"),
+        # Not on a first run: sharing an empty library is a question with
+        # nothing behind it yet.
+        "offer": (not base) and bool(detected) and not library_is_empty()
+                 and not CONFIG.get("sync_offer_dismissed"),
         "devices": devices,
         "waiting": waiting,
         "shared": shared,
@@ -17736,7 +17777,7 @@ body:not(.android) #remotetab{display:none}
         <textarea id="c_folders" rows="4" placeholder="D:\Films&#10;D:\TV Shows"
           style="width:100%;padding:9px 10px;font-family:var(--mono);font-size:13px"></textarea></div>
       <div><label>Path to mpv.exe</label><input id="c_mpv" placeholder="C:\Program Files\MPV Player\mpv.exe"></div>
-      <div><label>Downloads folder</label><input id="c_downloads" placeholder="E:\Torrents"></div>
+      <div><label>Downloads folder</label><input id="c_downloads" placeholder="D:\Downloads"></div>
     </div>
     <p class="empty" id="sortnote">Where finished downloads land. Next Up runs the <code>process_new_movies.py</code> sorter kept in that folder, and shows you what it plans to do before anything moves.</p>
     <div class="rowbtns">
@@ -17808,7 +17849,7 @@ body:not(.android) #remotetab{display:none}
        list, downloads, and history both ways. Off until turned on here. -->
   <div class="settings" data-tab="sharing" id="phonesettings">
     <h3>Your phone</h3>
-    <p class="empty">Next Up on your phone gets this library's list, downloads films to watch anywhere, and swaps ratings and history with this PC whenever both are on the same Wi-Fi. The phone finds this PC by itself. Windows may ask whether Python can use private networks &mdash; say yes, or the phone can&rsquo;t reach it.</p>
+    <p class="empty">Next Up on your phone gets this library's list, downloads films to watch anywhere, and swaps ratings and history with this PC whenever both are on the same Wi-Fi. The phone finds this PC by itself. Windows may ask whether Next Up can use private networks &mdash; say yes, or the phone can&rsquo;t reach it.</p>
     <div id="phone_body"><p class="empty">Checking…</p></div>
     <!-- Plugged in. Sends the catalogue and the TMDB key, never a video —
          films are copied one by one, by choice. -->
@@ -22429,6 +22470,13 @@ $('#testmpv').onclick = async () => {
 
 $('#scanlib').onclick = async () => {
   $('#scanlib').disabled = true;
+  /* The folders as typed, saved first: pressing SCAN straight after typing
+     them used to scan the old (empty) list and report nothing. */
+  await post('/api/config', {
+    media_folders: $('#c_folders').value.split('\n'),
+    mpv_path: $('#c_mpv').value.trim(),
+    downloads_folder: $('#c_downloads').value.trim(),
+  });
   await post('/api/library/scan');
   pollLibrary();
 };
@@ -22626,9 +22674,12 @@ async function pollLibrary(){
     loadStatus();
     return;
   }
-  let msg = c.movies+' films, '+c.shows+' shows, '+c.episodes+' episodes in the library.';
-  if(c.unmatched) msg += ' '+c.unmatched+' files couldn\'t be read as a film or an episode.';
-  if(c.unidentified) msg += ' '+c.unidentified+' didn\'t match anything on TMDB — they\'re '
+  const plural = (k, one, many) => k + ' ' + (k === 1 ? one : (many || one + 's'));
+  let msg = plural(c.movies, 'film') + ', ' + plural(c.shows, 'show') + ', '
+    + plural(c.episodes, 'episode') + ' in the library.';
+  if(c.unmatched) msg += ' ' + plural(c.unmatched, 'file') + ' couldn\'t be read as a film or an episode.';
+  /* Without a key nothing was looked up, so nothing "didn't match". */
+  if(c.unidentified && STATUS.has_key) msg += ' ' + c.unidentified + ' didn\'t match anything on TMDB — they\'re '
     + 'still listed, just without artwork.';
   if(c.noposter && c.noposter !== c.unidentified)
     msg += ' '+c.noposter+' have no poster on TMDB at all.';
