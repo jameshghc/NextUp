@@ -110,7 +110,7 @@ PHONE_SYNC_DIR = os.path.join(DATA, "nextup_phone_sync")
 LOGO_PATH = os.path.join(HERE, "nextup_logo.png")
 ICON_PATH = os.path.join(HERE, "nextup.ico")
 
-APP_VERSION = "0.1.80"
+APP_VERSION = "0.1.81"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -16987,6 +16987,9 @@ header.mast .libplaces.offview{visibility:hidden}
   filter:blur(56px) saturate(.8) brightness(.36);transform:scale(1.08);opacity:var(--art-opacity,0);
   transition:opacity .5s ease}
 body:not(.glass) #roomart{display:none}
+/* Only on Now: the Library and the rest stay a neutral grey glass rather
+   than tinted by whatever the Now page last showed. */
+body:not(.onnow) #roomart{opacity:0}
 body.glass{background:radial-gradient(1100px 520px at 50% -160px,#24242c 0%,rgba(12,12,16,0) 70%),#0c0c10;
   --ink-2:var(--glass-panel);--ink-3:var(--glass-panel-2);--surface:var(--glass-panel);
   --surface-2:var(--glass-panel-2);--line:var(--glass-line);--edge:var(--glass-line);--muted:#a7a7b2}
@@ -17666,6 +17669,9 @@ function showSettingsTab(id){
 
 function switchTo(view){
   currentView = view;
+  /* The pick's art behind the page belongs to Now; everywhere else is a
+     neutral grey glass (see #roomart). */
+  document.body.classList.toggle('onnow', view === 'now');
   document.querySelectorAll('.tab').forEach(x => x.setAttribute('aria-selected', x.dataset.view===view));
   ['now','library','rate','channels','settings'].forEach(v => $('#view-'+v).classList.toggle('hidden', v!==view));
   $('#libnav').classList.toggle('offview', view!=='library');

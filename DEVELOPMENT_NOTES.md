@@ -16,6 +16,13 @@ at the top.
 
 ---
 
+## 2026-10-20 — v0.1.81, the pick's art is Now's alone
+
+The user: the Library shouldn't be tinted by whatever the Now page last
+showed, and should be a neutral grey glass. `switchTo` sets `body.onnow` on
+Now, and `body:not(.onnow) #roomart{opacity:0}`. So Library, Rate, Channels
+and Settings sit on the plain glass, and the art fades back in on Now.
+
 ## 2026-10-19 — v0.1.80, the pick's buttons stay put
 
 The user: "when you click next … the buttons move around. we need them to

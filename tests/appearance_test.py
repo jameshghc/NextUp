@@ -126,6 +126,10 @@ check("the black header with gold lettering", "body.glass #titlebar{" in page
 check("BACK beside NEXT on the pick", "'iconbtn pickback'" in page
       and "pickback" in page[page.find("function paintBack("):][:400])
 check("buttons on glass have a fill and a firm outline", "body.glass :is(.iconbtn,.watchtoggle,.favtoggle){" in page)
+# 2026-10-20: the pick's art is the Now page's alone. The Library (and the
+# rest) stay a neutral grey glass, not tinted by whatever Now last showed.
+check("the art behind the page shows on Now only", "body:not(.onnow) #roomart{" in page
+      and "document.body.classList.toggle('onnow', view === 'now')" in page)
 
 js = "\n;\n".join(re.findall(r"<script>(.*?)</script>", page, re.S))
 open(os.path.join(tempfile.gettempdir(), "nextup_appearance", "page.js"), "w", encoding="utf-8").write(js)
