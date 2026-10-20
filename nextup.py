@@ -12083,7 +12083,7 @@ def remote_state():
     return state
 
 
-def play_local(kind, item_id, resume=False):
+def play_local(kind, item_id, resume=False, start=None):
     """Play a film or episode from this machine's library — the PLAY button,
     and Play on PC from the phone. Raises AppError when the file can't be
     played."""
@@ -12091,8 +12091,10 @@ def play_local(kind, item_id, resume=False):
     # Asked for by name rather than assumed: pressing PLAY on a
     # film's page means play it, and the one place that means
     # "pick it up where I stopped" is a button that says so.
-    start = resume_position(kind, item_id) if resume else 0
-    if PLATFORM == "android" and not start:
+    explicit = start is not None
+    if not explicit:
+        start = resume_position(kind, item_id) if resume else 0
+    if PLATFORM == "android" and not start and not explicit:
         # On the PC, mpv's own watch-later file picks PLAY up
         # where you stopped. The phone's mpv keeps none for us,
         # so the same start is handed over by hand.
@@ -13553,17 +13555,39 @@ PC_WAKE_TRIES = 5              # a sleeping drive: asked this many times...
 PC_WAKE_PAUSE = 2              # ...this many seconds apart
 
 
-def pc_stream_play(stream, resume=False):
+def local_for_ident(kind, tmdb, season=None, episode=None):
+    """This phone's own copy of something, by what it is — or None."""
+    conn = db()
+    try:
+        if kind == "movie":
+            row = conn.execute("SELECT id FROM movies WHERE tmdb_id=? ORDER BY id LIMIT 1", (str(tmdb),)).fetchone()
+        else:
+            row = conn.execute("SELECT e.id FROM episodes e JOIN shows s ON s.id=e.show_id WHERE s.tmdb_id=?"
+                               " AND e.season=? AND e.episode=? ORDER BY e.id LIMIT 1",
+                               (str(tmdb), int(season), int(episode))).fetchone()
+    finally:
+        conn.close()
+    return row["id"] if row else None
+
+
+def pc_stream_play(stream, resume=False, start=None, channel=None):
     """Play something the PC has and this phone hasn't, straight from the
     PC: a ticket for the file (see phone_ticket_new), handed to mpv as a web
     address with its subtitles. Starts where it was left — here, or on the
     PC, whichever got further — when asked to resume."""
     kind = stream.get("kind")
-    tmdb_id = str(stream.get("tmdb_id") or "")
+    tmdb_id = str(stream.get("tmdb_id") or stream.get("tmdb") or "")
     if kind not in ("movie", "episode") or not tmdb_id:
         raise AppError("Nothing to play.")
     season = int(stream["season"]) if kind == "episode" else None
     episode = int(stream["episode"]) if kind == "episode" else None
+    # HERE, when the phone has it itself: its own copy, not a stream.
+    mine = local_for_ident(kind, tmdb_id, season, episode)
+    if mine:
+        play_local(kind, mine, resume, start=start)
+        if channel:
+            _ANDROID_SITTING["channel"] = channel
+        return {"ok": True, "local": True}
     if not pc_link_check()["up"]:
         raise AppError("The PC isn't on the Wi-Fi right now.")
     key = phone_file_key(kind, tmdb_id, season, episode)
@@ -13579,10 +13603,12 @@ def pc_stream_play(stream, resume=False):
         raise AppError("The PC doesn't have that file any more.")
     if status != 200 or not isinstance(reply, dict):
         raise AppError("The PC isn't on the Wi-Fi right now.")
-    start = 0
-    if resume:
-        here = elsewhere_progress(kind, tmdb_id, season, episode)
-        start = max(here["position"], int(reply.get("resume") or 0))
+    if start is None:
+        start = 0
+        if resume:
+            here = elsewhere_progress(kind, tmdb_id, season, episode)
+            start = max(here["position"], int(reply.get("resume") or 0))
+    start = max(0, int(start))
     base = PC_LINK["base"] or ""
     conn = db()
     try:
@@ -13601,6 +13627,8 @@ def pc_stream_play(stream, resume=False):
     _ANDROID_SITTING.clear()
     _ANDROID_SITTING.update(kind=kind, id=None, stream=ident, title=title, started_at=time.time(),
                             start=start)
+    if channel:
+        _ANDROID_SITTING["channel"] = channel
     return {"ok": True}
 
 
@@ -13625,6 +13653,29 @@ def pc_remote_call(method, path, body=None):
         # The page can't reach the PC's link itself; it asks this server,
         # which fetches the picture with the token (see /api/pcremote/art/).
         reply["art"] = "/api/pcremote/art/" + art[len("/phone/art/"):]
+    return reply
+
+
+def _pc_art(item):
+    if isinstance(item, dict) and str(item.get("art") or "").startswith("/phone/art/"):
+        item["art"] = "/api/pcremote/art/" + item["art"][len("/phone/art/"):]
+    return item
+
+
+def pc_library_call(path):
+    """The PC's Now, genres or Channels, for this phone's page: passed
+    through with the token, pictures pointed at this server (which fetches
+    them with the token). Says plainly when the PC isn't there."""
+    if not pc_link_check()["up"]:
+        return {"error": PC_AWAY}
+    status, reply = pc_link_call("GET", path, timeout=30)
+    if status != 200 or not isinstance(reply, dict):
+        return {"error": PC_AWAY}
+    for key in ("picks", "continue"):
+        for item in reply.get(key) or []:
+            _pc_art(item)
+    for ch in reply.get("channels") or []:
+        _pc_art(ch.get("now"))
     return reply
 
 
@@ -14150,6 +14201,14 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/remote/state":
                 return self.send_json(remote_state())
 
+            if route in ("/api/pcnow", "/api/pcgenres", "/api/pcchannels"):
+                if PLATFORM != "android":
+                    return self.send_json({"error": "only on the phone"}, 404)
+                target = {"/api/pcnow": "/phone/now", "/api/pcgenres": "/phone/genres",
+                          "/api/pcchannels": "/phone/channels"}[route]
+                qs = urllib.parse.urlparse(self.path).query
+                return self.send_json(pc_library_call(target + ("?" + qs if qs else "")))
+
             if route == "/api/pcremote/state":
                 if PLATFORM != "android":
                     return self.send_json({"error": "only on the phone"}, 404)
@@ -14566,7 +14625,11 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/play" and data.get("stream"):
                 if PLATFORM != "android":
                     return self.send_json({"error": "only on the phone"}, 404)
-                return self.send_json(pc_stream_play(data["stream"], bool(data.get("resume"))))
+                start = data.get("start")
+                return self.send_json(pc_stream_play(
+                    data["stream"], bool(data.get("resume")),
+                    start=None if start is None else float(start),
+                    channel=str(data["channel"]) if data.get("channel") else None))
 
             if route == "/api/play":
                 play_local(data.get("type"), int(data["id"]), bool(data.get("resume")))
@@ -24549,10 +24612,33 @@ _ANDROID_SITTING = {}
 def android_play_finished(position=None, duration=None, completed=False):
     """mpv on the phone has closed: record the sitting, then, if the PC is on
     the Wi-Fi, tell it — so stopping half way in bed is known on the sofa."""
+    channel = _ANDROID_SITTING.get("channel")
     try:
         _android_play_finished(position, duration, completed)
     finally:
         pc_link_sync_soon()
+    # A channel watched here, seen to the end of its programme: on to
+    # whatever the channel has on now. Stopped by hand, it just ends.
+    if channel and completed:
+        _carry_on_soon(channel)
+
+
+def _carry_on_soon(channel):
+    threading.Thread(target=channel_carry_on, args=(channel,), daemon=True,
+                     name="channel carry on").start()
+
+
+def channel_carry_on(channel):
+    """Play what the PC's channel has on now, on this phone, from where it
+    has got to."""
+    try:
+        listing = pc_library_call("/phone/channels")
+        ch = next((c for c in listing.get("channels") or [] if c.get("id") == channel), None)
+        now = (ch or {}).get("now") or {}
+        if now.get("ident"):
+            pc_stream_play(now["ident"], start=now.get("offset") or 0, channel=channel)
+    except Exception:
+        log_problem("carrying a channel on")
 
 
 def _android_play_finished(position=None, duration=None, completed=False):

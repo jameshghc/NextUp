@@ -73,6 +73,58 @@ want = n.ident_for("episode", eps[1]["id"])
 check("two episodes in a block: the one playing now, and how far into it", ident == want and at == 1200, (ident, at, want))
 
 # The rest of the suite (tasks 2 and 3) appends below this line.
+
+# --- Task 2: the phone's side ----------------------------------------------------------
+# This process plays the phone now, reaching the PC half above on loopback.
+n.PLATFORM = "android"
+n.CONFIG["device_id"] = PHONE
+n.CONFIG["pc_link"] = {"token": token, "pc": "Test PC", "pc_id": "", "port": PORT,
+                       "addresses": ["127.0.0.1"], "last_ip": None}
+n.pc_link_check(force=True)
+desk = n.ThreadingHTTPServer(("127.0.0.1", 8788), n.Handler)
+threading.Thread(target=desk.serve_forever, daemon=True).start()
+def dget(path):
+    with urllib.request.urlopen("http://127.0.0.1:8788" + path, timeout=30) as r:
+        return json.loads(r.read())
+def dpost(path, body):
+    req = urllib.request.Request("http://127.0.0.1:8788" + path, data=json.dumps(body).encode(), method="POST")
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read())
+got = dget("/api/pcnow?kind=film&count=4")
+check("the phone passes the PC's Now through", got.get("picks")
+      and all(not p.get("art") or p["art"].startswith("/api/pcremote/art/") for p in got["picks"]),
+      [p.get("art") for p in (got.get("picks") or [])[:2]])
+check("and its genres", dget("/api/pcgenres?kind=film").get("genres"))
+check("and its channels", dget("/api/pcchannels").get("channels"))
+
+played = []
+n.ANDROID_PLAYER = lambda path, start, subs=None: played.append((path, int(start)))
+n.require_media_file = lambda path: path
+conn = n.db()
+local = conn.execute("SELECT id, tmdb_id, path FROM movies WHERE tmdb_id<>'' AND path IS NOT NULL LIMIT 1").fetchone()
+conn.close()
+r = dpost("/api/play", {"stream": {"kind": "movie", "tmdb": local["tmdb_id"]}, "start": 125})
+check("HERE plays the phone's own copy when it has one, not a stream", played and played[-1][0] == local["path"],
+      (r, played[-1:]))
+check("and starts where it was asked to", played and played[-1][1] == 125, played[-1:])
+
+carried = []
+n._carry_on_soon = lambda chan: carried.append(chan)
+n._ANDROID_SITTING.update(channel="cult", started_at=time.time() - 3000)
+n.android_play_finished(completed=True)
+check("a channel watched here carries on when its programme ends", carried == ["cult"], carried)
+carried.clear()
+dpost("/api/play", {"stream": {"kind": "movie", "tmdb": local["tmdb_id"]}, "start": 0, "channel": "cult"})
+check("the channel is kept with the sitting", n._ANDROID_SITTING.get("channel") == "cult", dict(n._ANDROID_SITTING))
+n.android_play_finished(position=600, duration=6000)
+check("stopping by hand ends the channel", carried == [], carried)
+
+n.phone_link_stop()
+n.PC_LINK.update(checked=0)
+got = dget("/api/pcnow?kind=film")
+check("PC away: said plainly, nothing thrown", got.get("error") == n.PC_AWAY, got)
+desk.shutdown()
+n.PLATFORM = "windows"
 n.phone_link_stop()
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

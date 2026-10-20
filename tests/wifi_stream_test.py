@@ -359,6 +359,10 @@ n.LOCAL.loaded_at = 0
 st, body = desk_post("/api/play", {"type": "movie", "id": cid})
 check("copied later keeps the point", st == 200 and played[-1][0] == copy and played[-1][1] == 2000,
       (st, body, played[-1]))
+# Gone again: from v0.2.1 a stream of something the phone has itself plays
+# the phone's own copy, and the checks below are about streaming.
+conn = n.db(); conn.execute("DELETE FROM movies WHERE id=?", (cid,)); conn.commit(); conn.close()
+n.LOCAL.loaded_at = 0
 
 # Final review, Important 1: over Wi-Fi a stream can end early (the PC shut
 # down, the Wi-Fi dropped) and mpv may close as though it reached the end.
