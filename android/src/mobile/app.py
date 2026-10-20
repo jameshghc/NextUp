@@ -183,9 +183,9 @@ def no_margins(app):
     still wanted. A status bar swiped in for a moment floats over the page.
 
     The camera: in landscape the page runs beside it, as the user asked —
-    it's only a small hole at the edge of a wide screen. In portrait it sat
-    in the middle of the top bar, over the version and the counts, so there
-    the page starts below it (on a strip the page's own colour)."""
+    it's only a small hole at the edge of a wide screen. In portrait the
+    page runs under it too, and the header flows round it: report_cutout
+    tells the page where the hole is."""
     from java import jclass, dynamic_proxy
     Listener = jclass("androidx.core.view.OnApplyWindowInsetsListener")
     ViewCompat = jclass("androidx.core.view.ViewCompat")
@@ -200,11 +200,44 @@ def no_margins(app):
         def onApplyWindowInsets(self, view, insets):
             landscape = (activity.getResources().getConfiguration().orientation
                          == Configuration.ORIENTATION_LANDSCAPE)
-            edges = Types.statusBars() | (Types.displayCutout() if landscape else 0)
+            if not landscape:
+                report_cutout(app, activity, insets)
+            # The page runs under the camera in both orientations now; in
+            # portrait the header flows round the hole (nextup.cutout_look).
+            edges = Types.statusBars() | Types.displayCutout()
             return Builder(insets).setInsets(edges, Insets.NONE).build()
 
     ViewCompat.setOnApplyWindowInsetsListener(content, Edge())
     ViewCompat.requestApplyInsets(content)
+
+
+def report_cutout(app, activity, insets):
+    """Where the camera hole is at the top of the screen, in the page's own
+    pixels, for the header to flow round it: kept on nextup (for the page as
+    served) and handed to the page if it's already up."""
+    import json
+    try:
+        import nextup
+        cut = insets.getDisplayCutout()
+        found = None
+        if cut is not None:
+            density = activity.getResources().getDisplayMetrics().density
+            width = activity.getResources().getDisplayMetrics().widthPixels / density
+            for rect in cut.getBoundingRects().toArray():
+                if rect.top <= 4:           # the one at the top edge
+                    found = {"l": rect.left / density, "r": rect.right / density,
+                             "b": rect.bottom / density, "w": width}
+                    break
+        nextup.ANDROID_CUTOUT = found
+        look = nextup.cutout_look(found) if found else None
+        try:
+            webview = app.main_window.content._impl.native
+            webview.evaluateJavascript(
+                "window.nextupCutout && nextupCutout(%s)" % json.dumps(look), None)
+        except Exception:
+            pass                            # no page yet: it'll be served with it
+    except Exception:
+        traceback.print_exc()
 
 
 def pause_with_app(app):

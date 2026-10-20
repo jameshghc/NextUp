@@ -4880,12 +4880,41 @@ def appearance_look(settings=None):
     return look
 
 
+def cutout_look(cut=None):
+    """How the header gets round the camera hole in portrait: classes and
+    variables for <body>. A hole in the middle (most phones): the name to
+    its left, the library line starting just past it. A hole in a corner:
+    the whole header starts (or stops) clear of it. Nothing without one."""
+    cut = cut if cut is not None else ANDROID_CUTOUT
+    if PLATFORM != "android" or not isinstance(cut, dict):
+        return {"classes": [], "vars": {}}
+    try:
+        left, right, bottom, width = (float(cut[k]) for k in ("l", "r", "b", "w"))
+    except (KeyError, TypeError, ValueError):
+        return {"classes": [], "vars": {}}
+    if right <= left or bottom <= 0 or width <= 0:
+        return {"classes": [], "vars": {}}
+    look = {"vars": {"--cut-l": "%dpx" % round(left), "--cut-r": "%dpx" % round(right),
+                     "--cut-b": "%dpx" % round(bottom),
+                     "--cut-h": "%dpx" % max(38, round(bottom) + 6)}}
+    if left > 120 and right < width - 120:
+        look["classes"] = ["cutout-centre"]
+    else:
+        look["classes"] = ["cutout-side"]
+        if right < width / 2:
+            look["vars"]["--cut-pad-l"] = "%dpx" % (round(right) + 10)
+        else:
+            look["vars"]["--cut-pad-r"] = "%dpx" % (round(width - left) + 10)
+    return look
+
+
 def page_html():
     """The page, already dressed in the chosen look — classes and variables
     on <body> as it's sent, so it never draws once in the wrong one first."""
     look = appearance_look()
-    classes = (["android"] if PLATFORM == "android" else []) + look["classes"]
-    style = ";".join("%s:%s" % kv for kv in look["vars"].items())
+    cut = cutout_look()
+    classes = (["android"] if PLATFORM == "android" else []) + look["classes"] + cut["classes"]
+    style = ";".join("%s:%s" % kv for kv in list(look["vars"].items()) + list(cut["vars"].items()))
     tag = '<body class="%s" style="%s">' % (" ".join(classes), style)
     return PAGE.replace("<body>", tag, 1)
 
@@ -17180,6 +17209,20 @@ header.mast .libplaces.offview{visibility:hidden}
   filter:blur(56px) saturate(.8) brightness(.36);transform:scale(1.08);opacity:var(--art-opacity,0);
   transition:opacity .5s ease}
 body:not(.glass) #roomart{display:none}
+/* Round the camera hole, in portrait: the header runs up to the top of the
+   screen, as tall as the hole needs, with the name to the hole's left and
+   the library line starting just past it (cutout_look). In landscape the
+   hole is at the side and the header is left as it was. */
+@media (orientation:portrait){
+  body.android:is(.cutout-centre,.cutout-side){padding-top:var(--cut-h,38px)}
+  body.android:is(.cutout-centre,.cutout-side) #titlebar{height:var(--cut-h,38px)}
+  body.android.cutout-centre #titlebar .dragzone{position:relative}
+  body.android.cutout-centre #titlebar .dragzone > span:not(#libline){white-space:nowrap;overflow:hidden;
+    max-width:calc(var(--cut-l) - 66px)}
+  body.android.cutout-centre #libline{position:absolute;left:calc(var(--cut-r) + 10px);right:12px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  body.android.cutout-side #titlebar .dragzone{padding-left:var(--cut-pad-l,20px);padding-right:var(--cut-pad-r,0px)}
+}
 /* Only on Now: the Library and the rest stay a neutral grey glass rather
    than tinted by whatever the Now page last showed. */
 body:not(.onnow) #roomart{opacity:0}
@@ -17883,6 +17926,17 @@ function resetView(view){
 }
 
 let currentView = 'now';
+/* The camera hole, from the Android app when it learns of it (app.py calls
+   this; the page as served already carries it if it was known then). */
+function nextupCutout(look){
+  const b = document.body;
+  b.classList.remove('cutout-centre', 'cutout-side');
+  ['--cut-l', '--cut-r', '--cut-b', '--cut-h', '--cut-pad-l', '--cut-pad-r'].forEach(v => b.style.removeProperty(v));
+  if(!look) return;
+  look.classes.forEach(c => b.classList.add(c));
+  Object.entries(look.vars).forEach(([k, v]) => b.style.setProperty(k, v));
+}
+
 /* ---------- the look ----------
    Behind the page in Glass, the current pick's poster, blurred to a wash
    of its colours (#roomart). */
@@ -24322,6 +24376,10 @@ ANDROID_VIDEO_ACCESS = None
 # Also set by the Android app: hands a file to the mpv app (from the Play
 # Store) to play, from `start` seconds in. Raises with a reason if it can't.
 ANDROID_PLAYER = None
+# The camera hole at the top of the phone's screen in portrait, in CSS
+# pixels — {"l", "r", "b", "w"} — set by the Android app (app.py) from the
+# window's cutout. None: no hole, or not told yet.
+ANDROID_CUTOUT = None
 
 
 # What the phone handed to mpv last, until mpv closes and reports back.

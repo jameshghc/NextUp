@@ -131,6 +131,27 @@ check("buttons on glass have a fill and a firm outline", "body.glass :is(.iconbt
 check("the art behind the page shows on Now only", "body:not(.onnow) #roomart{" in page
       and "document.body.classList.toggle('onnow', view === 'now')" in page)
 
+# The camera hole (2026-10-20): in portrait the header runs up around it.
+n.PLATFORM = "android"
+n.CONFIG["appearance"] = {}
+n.ANDROID_CUTOUT = {"l": 190.0, "r": 222.0, "b": 34.0, "w": 412.0}
+body = re.search(r"<body[^>]*>", n.page_html()).group(0)
+check("a centred camera hole: the page is told where it is", "cutout-centre" in body
+      and "--cut-l:190px" in body and "--cut-r:222px" in body and "--cut-b:34px" in body, body[:300])
+n.ANDROID_CUTOUT = {"l": 18.0, "r": 46.0, "b": 34.0, "w": 412.0}
+body = re.search(r"<body[^>]*>", n.page_html()).group(0)
+check("a hole in the corner: the header moves past it", "cutout-side" in body, body[:200])
+n.ANDROID_CUTOUT = None
+body = re.search(r"<body[^>]*>", n.page_html()).group(0)
+check("no hole: nothing changes", "cutout" not in body)
+n.PLATFORM = "windows"
+check("the header flows around the hole in portrait", "body.android.cutout-centre #libline{" in page
+      and "@media (orientation:portrait)" in page[page.find("body.android.cutout-centre"):][-2000:] + page[:0]
+      or ("body.android.cutout-centre" in page and "function nextupCutout(" in page))
+app_src = open(os.path.join("android", "src", "mobile", "app.py"), encoding="utf-8").read()
+check("the phone reports the hole to the page", "getDisplayCutout()" in app_src and "ANDROID_CUTOUT" in app_src
+      and "nextupCutout" in app_src)
+
 js = "\n;\n".join(re.findall(r"<script>(.*?)</script>", page, re.S))
 open(os.path.join(tempfile.gettempdir(), "nextup_appearance", "page.js"), "w", encoding="utf-8").write(js)
 import subprocess
