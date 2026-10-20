@@ -78,6 +78,58 @@ Done and committed on `android-shell`:
   and `dist/NextUp-0.2.0-android.apk`. **Both builds predate the later
   fixes, so rebuild them.**
 
+### Picky-user QA findings for 0.2 (2026-10-20; screenshots in docs/mockups/shots/qa-*.png)
+
+**Glaring**
+1. **Classic: enabled buttons look disabled.** NEXT and WATCHLIST share
+   BACK's disabled style (muted text, no edge), on PC and phone. Give
+   `.iconbtn` an edge or lighter text, and keep the faded look for
+   `:disabled` only.
+2. **At 760px the Now pick is below the fold** (y=947) in the
+   single-column layout. Put `#tonight-out` before `#nowside`. There's also
+   a 58px empty band under Continue.
+3. **Phone Settings → Library shows PC-only controls:** the mpv path, the
+   downloads folder, the sorter, TEST MPV and C:\ paths. Hide them on
+   Android.
+4. **"you're 0% through S01E04"** in the Now headline. Below 1%, say
+   "you'd just started" or give minutes.
+
+**Worth fixing**
+- "1 shows" in the phone header, and "a 8" → "an 8".
+- Streamable tiles say "ON DESKTOP-O2K6QB8": say "ON THE PC".
+- The phone header's wordmark wraps ("NEXT / UP"): nowrap it, and
+  shorten the stats on the phone.
+- PC tile hover: the blurb is clipped with no fade, the caption shows
+  through under FAVOURITE, and "97 / min" wraps.
+- Phone peek: DETAILS and ON PC touch with 28px buttons, and the caption
+  ghosts through.
+- Detail sheets: mismatched button heights and gaps. The show sheet has
+  no top-level PLAY / CARRY ON. The phone's rating half-steps are 9px
+  wide. No ON PC in the phone details sheet.
+- Classic Appearance: the disabled sliders' thumbs aren't dimmed, and
+  the slider track is faint.
+- History: "watched to the end" sits beside "35%", and in-progress shows
+  in the error colour (rust).
+- The subtitles button is called both FETCH SUBS and FIND.
+- Rate: the loudest control is "Refresh queue", and BACK is enabled on
+  card 1.
+
+**Nitpicks:**
+- double ellipsis ".…"
+- Play / PLAY / Resume capitalised three ways
+- sub-tab styles mixed, lower-case tags
+- "For you" wording on Rate
+- "Directors Cut" missing its apostrophe, and "0m in"
+- the phone Channels REMOTE button opens the desktop popup
+- tooltip casing
+- mixed apostrophes
+- the film sheet repeats "nothing else of theirs here", "11.0x", money
+  formats, and CLEAR shows when not rated
+- Recent activity out of order, and episodes listed without the show name
+- the "‹" in the chooser is almost invisible
+- "♪ ENG" accent-coloured in Classic
+- sheet widths differ
+
 Still to do, in order:
 1. Read the picky-user QA agent's report, if it finished (screenshots in
    `docs/mockups/shots/qa-*.png`), and fix what matters.
@@ -85,7 +137,8 @@ Still to do, in order:
    (`python androiduild.py`, or `--no-install` on a copy).
 3. On the S21: check the camera-notch header (it needs the real cutout)
    and the Remote by eye.
-4. Run `python testsun_all.py` with nothing else running, since the
+4. Run `python tests
+un_all.py` with nothing else running, since the
    suites share ports 8794/8799.
 5. **Ask the user**, then create a PRIVATE releases-only repo (not public:
    the user's choice), invite friends by GitHub username, and attach the
