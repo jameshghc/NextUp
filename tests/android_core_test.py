@@ -287,6 +287,9 @@ check("phone Glass: no blurred page behind and no live blur; the Now card carrie
       "body.android #roomart{display:none}" in page_src
       and "body.android.glass *{backdrop-filter:none!important" in page_src
       and "'ppwash'" in page_src[page_src.find("function phonePick("):][:5000])
+check("Remote: Continue where you left off, under the hint when idle and under the channels when playing",
+      'id="rm_cont"' in page_src and "alive ? $('#rm_presets') : $('#rm_hint')" in page_src
+      and "if(view === 'remote' && pcLinkUp) remoteContinue();" in page_src)
 check("phone Favourites shows every favourite, not just the ones on the phone",
       "favWidened = true" in page_src)
 check("phone Now: a step-by-step chooser — kind, then genres in their colours, then what fits",

@@ -16644,17 +16644,17 @@ body.android #unfinished-sec{margin:4px 0 10px}
 body.android #unfinished-sec .sechead{margin-bottom:8px}
 body.android #unfinished-sec .sechead p{display:none}
 body.android #unfinished-sec .sechead h2{font-size:15px}
-body.android #unfinished-sec .alts{display:flex;gap:10px;overflow-x:auto;padding-bottom:0;flex-wrap:nowrap;
+body.android :is(#unfinished-sec,.rmcont) .alts{display:flex;gap:10px;overflow-x:auto;padding-bottom:0;flex-wrap:nowrap;
   scrollbar-width:none}
 /* No bars under the sideways strips either: a finger slides them, and the
    cut-off tile at the edge says there's more. */
-body.android #unfinished-sec .alts::-webkit-scrollbar,body.android .chooserow.genres::-webkit-scrollbar{display:none}
-body.android #unfinished-sec .alt{flex:0 0 160px;margin:0;grid-template-columns:24px 1fr;gap:7px;padding:5px 7px}
-body.android #unfinished-sec .alt img,body.android #unfinished-sec .alt .noposter{width:24px!important}
-body.android #unfinished-sec .alt h3{font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-body.android #unfinished-sec .alt p{font-size:9.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-body.android #unfinished-sec .alt button{margin-top:2px;padding:1px 8px;font-size:9.5px}
-body.android #unfinished-sec .alt p.empty:empty{display:none}
+body.android :is(#unfinished-sec,.rmcont) .alts::-webkit-scrollbar,body.android .chooserow.genres::-webkit-scrollbar{display:none}
+body.android :is(#unfinished-sec,.rmcont) .alt{flex:0 0 160px;margin:0;grid-template-columns:24px 1fr;gap:7px;padding:5px 7px}
+body.android :is(#unfinished-sec,.rmcont) .alt img,body.android :is(#unfinished-sec,.rmcont) .alt .noposter{width:24px!important}
+body.android :is(#unfinished-sec,.rmcont) .alt h3{font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+body.android :is(#unfinished-sec,.rmcont) .alt p{font-size:9.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+body.android :is(#unfinished-sec,.rmcont) .alt button{margin-top:2px;padding:1px 8px;font-size:9.5px}
+body.android :is(#unfinished-sec,.rmcont) .alt p.empty:empty{display:none}
 /* The pick: the poster a library tile and a bit (about half the card),
    the facts and the why beside it. */
 .pick.phonepick{display:flex;flex-direction:column;gap:0;padding:0;min-height:0}
@@ -17613,6 +17613,11 @@ body.customround :is(.settings,.pick,.alt,.hubcard,.card,.coll,.dirblock,.profil
 #view-remote [data-a=voldown],#view-remote [data-a=volup]{font-size:20px;min-width:52px}
 #view-remote .iconbtn.on{background:rgba(var(--accent-rgb),.22);border-color:rgba(var(--accent-rgb),.6);color:var(--marigold-2)}
 #view-remote .iconbtn.rmplain:disabled{opacity:1;border-color:transparent;background:none;color:var(--paper)}
+/* Continue where you left off, as on Now: under the hint when nothing's
+   playing, under the channels when the whole Remote is showing (moved
+   between the two by remoteRender). Only ever the PC's. */
+.rmcont{display:flex;flex-direction:column;gap:12px;min-width:0}
+.rmcont.hidden{display:none}
 .rmlabel{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:-6px}
 .rmlabel.hidden{display:none}
 .rmstop{justify-content:center}
@@ -18375,6 +18380,7 @@ function switchTo(view){
   document.querySelectorAll('.tab').forEach(x => x.setAttribute('aria-selected', x.dataset.view===view));
   ['now','library','rate','channels','settings','remote'].forEach(v => $('#view-'+v).classList.toggle('hidden', v!==view));
   remotePoll(view === 'remote' && pcLinkUp);
+  if(view === 'remote' && pcLinkUp) remoteContinue();
   if(view === 'remote' && !pcLinkUp){
     /* Tapped while the PC isn't answering: say so, and look once — not a
        poll that would call out across the network every second. */
@@ -19239,6 +19245,7 @@ async function loadTonight(){
     showPick(data.picks[0]);
   }
   const un = data['continue']||[];
+  if(data._pc) lastPcContinue = un;
   $('#unfinished-sec').classList.toggle('hidden', !un.length);
   $('#unfinished-count').textContent = un.length ? un.length+' IN PROGRESS' : '';
   const uo = $('#unfinished-out'); uo.innerHTML='';
@@ -23744,6 +23751,30 @@ function clock(sec){
   return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(ss).padStart(2, '0');
 }
 
+/* The Remote's Continue strip: the PC's, drawn from what Now last had and
+   then asked afresh each time the Remote opens — never on a timer. */
+var lastPcContinue = null;      // var: loadTonight sets it before this line may run
+function remoteContinueDraw(items){
+  const box = $('#rm_cont');
+  if(!box) return;
+  const out = $('#rm_contout');
+  out.innerHTML = '';
+  (items || []).forEach(u => {
+    if(!u.why) u.why = u.percent + '% in · ' + u.left + ' min left';
+    out.append(altCard(u));
+  });
+  box.classList.toggle('hidden', !(items && items.length) || !pcLinkUp);
+}
+async function remoteContinue(){
+  if(lastPcContinue) remoteContinueDraw(lastPcContinue);
+  if(!pcLinkUp) return;
+  const data = await nowFetch(tonightParams(new Set(), false));
+  if(data && data._pc){
+    lastPcContinue = data['continue'] || [];
+    remoteContinueDraw(lastPcContinue);
+  }
+}
+
 function remoteBuild(){
   if(remoteBuilt) return;
   remoteBuilt = true;
@@ -23781,6 +23812,10 @@ function remoteBuild(){
     </div>
     <div class="rmlabel" id="rm_chlabel">Channels</div>
     <div class="rmchannels" id="rm_presets"></div>
+    <div class="rmcont hidden" id="rm_cont">
+      <div class="rmlabel">Continue where you left off</div>
+      <div class="alts" id="rm_contout"></div>
+    </div>
     </div>`;
   const acts = {
     back10: ['seek', {by: -10}], fwd30: ['seek', {by: 30}], pause: ['toggle', {what: 'pause'}],
@@ -23812,6 +23847,10 @@ function remoteRender(st){
   if(alive && st.art){ if(art.getAttribute('src') !== st.art) art.src = st.art; art.classList.remove('hidden'); }
   else art.classList.add('hidden');
   $('#view-remote').classList.toggle('rmidle', !alive);
+  const cont = $('#rm_cont');
+  const home = alive ? $('#rm_presets') : $('#rm_hint');
+  if(cont.previousElementSibling !== home) home.after(cont);
+  cont.classList.toggle('hidden', !!away || !$('#rm_contout').children.length);
   const dur = alive ? (st.duration || 0) : 0, pos = alive ? (st.position || 0) : 0;
   const seek = $('#rm_seek');
   seek.max = Math.max(1, Math.round(dur));
