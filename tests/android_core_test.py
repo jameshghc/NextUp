@@ -278,6 +278,10 @@ check("phone: a second tap on the poster closes the peek rather than opening det
 check("phone Now: the pick in its own layout, a short why between the plot and the rating",
       "function phonePick(" in page_src and "'ppwhy'" in page_src and 'id="whythis"' not in page_src
       and "body.android #view-now:not(.hidden)" in page_src)
+_ppn = page_src[page_src.find("function phonePick("):][:4000]
+check("phone Now: a box-sized poster with the facts beside it, the plot and rating below",
+      "'ppmain'" in _ppn and "'ppside'" in _ppn and "'ppfacts'" in _ppn and "ppover" not in _ppn
+      and ".phonepick .ppmain{" in page_src and "aspect-ratio:2/3" in page_src[page_src.find(".phonepick .pptop{"):][:300])
 check("phone Favourites shows every favourite, not just the ones on the phone",
       "favWidened = true" in page_src)
 check("phone Now: a step-by-step chooser — kind, then genres in their colours, then what fits",

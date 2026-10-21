@@ -15203,8 +15203,8 @@ PAGE = r"""<!doctype html>
    rounded, inset thumb. They're kept here only for anything that has no
    ::-webkit- support at all, which is nothing this normally runs in. */
 /* On the phone, no bar down the side: a finger scrolls the page, and the
-   bar only took a strip off its right edge. The sideways strips keep
-   theirs, which say there's more to slide along to. */
+   bar only took a strip off its right edge. (Now's sideways strips drop
+   theirs too, below.) */
 body.android ::-webkit-scrollbar:vertical{width:0;display:none}
 @supports not selector(::-webkit-scrollbar){
   *{scrollbar-width:thin;scrollbar-color:rgba(236,230,220,.20) transparent}
@@ -16596,7 +16596,7 @@ body.android #view-now > #unfinished-sec{order:1}
    alternatives right under it. */
 body.android #nowside{display:contents}
 body.android #nowside > .nowchooser{order:2}
-body.android #nowside > .nowsource{order:3}
+body.android #nowside > .nowsource{display:none}   /* said in the pick's eyebrow */
 body.android #view-now > #tonight-out{order:4}
 body.android #nowside > .nowfits{order:5}
 body.android #view-now > #reasons-out{order:6}
@@ -16606,7 +16606,8 @@ body.android #view-now > .filters{display:none}
 body.android .nowchooser{display:flex;flex-direction:column;gap:10px;margin:4px 0 12px}
 body.android .chooserow{display:flex;gap:8px}
 body.android .chooserow.hidden{display:none}
-body.android .chooserow.genres{overflow-x:auto;flex-wrap:nowrap;padding-bottom:4px;scroll-snap-type:x proximity}
+body.android .chooserow.genres{overflow-x:auto;flex-wrap:nowrap;padding-bottom:0;scroll-snap-type:x proximity;
+  scrollbar-width:none}
 .kchip{flex:1;padding:10px 0;border-radius:999px;background:var(--ink-2);border:1px solid var(--line);
   color:var(--paper);font-family:var(--display);font-weight:700;font-size:14px;cursor:pointer}
 .kchip.on{background:var(--paper);color:#17151c;border-color:var(--paper)}
@@ -16631,28 +16632,45 @@ body.android .nowfits.hidden{display:none}
 body.android #view-now .spin{display:none}
 body.android #view-now > #reasons-out{display:none}
 /* The Continue strip: sideways, compact. */
-body.android #unfinished-sec{margin:4px 0 12px}
+body.android #unfinished-sec{margin:4px 0 10px}
 body.android #unfinished-sec .sechead{margin-bottom:8px}
 body.android #unfinished-sec .sechead p{display:none}
 body.android #unfinished-sec .sechead h2{font-size:15px}
-body.android #unfinished-sec .alts{display:flex;gap:10px;overflow-x:auto;padding-bottom:4px;flex-wrap:nowrap}
+body.android #unfinished-sec .alts{display:flex;gap:10px;overflow-x:auto;padding-bottom:0;flex-wrap:nowrap;
+  scrollbar-width:none}
+/* No bars under the sideways strips either: a finger slides them, and the
+   cut-off tile at the edge says there's more. */
+body.android #unfinished-sec .alts::-webkit-scrollbar,body.android .chooserow.genres::-webkit-scrollbar{display:none}
 body.android #unfinished-sec .alt{flex:0 0 160px;margin:0;grid-template-columns:24px 1fr;gap:7px;padding:5px 7px}
 body.android #unfinished-sec .alt img,body.android #unfinished-sec .alt .noposter{width:24px!important}
 body.android #unfinished-sec .alt h3{font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 body.android #unfinished-sec .alt p{font-size:9.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 body.android #unfinished-sec .alt button{margin-top:2px;padding:1px 8px;font-size:9.5px}
 body.android #unfinished-sec .alt p.empty:empty{display:none}
-/* The pick. */
+/* The pick: the poster a library tile and a bit (about half the card),
+   the facts and the why beside it. */
 .pick.phonepick{display:flex;flex-direction:column;gap:0;padding:0;min-height:0}
-.phonepick .pptop{position:relative;cursor:pointer;touch-action:pan-y}
-.pick.phonepick .pptop img.poster,.pick.phonepick .pptop .noposter{width:100%;height:min(44vh,400px);aspect-ratio:auto;
-  object-fit:cover;object-position:center 22%;border-radius:0;display:block}
-.phonepick .ppover{position:absolute;left:0;right:0;bottom:0;padding:60px 16px 14px;
-  background:linear-gradient(to bottom,rgba(6,5,9,0),rgba(6,5,9,.88) 55%,rgba(6,5,9,.96))}
-.phonepick .ppover .eyebrow{margin-bottom:6px}
-.phonepick .ppover h2{font-size:28px;margin:0 0 2px}
-.phonepick .ppover .subline{margin-bottom:6px}
-.phonepick .ppover .why{font-size:13.5px;margin:0;line-height:1.35}
+.phonepick .ppmain{display:grid;grid-template-columns:53% minmax(0,1fr);gap:12px;padding:14px 14px 0;
+  align-items:start}
+.phonepick .pptop{position:relative;cursor:pointer;touch-action:pan-y;aspect-ratio:2/3;
+  border-radius:8px;overflow:hidden;box-shadow:0 6px 18px rgba(0,0,0,.45)}
+.pick.phonepick .pptop img.poster,.pick.phonepick .pptop .noposter{width:100%;height:100%;aspect-ratio:auto;
+  object-fit:cover;border-radius:0;display:block}
+/* No taller than the poster, whatever the title: the row is the poster's
+   height, so the buttons under it never move. The why gives way first. */
+.phonepick .ppside{display:flex;flex-direction:column;gap:7px;min-width:0;height:0;min-height:100%;overflow:hidden}
+.phonepick .ppside > *{flex:none}
+.phonepick .ppside .why{flex:0 1 auto;min-height:0}
+.phonepick .ppside .eyebrow{margin:2px 0 0}
+.phonepick .ppside h2{font-size:21px;line-height:1.12;margin:0;overflow-wrap:anywhere;
+  display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden}
+.phonepick .ppside .subline{font-size:12px;margin:0;display:-webkit-box;-webkit-line-clamp:2;
+  -webkit-box-orient:vertical;overflow:hidden}
+.phonepick .ppfacts{font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.4}
+.phonepick .pptags{display:flex;flex-wrap:wrap;gap:5px}
+.phonepick .pptags .ptag{font-size:9.5px;padding:3px 7px}
+.phonepick .ppside .why{font-size:12.5px;line-height:1.35;margin:0;color:var(--paper);
+  display:-webkit-box;-webkit-line-clamp:5;-webkit-box-orient:vertical;overflow:hidden}
 /* The buttons stay put from one pick to the next, as on the PC, in two
    rows: Play the width of the card, then BACK, NEXT and WATCHLIST in equal
    thirds. Fixed places, so a longer label ("ON WATCHLIST") can't push the
@@ -16670,8 +16688,7 @@ body.android #unfinished-sec .alt p.empty:empty{display:none}
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;justify-content:center;text-align:center}
 .phonepick > .rowbtns .play{padding-top:13px;padding-bottom:13px;font-size:16px}
 .phonepick > .rowbtns .iconbtn,.phonepick > .rowbtns .watchtoggle{padding-top:11px;padding-bottom:11px}
-.phonepick .ppinfo{padding:6px 14px 14px}
-.phonepick .ppinfo .meta{margin:4px 0 8px}
+.phonepick .ppinfo{padding:14px 14px 14px}
 .phonepick .plot{margin:0 0 10px;cursor:pointer}
 .phonepick .plot.clamp{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .phonepick .ppwhy{margin:0 0 12px;padding:8px 11px;border-left:2px solid var(--marigold);
@@ -18836,15 +18853,43 @@ function shortWhy(p){
    Built from the same parts as the PC's card, so they behave the same.
    A tap on the poster opens its page; a swipe left is NOT THIS. */
 function phonePick(p, poster, right, btns, problem, meta, rateSlot){
+  /* The poster the size of a box on a shelf (a library tile and a little
+     more), top left, with what it is and why beside it; the buttons under
+     both. All of that on the screen at once; the plot, the longer why and
+     your rating below, for whoever scrolls. */
   const card = el('div', 'pick phonepick' + (p.type === 'episode' ? ' tv' : ''));
+  const main = el('div', 'ppmain');
   const top = el('div', 'pptop');
   if(poster) top.append(poster);
-  const over = el('div', 'ppover');
-  ['.eyebrow', 'h2', '.subline', '.why'].forEach(sel => {
+  const side = el('div', 'ppside');
+  ['.eyebrow', 'h2'].forEach(sel => {
     const node = right.querySelector(sel);
-    if(node) over.append(node);
+    if(node) side.append(node);
   });
-  top.append(over);
+  /* Where it's from, in the eyebrow rather than a line of its own. */
+  const brow = side.querySelector('.eyebrow');
+  if(p._pc && brow) brow.textContent += ' · from the PC';
+  const facts = el('div', 'ppfacts');
+  if(p.type === 'episode'){
+    const sub = right.querySelector('.subline');
+    if(sub) side.append(sub);                    // the show and which episode
+  }
+  facts.textContent = [p.year, p.runtime ? p.runtime + ' min' : '',
+                       p.rating ? 'TMDB ' + p.rating : ''].filter(Boolean).join(' \u00B7 ');
+  if(facts.textContent) side.append(facts);
+  const genres = (p.genres || []).slice(0, 2);
+  if(genres.length){
+    const tags = el('div', 'pptags');
+    genres.forEach(g => {
+      const t = el('span', 'ptag', esc(genreShort(g)));
+      t.style.setProperty('--h', genreHue(g));
+      tags.append(t);
+    });
+    side.append(tags);
+  }
+  const why = right.querySelector('.why');
+  if(why) side.append(why);
+  main.append(top, side);
   let x0 = null, dx = 0;
   top.addEventListener('touchstart', e => { x0 = e.touches[0].clientX; dx = 0; top.classList.add('swiping'); },
                        {passive: true});
@@ -18865,9 +18910,8 @@ function phonePick(p, poster, right, btns, problem, meta, rateSlot){
     if(p._pc) return;                   // the PC's id: the phone's page for it would be the wrong title
     p.type === 'episode' ? openShow(p.rate_id) : openFilm(p.id);
   };
-  card.append(top, btns, problem);
+  card.append(main, btns, problem);
   const info = el('div', 'ppinfo');
-  info.append(meta);
   const plot = right.querySelector('.plot');
   if(plot){
     plot.classList.add('clamp');
