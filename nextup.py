@@ -15202,6 +15202,10 @@ PAGE = r"""<!doctype html>
    where both exist the standard ones win outright, which throws away the
    rounded, inset thumb. They're kept here only for anything that has no
    ::-webkit- support at all, which is nothing this normally runs in. */
+/* On the phone, no bar down the side: a finger scrolls the page, and the
+   bar only took a strip off its right edge. The sideways strips keep
+   theirs, which say there's more to slide along to. */
+body.android ::-webkit-scrollbar:vertical{width:0;display:none}
 @supports not selector(::-webkit-scrollbar){
   *{scrollbar-width:thin;scrollbar-color:rgba(236,230,220,.20) transparent}
 }
@@ -16588,12 +16592,13 @@ body:not(.android) .pick .rowbtns .play{min-width:104px}
 
 body.android #view-now:not(.hidden){display:flex;flex-direction:column}
 body.android #view-now > #unfinished-sec{order:1}
-body.android #view-now > #tonight-out{order:2}
-/* The suggestion, then its alternatives right under it, then the chooser
-   that produced them. */
+/* Continue, then the chooser, then the suggestion it produced with its
+   alternatives right under it. */
 body.android #nowside{display:contents}
-body.android #nowside > .nowfits{order:3}
-body.android #nowside > .nowchooser{order:4}
+body.android #nowside > .nowchooser{order:2}
+body.android #nowside > .nowsource{order:3}
+body.android #view-now > #tonight-out{order:4}
+body.android #nowside > .nowfits{order:5}
 body.android #view-now > #reasons-out{order:6}
 body.android #view-now > .filters{display:none}
 /* The chooser: one row of three, then the genres sliding sideways, each in
@@ -16648,9 +16653,23 @@ body.android #unfinished-sec .alt p.empty:empty{display:none}
 .phonepick .ppover h2{font-size:28px;margin:0 0 2px}
 .phonepick .ppover .subline{margin-bottom:6px}
 .phonepick .ppover .why{font-size:13.5px;margin:0;line-height:1.35}
-.phonepick > .rowbtns{padding:12px 14px 4px;flex-wrap:nowrap}
-.phonepick > .rowbtns .play{flex:1;padding:12px 18px;font-size:16px}
-.phonepick > .rowbtns .iconbtn{padding:11px 14px}
+/* The buttons stay put from one pick to the next, as on the PC, in two
+   rows: Play the width of the card, then BACK, NEXT and WATCHLIST in equal
+   thirds. Fixed places, so a longer label ("ON WATCHLIST") can't push the
+   others along. The PC's picks: HERE and ON PC, then BACK and NEXT. */
+.phonepick > .rowbtns{padding:14px 14px 4px;display:grid;gap:8px;
+  grid-template-columns:repeat(6,minmax(0,1fr))}
+.phonepick > .rowbtns > *{grid-column:span 2}
+.phonepick > .rowbtns > .play{grid-column:1 / -1}
+.phonepick > .rowbtns .playchoice{display:contents}
+.phonepick > .rowbtns .playchoice > button,
+.phonepick > .rowbtns:has(.playchoice) > button{grid-column:span 3}
+.phonepick > .rowbtns .playchoice .rmmsg:not(:empty){grid-column:1 / -1}
+.phonepick > .rowbtns .playchoice > button{align-self:stretch;padding-top:13px;padding-bottom:13px;font-size:14px}
+.phonepick > .rowbtns button{min-width:0;width:100%;margin:0;border-radius:12px;padding-left:4px;padding-right:4px;letter-spacing:.03em;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;justify-content:center;text-align:center}
+.phonepick > .rowbtns .play{padding-top:13px;padding-bottom:13px;font-size:16px}
+.phonepick > .rowbtns .iconbtn,.phonepick > .rowbtns .watchtoggle{padding-top:11px;padding-bottom:11px}
 .phonepick .ppinfo{padding:6px 14px 14px}
 .phonepick .ppinfo .meta{margin:4px 0 8px}
 .phonepick .plot{margin:0 0 10px;cursor:pointer}
@@ -17744,7 +17763,7 @@ body:not(.android) #remotetab{display:none}
 <!-- ================= NOW ================= -->
 <div id="view-now" class="hidden">
   <!-- The chooser: Anything / Film / TV, then a sliding row of genres in
-       their colours, then what fits. At the foot of the phone's page; along
+       their colours, then what fits. Under Continue on the phone's page; along
        the top of the PC's, beside a Back. -->
   <div id="nowside">
   <div class="nowsource hidden" id="nowsource">From the PC’s library</div>
@@ -22318,7 +22337,10 @@ const BOOKMARK_OFF = '<svg class="mark" viewBox="0 0 24 24" fill="none" stroke="
   + 'stroke-width="2" stroke-linejoin="round" aria-hidden="true">'
   + '<path d="M6 2h12a2 2 0 0 1 2 2v18l-8-4.6L4 22V4a2 2 0 0 1 2-2z"/></svg>';
 /* Filled when it's on, outlined when it isn't - the same read as the heart. */
-const watchLabel = on => (on ? BOOKMARK_ON + 'ON WATCHLIST' : BOOKMARK_OFF + 'WATCHLIST');
+/* The phone's button is a third of the card: the filled mark and its colour
+   say it's on, rather than a longer label that won't fit. */
+const watchLabel = on => (on ? BOOKMARK_ON + (document.body.classList.contains('android') ? 'WATCHLIST' : 'ON WATCHLIST')
+                             : BOOKMARK_OFF + 'WATCHLIST');
 
 const LIVE_SIGNAL_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" '
   + 'stroke-linecap="round"><circle cx="12" cy="12" r="2.1" fill="currentColor" stroke="none"/>'
