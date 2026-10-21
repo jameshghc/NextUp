@@ -14,6 +14,9 @@ What changed in Next Up, version by version, newest first. Version numbers start
 - A channel watched on the phone moves on to the next programme by itself; stopping it by hand ends it.
 - A channel joined from the phone starts at the point the schedule has reached.
 - The phone's Now page is redesigned: a box-sized poster with the facts, genres and why beside it, everything you need on one screen, and the plot and your rating below for whoever scrolls.
+- Channels 2 to 5 (Universal, True Life, Action, Comedy) now show films only; Al Jazeera moves to the end of the dial, and Cold Ones is gone.
+- On the phone, every pick has the same buttons in the same places: HERE and ON PC, then Back, Next and Watchlist, with whatever can't be done greyed out.
+- With the PC connected, the phone's Library opens on Show all, and Show and Sort share one line.
 - The phone's Now page is tidier: the chooser sits under Continue, the pick's buttons sit in two fixed rows that don't move, and no scroll bars take up space.
 
 ### Fixes and polish
@@ -21,6 +24,7 @@ What changed in Next Up, version by version, newest first. Version numbers start
 - Fixed an error that could stop the phone's Now page loading when it first opened.
 - ON PC is offered for titles with no TMDB match, and a copy since removed from the phone streams instead.
 - A channel started from the phone no longer keeps relaunching itself.
+- Opening something on the phone and closing it within a minute no longer puts it in Continue.
 - After a restart, the phone's link keeps trying if the previous copy of the app hasn't let go yet.
 - A stray code showing instead of an apostrophe is fixed.
 

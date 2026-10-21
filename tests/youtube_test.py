@@ -57,8 +57,15 @@ n.mpv_command = lambda *a: {"error": "success"}
 n.mpv_get = lambda *a, **k: None
 n.raise_app_window = lambda: None
 
-ch = next(c for c in n.CHANNELS if c["id"] == "coldones")
-check("Cold Ones is channel #22", ch["name"] == "Cold Ones #22" and ch["number"] == 22, ch["name"])
+check("Cold Ones is off the dial", not any(c["id"] == "coldones" for c in n.CHANNELS))
+check("Al Jazeera is the last channel", n.CHANNELS[-1]["id"] == "news" and n.CHANNELS[-1]["number"] == 21,
+      n.CHANNELS[-1]["name"])
+# The YouTube channel type stays: tested on a channel of its own, added here.
+n.CHANNELS.append({"id": "coldones", "name": "Cold Ones #22", "number": 22, "type": "youtube",
+                   "source": "https://www.youtube.com/@ColdOnes/videos"})
+ch = n.CHANNELS[-1]
+check("channels 2 to 5 are films only",
+      all(c.get("film_only") for c in n.CHANNELS[1:5]), [(c["name"], c.get("film_only")) for c in n.CHANNELS[1:5]])
 
 def wait_fetch():
     for _ in range(300):

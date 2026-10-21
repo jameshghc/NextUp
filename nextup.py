@@ -10587,27 +10587,25 @@ def _daytime_key(title):
 
 CHANNELS = [
     {"id": "anything", "name": "Everything", "genres": []},
+    # 2 to 5 are films only, asked for: the front of the dial is somewhere to
+    # land on a film. Their television has homes further along — Saturday
+    # Morning, Binge, All Day Daytime, Cartoon Swim — and on Everything.
     # "Animation" alone isn't enough for Universal — South Park and
     # Invincible are animated but not remotely family viewing. Family/Kids
     # specifically is the bar; Animation on its own no longer qualifies.
     {"id": "kids", "name": "Universal",
-     "genres": ["Family", "Kids"], "episode_block_size": 2},
+     "genres": ["Family", "Kids"], "film_only": True},
     {"id": "docs", "name": "True Life",
-     "genres": ["Documentary"]},
+     "genres": ["Documentary"], "film_only": True},
     {"id": "action", "name": "Action",
-     "genres": ["Action", "Adventure", "Action & Adventure"]},
+     "genres": ["Action", "Adventure", "Action & Adventure"], "film_only": True},
     {"id": "comedy", "name": "Comedy",
-     "genres": ["Comedy"],
+     "genres": ["Comedy"], "film_only": True,
      # TMDB tags plenty of dark or tense films "Comedy" as a minor third
      # wheel (Parasite, Bugonia) — being tagged Comedy at all isn't enough
      # to mean lighthearted, so anything tonally opposed gets excluded even
      # if Comedy is also in its genre list.
      "exclude_genres": ["Thriller", "Horror"]},
-    # Not built from your library at all — a straight pipe to a live stream.
-    # Needs an internet connection, and yt-dlp on PATH for mpv to resolve a
-    # YouTube link, which the others never require.
-    {"id": "news", "name": "Al Jazeera Live", "type": "live",
-     "url": "https://www.youtube.com/watch?v=gCNeDWCI0vo"},
     # Named by hand, and ONLY by hand. Genre could not carry this one and was
     # never going to: "Saturday morning" is a tone, not a category, and TMDB
     # tags Pokemon and Attack on Titan identically -- Animation, Action &
@@ -10769,12 +10767,14 @@ CHANNELS = [
      "require_genres": ["Animation"], "genres": ["Comedy"],
      "exclude_genres": ["Family", "Kids"], "exclude_countries": ["Japan", "JP"],
      "titles": CARTOON_SWIM_TITLES, "episode_block_size": 3},
-    # Not your library at all: one creator's YouTube uploads, in a random
-    # order on a loop, like a station that only shows them. Asked for by
-    # name. The list comes from yt-dlp reading their uploads page (see
-    # youtube_videos) and plays through mpv the way Al Jazeera does.
-    {"id": "coldones", "name": "Cold Ones", "type": "youtube",
-     "source": "https://www.youtube.com/@ColdOnes/videos"},
+    # A channel can also be one creator's YouTube uploads, in a random order
+    # on a loop ("type": "youtube", "source": their videos page — see
+    # youtube_videos). Cold Ones was one; taken off the dial when asked.
+    # Last on the dial, asked for. Not built from your library at all — a straight pipe to a live stream.
+    # Needs an internet connection, and yt-dlp on PATH for mpv to resolve a
+    # YouTube link, which the others never require.
+    {"id": "news", "name": "Al Jazeera Live", "type": "live",
+     "url": "https://www.youtube.com/watch?v=gCNeDWCI0vo"},
 ]
 
 # Numbered from where they sit in the list rather than written into each
