@@ -10721,9 +10721,13 @@ CHANNELS = [
     {"id": "daytime", "name": "All Day Daytime",
      "genres": ["Reality", "Talk", "Soap"], "titles": DAYTIME_TITLES,
      "tv_only": True},
-    # The one channel you fill by hand. Everything else here is assembled
-    # from metadata; this is whatever you've marked, films and shows alike.
-    {"id": "favs", "name": "Non-stop Favs", "type": "favourites",
+    # The ones you fill by hand. Everything else here is assembled from
+    # metadata; these are whatever you've marked — films on one, shows on
+    # the other, split when asked (a film and an episode are different
+    # evenings). "favs" keeps its id for the films, so a Remote preset set
+    # to it still works.
+    {"id": "favs", "name": "Non-stop Favs: Films", "type": "favourites", "film_only": True},
+    {"id": "favstv", "name": "Non-stop Favs: TV", "type": "favourites", "tv_only": True,
      "episode_block_size": 2},
     # The other hand-filled one. Favourites is what you loved; this is what
     # you keep meaning to get to, which is a different evening entirely.
@@ -11288,12 +11292,13 @@ def channel_blocks(channel):
     if ctype in ("favourites", "watchlist"):
         # No genre, no rating, no cleverness — the things you marked yourself.
         flag = "favourited" if ctype == "favourites" else "watchlisted"
-        blocks = [_movie_block(m) for m in LIB.movies
-                  if m.get(flag)
-                  and (m.get("runtime") or 0) >= MIN_SCHEDULABLE_RUNTIME]
-        blocks.extend(_episode_group_blocks(
-            [s for s in LIB.shows if s.get(flag)],
-            channel.get("episode_block_size", 1)))
+        blocks = [] if channel.get("tv_only") else [
+            _movie_block(m) for m in LIB.movies
+            if m.get(flag) and (m.get("runtime") or 0) >= MIN_SCHEDULABLE_RUNTIME]
+        if not channel.get("film_only"):
+            blocks.extend(_episode_group_blocks(
+                [s for s in LIB.shows if s.get(flag)],
+                channel.get("episode_block_size", 1)))
         blocks.sort(key=lambda b: (b["kind"], b.get("id") or b["showid"], b["sub"]))
         channel_rng(channel).shuffle(blocks)
         return blocks

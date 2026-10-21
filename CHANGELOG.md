@@ -14,7 +14,7 @@ What changed in Next Up, version by version, newest first. Version numbers start
 - A channel watched on the phone moves on to the next programme by itself; stopping it by hand ends it.
 - A channel joined from the phone starts at the point the schedule has reached.
 - The phone's Now page is redesigned: a box-sized poster with the facts, genres and why beside it, everything you need on one screen, and the plot and your rating below for whoever scrolls.
-- Channels 2 to 5 (Universal, True Life, Action, Comedy) now show films only; Al Jazeera moves to the end of the dial, and Cold Ones is gone.
+- Channels 2 to 5 (Universal, True Life, Action, Comedy) now show films only; Al Jazeera moves to the end of the dial, Cold Ones is gone, and Non-stop Favs is split into Films and TV.
 - On the phone, every pick has the same buttons in the same places: HERE and ON PC, then Back, Next and Watchlist, with whatever can't be done greyed out.
 - With the PC connected, the phone's Library opens on Show all, and Show and Sort share one line.
 - The phone's Now page is tidier: the chooser sits under Continue, the pick's buttons sit in two fixed rows that don't move, and no scroll bars take up space.

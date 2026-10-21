@@ -58,8 +58,23 @@ n.mpv_get = lambda *a, **k: None
 n.raise_app_window = lambda: None
 
 check("Cold Ones is off the dial", not any(c["id"] == "coldones" for c in n.CHANNELS))
-check("Al Jazeera is the last channel", n.CHANNELS[-1]["id"] == "news" and n.CHANNELS[-1]["number"] == 21,
+check("Al Jazeera is the last channel", n.CHANNELS[-1]["id"] == "news" and n.CHANNELS[-1]["number"] == 22,
       n.CHANNELS[-1]["name"])
+# Favourites in two: films on one, shows on the other, side by side.
+_ids = [c["id"] for c in n.CHANNELS]
+_ff, _ft = (next(c for c in n.CHANNELS if c["id"] == i) for i in ("favs", "favstv"))
+check("Non-stop Favs is two channels, films then TV, side by side",
+      _ff.get("film_only") and _ft.get("tv_only") and _ids.index("favstv") == _ids.index("favs") + 1,
+      (_ff["name"], _ft["name"]))
+n.LIB.movies = [{"movieid": 1, "title": "Fav Film", "favourited": True, "runtime": 100, "file": "f.mkv"}]
+n.LIB.shows = [{"tvshowid": 2, "title": "Fav Show", "favourited": True}]
+n.LIB.episodes = [{"episodeid": 3, "tvshowid": 2, "season": 1, "episode": 1, "runtime": 30, "title": "Pilot",
+                   "file": "e.mkv"}]
+_kf = {b["kind"] for b in n.channel_blocks(_ff)}
+_kt = {b["kind"] for b in n.channel_blocks(_ft)}
+check("films only on the films one, episodes only on the TV one", _kf == {"movie"} and _kt == {"episodes"},
+      (_kf, _kt))
+n.LIB.loaded_at = 0
 # The YouTube channel type stays: tested on a channel of its own, added here.
 n.CHANNELS.append({"id": "coldones", "name": "Cold Ones #22", "number": 22, "type": "youtube",
                    "source": "https://www.youtube.com/@ColdOnes/videos"})
