@@ -71,6 +71,7 @@ out["now_playing"] = n.NOW_PLAYING.get("type")
 def row():
     c = n.db(); r = c.execute("SELECT resume_pos, playcount FROM movies WHERE id=?", (fid,)).fetchone(); c.close()
     return [r["resume_pos"], r["playcount"]]
+n._ANDROID_SITTING["started_at"] = n.time.time() - 600   # a sitting, not a moment
 n.android_play_finished(position=1500, duration=6000, completed=False)
 out["after_stop"] = row()
 post("/api/play", {"type": "movie", "id": fid})

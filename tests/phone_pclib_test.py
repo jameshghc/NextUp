@@ -119,6 +119,29 @@ check("the channel is kept with the sitting", n._ANDROID_SITTING.get("channel") 
 n.android_play_finished(position=600, duration=6000)
 check("stopping by hand ends the channel", carried == [], carried)
 
+# A few seconds isn't a sitting: a channel joined twenty minutes into a
+# film and closed again mustn't leave it in Continue at twenty minutes.
+def resume_of(item_id):
+    c = n.db(); r = c.execute("SELECT resume_pos FROM movies WHERE id=?", (item_id,)).fetchone(); c.close()
+    return r["resume_pos"] or 0
+conn = n.db(); conn.execute("UPDATE movies SET resume_pos=0 WHERE id=?", (local["id"],)); conn.commit(); conn.close()
+dpost("/api/play", {"stream": {"kind": "movie", "tmdb": local["tmdb_id"]}, "start": 1200, "channel": "cult"})
+n._ANDROID_SITTING["started_at"] = time.time() - 8
+n.android_play_finished(position=1208, duration=6000)
+check("a few seconds on the phone's own copy leaves no resume point", resume_of(local["id"]) == 0,
+      resume_of(local["id"]))
+n.PC_LINK.update(up=True, checked=time.time())
+real_call = n.pc_link_call
+n.pc_link_call = lambda m, path, body=None, timeout=10, raw=None: (200, {"url": "/phone/stream/x", "subs": [], "title": "Far Film", "resume": 0})
+dpost("/api/play", {"stream": {"kind": "movie", "tmdb": "990077"}, "start": 1200})
+n.pc_link_call = real_call
+n._ANDROID_SITTING["started_at"] = time.time() - 8
+n.android_play_finished(position=1208, duration=6000)
+conn = n.db()
+logged = conn.execute("SELECT COUNT(*) FROM history WHERE tmdb_id='990077' AND event IN ('stopped','watched')").fetchone()[0]
+conn.close()
+check("nor does a few seconds of a stream from the PC", logged == 0, logged)
+
 # Final review fixes.
 carried.clear()
 dpost("/api/play", {"stream": {"kind": "movie", "tmdb": local["tmdb_id"]}, "start": 0, "channel": "cult"})

@@ -16677,16 +16677,16 @@ body.android #unfinished-sec .alt p.empty:empty{display:none}
 .phonepick .ppside .why{font-size:12.5px;line-height:1.35;margin:0;color:var(--paper);
   display:-webkit-box;-webkit-line-clamp:5;-webkit-box-orient:vertical;overflow:hidden}
 /* The buttons stay put from one pick to the next, as on the PC, in two
-   rows: Play the width of the card, then BACK, NEXT and WATCHLIST in equal
-   thirds. Fixed places, so a longer label ("ON WATCHLIST") can't push the
-   others along. The PC's picks: HERE and ON PC, then BACK and NEXT. */
+   rows: HERE and ON PC in halves, then BACK, NEXT and WATCHLIST in thirds,
+   whichever library the pick came from (see pickCard). Fixed places, so a
+   longer label can't push the others along. */
 .phonepick > .rowbtns{padding:14px 14px 4px;display:grid;gap:8px;
   grid-template-columns:repeat(6,minmax(0,1fr))}
 .phonepick > .rowbtns > *{grid-column:span 2}
-.phonepick > .rowbtns > .play{grid-column:1 / -1}
 .phonepick > .rowbtns .playchoice{display:contents}
-.phonepick > .rowbtns .playchoice > button,
-.phonepick > .rowbtns:has(.playchoice) > button{grid-column:span 3}
+.phonepick > .rowbtns .playchoice > button{grid-column:span 3}
+/* What can't be done for this pick: in its place, plainly greyed. */
+.phonepick > .rowbtns button:disabled{opacity:.38;cursor:default;box-shadow:none}
 .phonepick > .rowbtns .playchoice .rmmsg:not(:empty){grid-column:1 / -1}
 .phonepick > .rowbtns .playchoice > button{align-self:stretch;padding-top:13px;padding-bottom:13px;font-size:14px}
 .phonepick > .rowbtns button{min-width:0;width:100%;margin:0;border-radius:12px;padding-left:4px;padding-right:4px;letter-spacing:.03em;
@@ -16713,6 +16713,18 @@ body.android .tile.elsewhere .cap{padding-bottom:26px}
    and the pager scroll as one — the pager comes after the last poster,
    the search row goes up out of the way — and the posters are smaller,
    six across instead of four, on any phone. */
+/* The phone, upright: the search box its own line, then Show and Sort side
+   by side on the next, sharing it evenly. Their contents say which is which
+   ("On this device", "A to Z"), so the words SHOW and SORT give up their
+   room to them; still there for anything reading the page aloud. */
+@media (orientation:portrait){
+  body.android .searchrow{justify-content:flex-start}
+  body.android .searchrow .searchbox{flex:1 1 100%;max-width:none}
+  body.android .searchrow label.f{flex:1 1 0;min-width:0}
+  body.android .searchrow label.f > span{position:absolute;width:1px;height:1px;overflow:hidden;
+    clip:rect(0 0 0 0);white-space:nowrap}
+  body.android .searchrow label.f select{max-width:none;width:100%;min-width:0;font-size:13px}
+}
 @media (orientation:landscape) and (max-height:520px){
   body.android #view-library{overflow-y:auto}
   body.android #tiles-out{flex:none;overflow:visible;min-height:auto;padding-bottom:6px}
@@ -18726,7 +18738,14 @@ function playChoice(p, small){
     };
     box.append(here, pc);
   } else {
-    /* No TMDB id to stream it by: ON PC only, named by the PC's own id. */
+    /* No TMDB id to stream it by: ON PC only, named by the PC's own id.
+       The pick's card keeps HERE in its place, greyed. */
+    if(!small){
+      const here = el('button', 'play', '▶ HERE');
+      here.disabled = true;
+      here.title = 'Only playable on the PC';
+      box.append(here);
+    }
     const pc = el('button', 'iconbtn onpc', '\u25B6 ON PC');
     pc.onclick = async (e) => {
       e.stopPropagation();
@@ -18772,7 +18791,7 @@ function pickCard(p){
     problem.innerHTML='';
     const r = await post('/api/play',{type:p.type,id:p.id});
     if(r.error){
-      play.textContent = 'Play';
+      play.textContent = document.body.classList.contains('android') ? '▶ HERE' : 'Play';
       // Say what actually went wrong rather than just "failed".
       problem.innerHTML = '<div class="notice bad"><h3>Couldn\'t start it</h3><p>'+
         esc(r.error)+'</p></div>';
@@ -18821,7 +18840,28 @@ function pickCard(p){
     libraryChanged();
   };
 
-  if(p._pc){
+  if(document.body.classList.contains('android')){
+    /* The phone's buttons are the same wherever the pick came from: HERE and
+       ON PC, then BACK, NEXT and WATCHLIST, each always in its place. What
+       can't be done for this pick is there but greyed: ON PC for one of the
+       phone's own (no PC to send it to), WATCHLIST for one of the PC's (its
+       id is the PC's, so it would mark the wrong title here). */
+    if(p._pc){
+      watch.disabled = true;
+      watch.classList.remove('on');
+      watch.innerHTML = watchLabel(false);
+      watch.title = 'Picks from the PC go on the watchlist from the Library';
+      btns.append(playChoice(p), back, skip, watch);
+    } else {
+      play.textContent = '▶ HERE';
+      const pc = el('button', 'iconbtn onpc', '▶ ON PC');
+      pc.disabled = true;
+      pc.title = 'Only when the PC is on the Wi-Fi';
+      const choice = el('div', 'playchoice');
+      choice.append(play, pc);
+      btns.append(choice, back, skip, watch);
+    }
+  } else if(p._pc){
     btns.append(playChoice(p), back, skip);      // no watchlist: that id is the PC's
   } else {
     btns.append(play, back, skip, watch);
@@ -19247,8 +19287,12 @@ $('#spin').onclick = () => { if(currentTop) rejected.add(currentTop); loadTonigh
 
 /* ================= LIBRARY ================= */
 /* The phone opens on what it can play — what's on it — with everything
-   else a tap away under Show all. The PC opens on everything. */
-function defaultShelf(){ return document.body.classList.contains('android') ? 'here' : 'all'; }
+   else a tap away under Show all; with the PC on the Wi-Fi it can play
+   everything, so it opens on Show all too. The PC opens on everything. */
+function defaultShelf(){
+  return document.body.classList.contains('android') && !(typeof pcLinkUp !== 'undefined' && pcLinkUp)
+    ? 'here' : 'all';
+}
 var favWidened = false;         // Favourites opened Show all for itself (the phone)
 $('#shelf').value = defaultShelf();
 let libKind = 'film';
@@ -23870,10 +23914,25 @@ function stripShow(){
    in a pocket calling out to a PC that's off. The answer comes a moment
    later, and the library is redrawn only if it changed what can play. */
 var pcLinkUp = null;      // var: the Now page asks before this line runs
+/* The PC found, or gone. The library's default shelf follows (unless you
+   chose another), and so does Now: a pick drawn from the other source —
+   the app opens on the phone's own before the first look has answered —
+   is swapped for one from where the lists now come from. */
+function pcLinkSet(up){
+  const was = defaultShelf();
+  pcLinkUp = up;
+  if($('#shelf').value === was && defaultShelf() !== was) $('#shelf').value = defaultShelf();
+  loadLibrary(true);
+  const showing = pickTrail[trailAt];
+  if(showing && !!showing._pc !== !!up){
+    pickAhead = null;
+    loadTonight();
+  }
+}
 function lookForPC(){
   if(!document.body.classList.contains('android')) return;
   post('/api/link/check').then(r => {
-    if(r && pcLinkUp === null) pcLinkUp = !!r.up;
+    if(r && pcLinkUp === null) pcLinkSet(!!r.up);
     /* A PC with several network adapters can take longer than the first
        look; while the phone says it's still finding it, look again a
        little later — a handful of times, and only after this one ask. */
@@ -23882,7 +23941,7 @@ function lookForPC(){
       const s = await api('/api/status');
       if(s && s.pc_link && s.pc_link.checking && ++looks < 6){ setTimeout(look, 2000); return; }
       const up = !!(s && s.pc_link && s.pc_link.up);
-      if(up !== pcLinkUp){ pcLinkUp = up; loadLibrary(true); }
+      if(up !== pcLinkUp) pcLinkSet(up);
       $('#remotetab').classList.toggle('live', !!pcLinkUp);
       if(currentView === 'remote') remotePoll(!!pcLinkUp);
       stripPoll(pcLinkUp && document.visibilityState === 'visible');
@@ -24968,6 +25027,11 @@ def _android_play_finished(position=None, duration=None, completed=False):
         finally:
             refresh_watch_scores()
     elif position is not None and duration:
+        # Opened and shut again within moments isn't a sitting. Its position
+        # is wherever it was started — twenty minutes in, joining a channel —
+        # and recording that would put it in Continue for seconds watched.
+        if ran_for < MIN_WATCH_SECONDS:
+            return
         note_playback_finished(kind, item_id, ran_for, position=position, duration=duration)
 
 
@@ -25011,6 +25075,8 @@ def _stream_finished(sitting, position, duration, completed):
         log_event(kind, None, title, "watched", seconds=ran_for, position=duration,
                   total=duration, ident=ident)
     elif position is not None and duration:
+        if ran_for < MIN_WATCH_SECONDS:
+            return      # moments, not a sitting (see _android_play_finished)
         event = "watched" if position >= duration * WATCHED_FRACTION else "stopped"
         log_event(kind, None, title, event, seconds=ran_for, position=position,
                   total=duration, ident=ident)
