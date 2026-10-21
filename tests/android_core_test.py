@@ -282,6 +282,10 @@ _ppn = page_src[page_src.find("function phonePick("):][:4000]
 check("phone Now: a box-sized poster with the facts beside it, the plot and rating below",
       "'ppmain'" in _ppn and "'ppside'" in _ppn and "'ppfacts'" in _ppn and "ppover" not in _ppn
       and ".phonepick .ppmain{" in page_src and "aspect-ratio:2/3" in page_src[page_src.find(".phonepick .pptop{"):][:300])
+check("phone Glass: no blurred page behind and no live blur; the Now card carries its own wash",
+      "body.android #roomart{display:none}" in page_src
+      and "body.android.glass *{backdrop-filter:none!important" in page_src
+      and "'ppwash'" in page_src[page_src.find("function phonePick("):][:5000])
 check("phone Favourites shows every favourite, not just the ones on the phone",
       "favWidened = true" in page_src)
 check("phone Now: a step-by-step chooser — kind, then genres in their colours, then what fits",

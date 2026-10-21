@@ -16606,8 +16606,11 @@ body.android #view-now > .filters{display:none}
 body.android .nowchooser{display:flex;flex-direction:column;gap:10px;margin:4px 0 12px}
 body.android .chooserow{display:flex;gap:8px}
 body.android .chooserow.hidden{display:none}
-body.android .chooserow.genres{overflow-x:auto;flex-wrap:nowrap;padding-bottom:0;scroll-snap-type:x proximity;
-  scrollbar-width:none}
+/* The genres in two rows, sliding sideways for the rest: twice as many in
+   view for one more row's height. */
+body.android .chooserow.genres{overflow-x:auto;padding-bottom:0;scroll-snap-type:x proximity;scrollbar-width:none;
+  display:grid;grid-auto-flow:column;grid-template-rows:auto auto;grid-auto-columns:max-content;gap:8px}
+body.android .chooserow.genres.hidden{display:none}
 .kchip{flex:1;padding:10px 0;border-radius:999px;background:var(--ink-2);border:1px solid var(--line);
   color:var(--paper);font-family:var(--display);font-weight:700;font-size:14px;cursor:pointer}
 .kchip.on{background:var(--paper);color:#17151c;border-color:var(--paper)}
@@ -16658,7 +16661,9 @@ body.android #unfinished-sec .alt p.empty:empty{display:none}
   object-fit:cover;border-radius:0;display:block}
 /* No taller than the poster, whatever the title: the row is the poster's
    height, so the buttons under it never move. The why gives way first. */
-.phonepick .ppside{display:flex;flex-direction:column;gap:7px;min-width:0;height:0;min-height:100%;overflow:hidden}
+.phonepick .ppside{display:flex;flex-direction:column;gap:7px;min-width:0;height:0;min-height:100%;overflow:hidden;
+  -webkit-mask-image:linear-gradient(to bottom,#000 calc(100% - 22px),transparent);
+  mask-image:linear-gradient(to bottom,#000 calc(100% - 22px),transparent)}   /* a long why fades out rather than being cut through */
 .phonepick .ppside > *{flex:none}
 .phonepick .ppside .why{flex:0 1 auto;min-height:0}
 .phonepick .ppside .eyebrow{margin:2px 0 0}
@@ -17509,6 +17514,18 @@ body:not(.glass) #roomart{display:none}
 /* Only on Now: the Library and the rest stay a neutral grey glass rather
    than tinted by whatever the Now page last showed. */
 body:not(.onnow) #roomart{opacity:0}
+/* The phone flickered under Glass: a full-screen blurred poster changing
+   with every pick, and every panel blurring what moved behind it as the
+   page scrolled, were more than its WebView could repaint smoothly. So on
+   the phone the page behind stays plain, panels are tinted but don't blur,
+   and the glass is the Now card's own: its poster washed across the card
+   (.ppwash), drawn once per pick. */
+body.android #roomart{display:none}
+body.android.glass *{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
+body.glass .phonepick{position:relative;overflow:hidden;isolation:isolate}
+.phonepick .ppwash{position:absolute;inset:-60px;z-index:-1;pointer-events:none;
+  background:#0c0c10 center/cover no-repeat;filter:blur(40px) saturate(.85) brightness(.38);transform:scale(1.1)}
+body:not(.glass) .phonepick .ppwash{display:none}
 body.glass{background:radial-gradient(1100px 520px at 50% -160px,#24242c 0%,rgba(12,12,16,0) 70%),#0c0c10;
   --ink-2:var(--glass-panel);--ink-3:var(--glass-panel-2);--surface:var(--glass-panel);
   --surface-2:var(--glass-panel-2);--line:var(--glass-line);--edge:var(--glass-line);--muted:#a7a7b2}
@@ -18911,6 +18928,12 @@ function phonePick(p, poster, right, btns, problem, meta, rateSlot){
     p.type === 'episode' ? openShow(p.rate_id) : openFilm(p.id);
   };
   card.append(main, btns, problem);
+  const art = p.art || p.backdrop;
+  if(art){                              // Glass: the card's own wash of colour (see .ppwash)
+    const wash = el('div', 'ppwash');
+    wash.style.backgroundImage = 'url("' + String(art).replace(/"/g, '%22') + '")';
+    card.prepend(wash);
+  }
   const info = el('div', 'ppinfo');
   const plot = right.querySelector('.plot');
   if(plot){
