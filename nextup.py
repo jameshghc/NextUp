@@ -33,6 +33,7 @@ up and you've backed up your ratings, your progress and the lot.
 """
 
 import atexit
+import ctypes
 import glob
 import hashlib
 import mimetypes
@@ -5060,6 +5061,7 @@ def raise_app_window():
         try:
             window = _APP_WINDOW[0]
             if window is not None:
+                window.show()           # it may be hidden in the tray
                 window.restore()
         except Exception:
             pass
@@ -14274,6 +14276,8 @@ class Handler(BaseHTTPRequestHandler):
                 st = appearance_settings()
                 return self.send_json({"settings": st, "look": appearance_look(st),
                                        "accents": list(ACCENTS.items())})
+            if route == "/api/tray":
+                return self.send_json({"on": tray_on_close(), "running": TRAY["running"]})
 
             if route == "/api/status":
                 payload = self.status_payload()
@@ -14685,6 +14689,13 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json({"error": "no such thing"}, 404)
                 return self.send_json(pc_remote_call("POST", action, data))
 
+            if route == "/api/tray":
+                CONFIG["tray_on_close"] = bool(data.get("on"))
+                save_json(CONFIG_PATH, CONFIG)
+                return self.send_json({"on": tray_on_close(), "running": TRAY["running"]})
+            if route == "/api/window/show":
+                # A second copy being opened: show this one's window instead.
+                return self.send_json({"ok": show_app_window()})
             if route == "/api/appearance":
                 if data.get("reset"):
                     CONFIG.pop("appearance", None)
@@ -18140,6 +18151,13 @@ body:not(.android) #remotetab{display:none}
     </div>
   </div>
 
+  <div class="settings pconly" data-tab="playback">
+    <h3>When you close the window</h3>
+    <p class="empty">Closed with the X, Next Up can carry on in the tray by the clock, so your phone can still reach this PC &mdash; its library, ON PC and the Remote. Click the icon to bring the window back; right-click it to quit.</p>
+    <label class="toggle"><input type="checkbox" id="c_tray"> Keep running in the tray when closed</label>
+    <span id="traymsg" class="libline"></span>
+  </div>
+
   <!-- ================= SHARING BETWEEN DEVICES ================= -->
   <div class="settings" data-tab="sharing" id="syncsettings">
     <h3>Sharing between devices</h3>
@@ -18460,9 +18478,21 @@ async function loadStatus(){
   $('#c_afk_evening').value = afk.evening != null ? afk.evening : '';
   $('#c_afk_late').value = afk.late != null ? afk.late : '';
   $('#c_afk_grace').value = afk.grace != null ? afk.grace : '';
+  trayLoad();
   drawHub();
   loadTonight();
 }
+
+/* Closing to the tray (the PC only): saved the moment it's ticked. */
+async function trayLoad(){
+  const r = await api('/api/tray');
+  if(r && !r.error) $('#c_tray').checked = !!r.on;
+}
+$('#c_tray').onchange = async () => {
+  const r = await post('/api/tray', {on: $('#c_tray').checked});
+  $('#traymsg').textContent = r && !r.error
+    ? (r.on ? 'The X now hides Next Up in the tray.' : 'The X now closes Next Up.') : 'Couldn’t save that.';
+};
 
 /* ---------- shared rating control ---------- */
 function rateControl(p, opts){
@@ -25275,6 +25305,254 @@ def serve_in_thread(port=None, host="127.0.0.1", tries=20):
     return _SERVING[0]
 
 
+# --- the tray: closed, but still here for the phone -------------------------
+#
+# The X used to end the program, and with it everything the phone talks to:
+# the link, streaming, the Remote, the PC's library on the phone. Now, with
+# the tray icon up, it hides the window instead; the icon (by the clock)
+# brings it back, and its Quit really quits. Asked for, 2026-10-22. Off in
+# Settings > Playback for anyone who'd rather the X meant exit.
+#
+# Windows' own tray (Shell_NotifyIcon) through ctypes rather than pystray:
+# no new library to install or to bundle into the exe. The icon has its own
+# thread and its own hidden window to receive the clicks, so nothing here
+# waits on the GUI thread or it on this.
+
+TRAY = {"running": False, "quitting": False, "notify": None}
+
+
+def tray_on_close():
+    """Whether the X hides to the tray (the default) or ends the app."""
+    return CONFIG.get("tray_on_close", True) is not False
+
+
+def show_app_window():
+    """Bring the main window back from the tray, or forward from behind."""
+    window = _APP_WINDOW[0]
+    if window is None:
+        return False
+    for step in ("show", "restore"):
+        try:
+            getattr(window, step)()
+        except Exception:
+            pass
+    return True
+
+
+def close_to_tray():
+    """The X was pressed: hide to the tray if that's what's wanted and
+    possible, and say so (True); otherwise the caller closes the app."""
+    window = _APP_WINDOW[0]
+    if (not tray_on_close() or not TRAY["running"] or TRAY["quitting"]
+            or window is None):
+        return False
+    try:
+        window.hide()
+    except Exception:
+        return False
+    if not CONFIG.get("tray_told"):
+        # The first time only: otherwise it looks as though it closed.
+        CONFIG["tray_told"] = True
+        save_json(CONFIG_PATH, CONFIG)
+        notify = TRAY.get("notify")
+        if notify:
+            try:
+                notify("Next Up is still running",
+                       "It's in the tray by the clock, so your phone can keep "
+                       "reaching this PC. Right-click the icon to quit.")
+            except Exception:
+                pass
+    return True
+
+
+def show_running_copy(url):
+    """Opened a second time: ask the copy already running to show its window
+    (it may be hidden in the tray). False if it couldn't be asked."""
+    try:
+        req = urllib.request.Request(url + "/api/window/show", data=b"{}", method="POST",
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=3) as r:
+            return bool(json.loads(r.read()).get("ok"))
+    except Exception:
+        return False
+
+
+class Tray(object):
+    """The icon by the clock: a click opens Next Up, a right-click offers
+    Open and Quit. on_open and on_quit run on threads of their own, never on
+    the icon's, so a slow window can't freeze the tray."""
+    OPEN, QUIT = 1001, 1002
+    _CALLBACK = 0x8001                  # WM_APP + 1
+
+    def __init__(self, on_open, on_quit, tooltip="Next Up"):
+        self.on_open, self.on_quit, self.tooltip = on_open, on_quit, tooltip
+        self._hwnd = None
+        self._ready = threading.Event()
+        self._ok = False
+
+    def start(self, timeout=5):
+        if os.name != "nt":
+            return False
+        threading.Thread(target=self._run, daemon=True, name="tray").start()
+        self._ready.wait(timeout)
+        return self._ok
+
+    def command(self, which):
+        """What a menu choice does: also how the tests press them."""
+        target = self.on_open if which == self.OPEN else self.on_quit if which == self.QUIT else None
+        if target:
+            threading.Thread(target=target, daemon=True, name="tray action").start()
+
+    def notify(self, title, text):
+        if self._hwnd:
+            self._shell(1, info=(title, text))          # NIM_MODIFY, with a message
+
+    def stop(self):
+        if self._hwnd:
+            self._user32.PostMessageW(self._hwnd, 0x0010, 0, 0)   # WM_CLOSE
+
+    # -- Win32 underneath ------------------------------------------------------
+    def _shell(self, message, info=None):
+        nid = self._nid_type()
+        nid.cbSize = ctypes.sizeof(nid)
+        nid.hWnd = self._hwnd
+        nid.uID = 1
+        nid.uFlags = 0x1 | 0x2 | 0x4                    # message, icon, tip
+        nid.uCallbackMessage = self._CALLBACK
+        nid.hIcon = self._icon
+        nid.szTip = self.tooltip[:127]
+        if info:
+            nid.uFlags |= 0x10                          # NIF_INFO
+            nid.szInfoTitle = info[0][:63]
+            nid.szInfo = info[1][:255]
+            nid.dwInfoFlags = 0x1                       # NIIF_INFO
+        return bool(self._shell32.Shell_NotifyIconW(message, ctypes.byref(nid)))
+
+    def _run(self):
+        try:
+            self._loop()
+        except Exception:
+            log_problem("tray")
+        finally:
+            TRAY["running"] = False
+            TRAY["notify"] = None
+            self._hwnd = None
+            self._ready.set()
+
+    def _loop(self):
+        from ctypes import wintypes
+        user32, shell32, kernel32 = ctypes.windll.user32, ctypes.windll.shell32, ctypes.windll.kernel32
+        self._user32, self._shell32 = user32, shell32
+        LRESULT = ctypes.c_ssize_t
+        WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+        user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        user32.DefWindowProcW.restype = LRESULT
+        user32.CreateWindowExW.restype = wintypes.HWND
+        user32.CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+                                           ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                           wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID]
+        user32.LoadImageW.restype = wintypes.HANDLE
+        user32.LoadImageW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT,
+                                      ctypes.c_int, ctypes.c_int, wintypes.UINT]
+        user32.LoadIconW.restype = wintypes.HICON
+        user32.LoadIconW.argtypes = [wintypes.HINSTANCE, wintypes.LPVOID]
+        user32.CreatePopupMenu.restype = wintypes.HMENU
+        user32.AppendMenuW.argtypes = [wintypes.HMENU, wintypes.UINT, ctypes.c_size_t, wintypes.LPCWSTR]
+        user32.TrackPopupMenu.argtypes = [wintypes.HMENU, wintypes.UINT, ctypes.c_int, ctypes.c_int,
+                                          ctypes.c_int, wintypes.HWND, wintypes.LPVOID]
+        user32.DestroyMenu.argtypes = [wintypes.HMENU]
+        user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.DestroyWindow.argtypes = [wintypes.HWND]
+        user32.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
+        user32.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
+        user32.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
+        user32.RegisterWindowMessageW.argtypes = [wintypes.LPCWSTR]
+        kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+        kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+
+        class NOTIFYICONDATAW(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD), ("hWnd", wintypes.HWND), ("uID", wintypes.UINT),
+                        ("uFlags", wintypes.UINT), ("uCallbackMessage", wintypes.UINT),
+                        ("hIcon", wintypes.HICON), ("szTip", wintypes.WCHAR * 128),
+                        ("dwState", wintypes.DWORD), ("dwStateMask", wintypes.DWORD),
+                        ("szInfo", wintypes.WCHAR * 256), ("uVersion", wintypes.UINT),
+                        ("szInfoTitle", wintypes.WCHAR * 64), ("dwInfoFlags", wintypes.DWORD),
+                        ("guidItem", ctypes.c_byte * 16), ("hBalloonIcon", wintypes.HICON)]
+        self._nid_type = NOTIFYICONDATAW
+        shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
+
+        class WNDCLASSW(ctypes.Structure):
+            _fields_ = [("style", wintypes.UINT), ("lpfnWndProc", WNDPROC), ("cbClsExtra", ctypes.c_int),
+                        ("cbWndExtra", ctypes.c_int), ("hInstance", wintypes.HINSTANCE),
+                        ("hIcon", wintypes.HICON), ("hCursor", wintypes.HANDLE),
+                        ("hbrBackground", wintypes.HBRUSH), ("lpszMenuName", wintypes.LPCWSTR),
+                        ("lpszClassName", wintypes.LPCWSTR)]
+        user32.RegisterClassW.argtypes = [ctypes.POINTER(WNDCLASSW)]
+
+        # Explorer restarting empties the tray; it says so with this, and the
+        # icon goes back in.
+        taskbar_created = user32.RegisterWindowMessageW("TaskbarCreated")
+
+        def menu():
+            m = user32.CreatePopupMenu()
+            user32.AppendMenuW(m, 0, self.OPEN, "Open Next Up")
+            user32.AppendMenuW(m, 0x800, 0, None)               # a line
+            user32.AppendMenuW(m, 0, self.QUIT, "Quit Next Up")
+            pt = wintypes.POINT()
+            user32.GetCursorPos(ctypes.byref(pt))
+            user32.SetForegroundWindow(self._hwnd)              # or the menu won't go away
+            chosen = user32.TrackPopupMenu(m, 0x0100 | 0x0080, pt.x, pt.y, 0, self._hwnd, None)
+            user32.PostMessageW(self._hwnd, 0, 0, 0)
+            user32.DestroyMenu(m)
+            self.command(chosen)
+
+        def proc(hwnd, msg, wparam, lparam):
+            if msg == self._CALLBACK:
+                event = lparam & 0xFFFF
+                if event in (0x0202, 0x0203):                   # left click, double click
+                    self.command(self.OPEN)
+                elif event == 0x0205:                           # right click
+                    menu()
+                return 0
+            if taskbar_created and msg == taskbar_created:
+                self._shell(0)
+                return 0
+            if msg == 0x0010:                                   # WM_CLOSE
+                self._shell(2)                                  # NIM_DELETE
+                user32.DestroyWindow(hwnd)
+                return 0
+            if msg == 0x0002:                                   # WM_DESTROY
+                user32.PostQuitMessage(0)
+                return 0
+            return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+        self._proc = WNDPROC(proc)                              # kept: ctypes mustn't free it
+        hinst = kernel32.GetModuleHandleW(None)
+        wc = WNDCLASSW()
+        wc.lpfnWndProc = self._proc
+        wc.hInstance = hinst
+        wc.lpszClassName = "NextUpTray%d" % id(self)
+        user32.RegisterClassW(ctypes.byref(wc))
+        self._hwnd = user32.CreateWindowExW(0, wc.lpszClassName, "Next Up tray", 0,
+                                            0, 0, 0, 0, None, None, hinst, None)
+        icon = None
+        if os.path.exists(ICON_PATH):
+            icon = user32.LoadImageW(None, ICON_PATH, 1, 0, 0, 0x10 | 0x40)   # from file, default size
+        self._icon = icon or user32.LoadIconW(None, ctypes.c_void_p(32512))    # IDI_APPLICATION
+        self._ok = bool(self._hwnd) and self._shell(0)                          # NIM_ADD
+        TRAY["running"] = self._ok
+        if self._ok:
+            TRAY["notify"] = self.notify
+        self._ready.set()
+        if not self._ok:
+            return
+        msg = wintypes.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            user32.TranslateMessage(ctypes.byref(msg))
+            user32.DispatchMessageW(ctypes.byref(msg))
+
+
 def main():
     prepare_app()
     print("Next Up  v%s" % APP_VERSION)
@@ -25287,8 +25565,11 @@ def main():
         # second time. Show them the copy that's already running, which is
         # what they wanted anyway.
         if already_running(url):
+            # It may be hidden in the tray: ask it to show its window, and
+            # open a browser tab only if it can't be asked.
             print("Already running — opening that window instead.")
-            webbrowser.open(url)
+            if not show_running_copy(url):
+                webbrowser.open(url)
             return
         # Held, but not answering as this app. Nearly always the copy you
         # just closed, still putting its things away — so wait for it
@@ -25351,6 +25632,16 @@ def main():
                     loop ends on the one the user actually closed.
                     """
                     main = webview.windows[0] if webview.windows else None
+                    if close_to_tray():
+                        # Hidden, not gone: the phone can still reach this
+                        # PC. The remote window goes, though.
+                        for win in list(webview.windows):
+                            if win is not main:
+                                try:
+                                    win.destroy()
+                                except Exception:
+                                    pass
+                        return
                     for win in list(webview.windows):
                         if win is main:
                             continue
@@ -25481,7 +25772,20 @@ def main():
             # Kept so the AFK question can raise the window it's drawn in.
             _APP_WINDOW[0] = main_window
 
+            def tray_quit():
+                TRAY["quitting"] = True
+                try:
+                    main_window.destroy()
+                except Exception:
+                    pass
+            tray = Tray(on_open=show_app_window, on_quit=tray_quit)
+            tray.start()
+
             def window_closing(*_a):
+                # Alt+F4 and the taskbar's Close come here: the same as the
+                # X, to the tray when that's what's wanted. False keeps it.
+                if close_to_tray():
+                    return False
                 # The port goes FIRST: what follows can take seconds — a
                 # channel means asking mpv to quit and waiting for it — and
                 # none of it needs the server.
@@ -25492,6 +25796,7 @@ def main():
             except Exception:
                 pass          # older pywebview without the event
             webview.start(restore_resizing)
+            tray.stop()
             release_port(server)
             shutdown_playback()
             cache_flush()

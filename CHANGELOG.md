@@ -10,6 +10,7 @@ What changed in Next Up, version by version, newest first. Version numbers start
 - ▶ HERE plays the phone's own copy when it has one, and streams from the PC when it doesn't.
 
 ### Also new
+- Closing Next Up on the PC hides it in the system tray instead of quitting, so the phone keeps working; click the icon to bring it back, right-click to quit, or switch it off in Settings › Playback.
 - A pick from the PC says so in its label ("Now · from the PC"), and Channels says "Asking the PC what's on…" while it works out the schedule.
 - A channel watched on the phone moves on to the next programme by itself; stopping it by hand ends it.
 - A channel joined from the phone starts at the point the schedule has reached.

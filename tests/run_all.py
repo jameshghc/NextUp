@@ -19,6 +19,7 @@ SUITES = [
     ("one show per TMDB id", "show_merge_test.py"),
     ("recommendations home", "rec_home_test.py"),
     ("the look", "appearance_test.py"),
+    ("closing to the tray", "tray_test.py"),
     ("a friend's first run", "first_run_test.py"),
     ("are you still watching", "afk_test.py"),
     ("port release", "port_test.py"),
