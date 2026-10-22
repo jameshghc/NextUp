@@ -5521,6 +5521,8 @@ def browse_library(kind, query, sort, shelf, limit, offset):
                                  if progress else "",
                 "percent": (progress or {}).get("percent") or 0,
                 "sort_added": s.get("dateadded") or "",
+                "sort_watched": max((e.get("last_played") or "" for e in
+                                     episodes_by_show.get(s.get("tvshowid"), [])), default=""),
                 "watchlisted": bool(s.get("watchlisted")),
                 "favourited": bool(s.get("favourited")),
             })
@@ -5551,6 +5553,7 @@ def browse_library(kind, query, sort, shelf, limit, offset):
                 "percent": percent,
                 "identified": m.get("identified", True),
                 "sort_added": m.get("dateadded") or "",
+                "sort_watched": m.get("last_played") or "",
                 "watchlisted": bool(m.get("watchlisted")),
                 "favourited": bool(m.get("favourited")),
             })
@@ -5605,7 +5608,12 @@ def browse_library(kind, query, sort, shelf, limit, offset):
             "mine": lambda r: -(r["userrating"] or 0),
             "runtime": lambda r: r.get("runtime") or 0,
         }
-        if sort == "added":
+        if sort == "watched":
+            # Last played first, a show by its latest episode; never played
+            # after, A to Z (an empty time sorts last when reversed).
+            rows.sort(key=lambda r: norm_title(r["title"]))
+            rows.sort(key=lambda r: r.get("sort_watched") or "", reverse=True)
+        elif sort == "added":
             # A stable sort keeps things bunched under the same import date
             # (a bulk-scanned library shares one) in alphabetical order,
             # rather than whatever order the database happened to return.
@@ -5619,6 +5627,7 @@ def browse_library(kind, query, sort, shelf, limit, offset):
     for r in page:
         r.pop("score", None)
         r.pop("sort_added", None)
+        r.pop("sort_watched", None)
     return {"items": page, "total": total, "offset": offset, "limit": limit}
 
 
@@ -17926,6 +17935,7 @@ body:not(.android) #remotetab{display:none}
       <select id="libsort">
         <option value="title">A to Z</option>
         <option value="added">Recently added</option>
+        <option value="watched">Recently watched</option>
         <option value="year">Newest first</option>
         <option value="tmdb">TMDB score</option>
         <option value="mine">Your score</option>

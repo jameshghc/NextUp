@@ -64,5 +64,26 @@ blank = [i for i in items if not i.get("genres")]
 check("every poster with a genre has three tags", items and
       not [x for x in short if x[0] not in set(b["title"] for b in blank)], short[:5])
 
+# --- Sort: Recently watched ------------------------------------------------------------
+# Films by when they were last played; a show by its latest episode played;
+# anything never watched after, alphabetically.
+conn = n.db()
+films = conn.execute("SELECT id FROM movies ORDER BY id LIMIT 2").fetchall()
+show = conn.execute("SELECT show_id FROM episodes WHERE show_id IS NOT NULL LIMIT 1").fetchone()
+conn.execute("UPDATE movies SET last_played=NULL"); conn.execute("UPDATE episodes SET last_played=NULL")
+conn.execute("UPDATE movies SET last_played='2026-10-01 20:00:00' WHERE id=?", (films[0][0],))
+conn.execute("UPDATE movies SET last_played='2026-10-21 20:00:00' WHERE id=?", (films[1][0],))
+conn.execute("UPDATE episodes SET last_played='2026-10-10 20:00:00' WHERE id=(SELECT MIN(id) FROM episodes WHERE show_id=?)",
+             (show[0],))
+conn.commit(); conn.close()
+n.LOCAL.loaded_at = 0; n.LIB.loaded_at = 0
+got = n.browse_library("all", "", "watched", "all", 2000, 0)["items"]
+top = [(i["kind"], i["id"]) for i in got[:3]]
+check("Recently watched: newest first, films and shows together",
+      top[0] == ("movie", films[1][0]) and top[1][0] == "tvshow" and top[2] == ("movie", films[0][0]), top)
+rest = [i["title"] for i in got[3:40]]
+check("and never-watched after, A to Z", rest == sorted(rest, key=n.norm_title), rest[:6])
+check("the Sort list offers it", '<option value="watched">Recently watched</option>' in n.PAGE)
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
