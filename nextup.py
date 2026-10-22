@@ -5610,7 +5610,21 @@ def browse_library(kind, query, sort, shelf, limit, offset):
         }
         if sort == "watched":
             # Last played first, a show by its latest episode; never played
-            # after, A to Z (an empty time sorts last when reversed).
+            # after, A to Z (an empty time sorts last when reversed). The
+            # history counts too, by TMDB id: on the phone a film streamed
+            # from the PC is no file here, and that's its only record.
+            conn = db()
+            try:
+                seen = {(r[0], r[1]): r[2] or "" for r in conn.execute(
+                    "SELECT kind, tmdb_id, MAX(at) FROM history WHERE tmdb_id IS NOT NULL"
+                    " AND tmdb_id <> '' AND event IN ('played','stopped','watched')"
+                    " GROUP BY kind, tmdb_id")}
+            finally:
+                conn.close()
+            for r in rows:
+                at = seen.get(("movie" if r["kind"] == "movie" else "episode", r.get("tmdb_id") or ""), "")
+                if at > (r.get("sort_watched") or ""):
+                    r["sort_watched"] = at
             rows.sort(key=lambda r: norm_title(r["title"]))
             rows.sort(key=lambda r: r.get("sort_watched") or "", reverse=True)
         elif sort == "added":

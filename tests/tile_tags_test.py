@@ -71,6 +71,7 @@ conn = n.db()
 films = conn.execute("SELECT id FROM movies ORDER BY id LIMIT 2").fetchall()
 show = conn.execute("SELECT show_id FROM episodes WHERE show_id IS NOT NULL LIMIT 1").fetchone()
 conn.execute("UPDATE movies SET last_played=NULL"); conn.execute("UPDATE episodes SET last_played=NULL")
+conn.execute("DELETE FROM history")   # the sandbox copy's own plays count too; start clean
 conn.execute("UPDATE movies SET last_played='2026-10-01 20:00:00' WHERE id=?", (films[0][0],))
 conn.execute("UPDATE movies SET last_played='2026-10-21 20:00:00' WHERE id=?", (films[1][0],))
 conn.execute("UPDATE episodes SET last_played='2026-10-10 20:00:00' WHERE id=(SELECT MIN(id) FROM episodes WHERE show_id=?)",

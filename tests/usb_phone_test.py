@@ -291,6 +291,17 @@ n.LOCAL.loaded_at = 0; n.LIB.loaded_at = 0
 favs = [i["title"] for i in n.browse_library("all", "", "title", "favourite", 2000, 0)["items"]]
 check("Favourites shows a favourite that isn't on this device", "Faraway Favourite" in favs, favs[:8])
 check("shows too", "Faraway Fav Show" in favs, favs[:8])
+# Recently watched counts what was streamed from the PC: those titles aren't
+# files here, so their history is the only record of when.
+_c = n.db()
+_c.execute("INSERT INTO history (at,kind,title,event,tmdb_id) VALUES ('2099-01-02 20:00:00','movie',"
+           "'Faraway Favourite','stopped','fav-away')")
+_c.execute("INSERT INTO history (at,kind,title,event,tmdb_id) VALUES ('2099-01-01 20:00:00','episode',"
+           "'Faraway Fav Show','watched','favshow-away')")
+_c.commit(); _c.close()
+_top = [i["title"] for i in n.browse_library("all", "", "watched", "all", 2000, 0)["items"][:2]]
+check("Recently watched includes what was streamed from the PC, a show by its latest episode",
+      _top == ["Faraway Favourite", "Faraway Fav Show"], _top)
 wl = [i["title"] for i in n.browse_library("all", "", "title", "watchlist", 2000, 0)["items"]]
 check("and the Watchlist, what's on it elsewhere", "Faraway Watchlist" in wl, wl[:8])
 away = [i for i in n.browse_library("film", "faraway favourite", "title", "all", 50, 0)["items"]]
