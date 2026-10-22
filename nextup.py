@@ -2439,7 +2439,7 @@ def build_history(days=90, limit=400):
     # A "played" opens one; the next "stopped" or "watched" for the same thing
     # closes it. An ending with nothing open is a sitting of its own, because
     # the rows predating "played" are all endings.
-    sessions, open_now = [], {}
+    sessions, open_now, last_start = [], {}, {}
     elsewhere = {}      # key -> (show title, season, episode) for rows with no local item
     for r in rows:
         if r["item_id"]:
@@ -2454,11 +2454,18 @@ def build_history(days=90, limit=400):
         # one: "played" on the Mac and "stopped" here are two evenings.
         key_open = key + (r["origin"],)
         if r["event"] == "played":
+            # Something else started on the same device within moments of an
+            # unclosed start: that one was flicked past, not watched.
+            prev = last_start.get(r["origin"])
+            if prev is not None and prev.get("ended") is None:
+                gap = (stamp_seconds(r["at"]) or 0) - (stamp_seconds(prev["at"]) or 0)
+                if 0 <= gap < MIN_WATCH_SECONDS:
+                    prev["flick"] = True
             # Two "played" in a row means the first was never closed. Keep it:
             # it happened, it just has no ending on record.
             if key_open in open_now:
                 sessions.append(open_now.pop(key_open))
-            open_now[key_open] = {"key": key, "at": r["at"], "ended": None,
+            open_now[key_open] = last_start[r["origin"]] = {"key": key, "at": r["at"], "ended": None,
                                   "title": r["title"] or "", "finished": False,
                                   "position": None, "total": None, "open": True,
                                   "device": r["origin"]}
@@ -2469,6 +2476,11 @@ def build_history(days=90, limit=400):
                        "position": None, "total": None, "device": r["origin"]}
         sitting.update(ended=r["at"], finished=(r["event"] == "watched"),
                        position=r["position"], total=r["total"], open=False)
+        # Ended within moments of starting: opened and closed, not watched.
+        # (Written that way until v0.2.1; nothing is written for them now.)
+        if (not sitting["finished"] and r.get("seconds") is not None
+                and r["seconds"] < MIN_WATCH_SECONDS):
+            sitting["flick"] = True
         sessions.append(sitting)
     sessions.extend(open_now.values())
 
@@ -2487,6 +2499,8 @@ def build_history(days=90, limit=400):
     for sitting in sessions:
         when = stamp_seconds(sitting["at"])
         if when is not None and when < since:
+            continue
+        if sitting.get("flick"):
             continue
         kind, item_id = sitting["key"]
         is_newest = sitting["at"] == newest.get(sitting["key"])
@@ -4306,6 +4320,24 @@ def note_playback_finished(kind, item_id, ran_for, position=None, duration=None)
             refresh_watch_scores()
 
 
+# What "last played" said before each thing now playing was started, so a
+# sitting of moments can put it back: flicking through five films shouldn't
+# make all five your most recently watched.
+_PRIOR_PLAYED = {}
+
+
+def stamp_played(kind, item_id):
+    """Mark something as played now, as it starts."""
+    _PRIOR_PLAYED[(kind, item_id)] = LOCAL.field(kind, item_id, "last_played")
+    LOCAL.set_field(kind, item_id, "last_played", now_stamp())
+
+
+def unstamp_played(kind, item_id):
+    """It was closed within moments: "last played" goes back to what it was."""
+    if (kind, item_id) in _PRIOR_PLAYED:
+        LOCAL.set_field(kind, item_id, "last_played", _PRIOR_PLAYED.pop((kind, item_id)))
+
+
 def _note_playback_finished(kind, item_id, ran_for, position=None, duration=None):
     """Close the books on something that has stopped playing.
 
@@ -4323,6 +4355,13 @@ def _note_playback_finished(kind, item_id, ran_for, position=None, duration=None
     """
     if kind not in ("movie", "episode") or not item_id:
         return          # a live stream has no position and nothing to record
+    if ran_for is not None and ran_for < MIN_WATCH_SECONDS:
+        # Opened and closed again, or flicked past: not a sitting. No resume
+        # point (it would be wherever it was started), no "stopped" in the
+        # history, and "last played" as it was.
+        unstamp_played(kind, item_id)
+        return
+    _PRIOR_PLAYED.pop((kind, item_id), None)
     table = "movies" if kind == "movie" else "episodes"
     try:
         if position is not None and duration:
@@ -4544,7 +4583,7 @@ def step_episode(step):
     # else — and so the end of this episode rolls into the next.
     proc = mpv_play(path, keep_open=True)
     title = LOCAL.field("episode", episode_id, "title")
-    LOCAL.set_field("episode", episode_id, "last_played", now_stamp())
+    stamp_played("episode", episode_id)
     log_event("episode", episode_id, title,
               "next episode" if step > 0 else "previous episode")
     note_now_playing(proc, "episode", episode_id, title)
@@ -4563,7 +4602,7 @@ def continue_series(episode_id):
             return
         proc = mpv_play(path, keep_open=True)
         title = LOCAL.field("episode", nxt["episodeid"], "title")
-        LOCAL.set_field("episode", nxt["episodeid"], "last_played", now_stamp())
+        stamp_played("episode", nxt["episodeid"])
         log_event("episode", nxt["episodeid"], title, "next episode")
         note_now_playing(proc, "episode", nxt["episodeid"], title)
     except Exception:
@@ -4769,7 +4808,7 @@ def play_item(kind, item_id, path, event="played"):
     keep_open = kind == "episode" or queue_count() > 0
     proc = mpv_play(path, start=start, keep_open=keep_open)
     title = LOCAL.field(kind, item_id, "title")
-    LOCAL.set_field(kind, item_id, "last_played", now_stamp())
+    stamp_played(kind, item_id)
     log_event(kind, item_id, title, event)
     note_now_playing(proc, kind, item_id, title)
     return title
@@ -5617,8 +5656,9 @@ def browse_library(kind, query, sort, shelf, limit, offset):
             try:
                 seen = {(r[0], r[1]): r[2] or "" for r in conn.execute(
                     "SELECT kind, tmdb_id, MAX(at) FROM history WHERE tmdb_id IS NOT NULL"
-                    " AND tmdb_id <> '' AND event IN ('played','stopped','watched')"
-                    " GROUP BY kind, tmdb_id")}
+                    " AND tmdb_id <> '' AND (event = 'watched' OR (event = 'stopped'"
+                    " AND (seconds IS NULL OR seconds >= %d)))"
+                    " GROUP BY kind, tmdb_id" % MIN_WATCH_SECONDS)}
             finally:
                 conn.close()
             for r in rows:
@@ -11715,7 +11755,7 @@ def _tune_channel(channel, follow_on=False, after=None):
     # whole difference between a channel and a single click.
     proc = mpv_play(path, start=seek, keep_open=True)
     title = LOCAL.field(kind, item_id, "title")
-    LOCAL.set_field(kind, item_id, "last_played", now_stamp())
+    stamp_played(kind, item_id)
     log_event(kind, item_id, title,
               ("next up on " if follow_on else "tuned in via ") + channel["name"])
     note_now_playing(proc, kind, item_id, title, channel=channel["name"],
@@ -12148,7 +12188,7 @@ def play_local(kind, item_id, resume=False, start=None):
     proc = mpv_play(path, start=start,
                     keep_open=(kind == "episode" or queue_count() > 0))
     title = LOCAL.field(kind, item_id, "title")
-    LOCAL.set_field(kind, item_id, "last_played", now_stamp())
+    stamp_played(kind, item_id)
     log_event(kind, item_id, title, "played")
     note_now_playing(proc, kind, item_id, title)
 
@@ -25118,6 +25158,7 @@ def _android_play_finished(position=None, duration=None, completed=False):
         # position. It closes the same way when it couldn't play the file at
         # all, though, so a close that soon after opening is not a watch.
         if ran_for < MIN_WATCH_SECONDS:
+            unstamp_played(kind, item_id)
             return
         try:
             _record_play("movies" if kind == "movie" else "episodes", kind, item_id,
@@ -25129,6 +25170,7 @@ def _android_play_finished(position=None, duration=None, completed=False):
         # is wherever it was started — twenty minutes in, joining a channel —
         # and recording that would put it in Continue for seconds watched.
         if ran_for < MIN_WATCH_SECONDS:
+            unstamp_played(kind, item_id)
             return
         note_playback_finished(kind, item_id, ran_for, position=position, duration=duration)
 

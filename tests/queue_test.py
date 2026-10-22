@@ -109,7 +109,8 @@ n._finish_current("ended")
 check("a channel programme ending leaves the queue alone", advanced == ["comedy"] and n.queue_state()["count"] == cnt)
 
 # skipping via play_from_queue while something plays closes the sitting first
-n.NOW_PLAYING.update(type="movie", id=films[0]["movieid"], title="x", started_at=0,
+n.NOW_PLAYING.update(type="movie", id=films[0]["movieid"], title="x", started_at=n.time.time() - 600,  # a sitting, not a moment
+                    
                      channel=None, channel_id=None, position=100, duration=6000)
 import sqlite3
 before = sqlite3.connect(COPY).execute("SELECT COUNT(*) FROM history WHERE event='stopped'").fetchone()[0]

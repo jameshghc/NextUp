@@ -27,7 +27,7 @@ What changed in Next Up, version by version, newest first. Version numbers start
 - Fixed an error that could stop the phone's Now page loading when it first opened.
 - ON PC is offered for titles with no TMDB match, and a copy since removed from the phone streams instead.
 - A channel started from the phone no longer keeps relaunching itself.
-- Opening something on the phone and closing it within a minute no longer puts it in Continue.
+- Anything closed within a minute, or flicked straight past, is no longer recorded: no History entry, no resume point, and it doesn't count as recently watched. Old entries like that are hidden from History too.
 - After a restart, the phone's link keeps trying if the previous copy of the app hasn't let go yet.
 - A stray code showing instead of an apostrophe is fixed.
 
