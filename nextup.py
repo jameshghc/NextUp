@@ -6045,6 +6045,29 @@ def show_detail(show_id):
     progress = series_progress(by_show, show_id)
     next_up = progress["episode"].get("episodeid") if progress else None
 
+    # Scores (episode_scores). A show with nothing to go on gets none, and
+    # its page looks as it always did.
+    try:
+        scores = episode_scores(show_id)
+    except Exception:
+        log_problem("episode scores")
+        scores = {}
+    by_season = season_scores(show_id, scores) if scores else {}
+    rewatched = {}
+    if scores:
+        conn = db()
+        try:
+            ids = list(scores)
+            rewatched = dict(conn.execute(
+                "SELECT item_id, COUNT(*) FROM history WHERE kind='episode' AND event='watched'"
+                " AND item_id IN (%s) GROUP BY item_id" % ",".join("?" * len(ids)), ids).fetchall())
+        finally:
+            conn.close()
+    # "Good in theory": unseen, unrated, and in the top fifth of the show.
+    run = sorted((scores[e["episodeid"]] for e in episodes
+                  if e["episodeid"] in scores and (e.get("season") or 0) > 0), reverse=True)
+    gem_line = run[max(1, -(-len(run) // 5)) - 1] if len(run) >= 5 else None
+
     seasons = {}
     for e in episodes:
         resume = e.get("resume") or {}
@@ -6057,7 +6080,17 @@ def show_detail(show_id):
             "runtime": minutes(e.get("runtime")),
             "played": bool(e.get("playcount")), "percent": percent,
             "code": "S%02dE%02d" % (e.get("season") or 0, e.get("episode") or 0),
+            "score": scores.get(e.get("episodeid")),
+            "star": bool((e.get("userrating") or 0) >= 8 or (rewatched.get(e.get("episodeid")) or 0) >= 2),
+            "gem": bool(gem_line is not None and not e.get("playcount") and not e.get("userrating")
+                        and (e.get("season") or 0) > 0
+                        and (scores.get(e.get("episodeid")) or 0) >= gem_line),
         })
+    # The show's best: needs five scored to mean anything, and specials sit
+    # outside the run.
+    ranked = sorted((x for n, run_ in seasons.items() if n > 0 for x in run_ if x["score"] is not None),
+                    key=lambda x: -x["score"])
+    best = ranked[:5] if len(ranked) >= 5 else []
 
     return {
         "id": show_id, "title": show.get("title"), "year": show.get("year"),
@@ -6079,7 +6112,9 @@ def show_detail(show_id):
                          ("S%02dE%02d" % (progress["episode"].get("season") or 0,
                                           progress["episode"].get("episode") or 0)
                           if progress else ""),
-        "seasons": [{"season": n, "episodes": seasons[n]} for n in sorted(seasons)],
+        "seasons": [{"season": n, "episodes": seasons[n], "score": by_season.get(n)}
+                    for n in sorted(seasons)],
+        "best": best,
     }
 
 
@@ -17097,6 +17132,15 @@ body.android .tile.elsewhere .cap{padding-bottom:26px}
    to mean anything: a dot for the season you're in the middle of, a tick for
    one you've finished. A season not started carries neither. */
 .seasontab .flag{font-size:10px;color:var(--muted)}
+/* Scores: the season's on its tab, the episode's on its row. */
+.seasonscore{font-family:var(--mono);font-size:10.5px;margin-left:6px;opacity:.8}
+.seasonscore.top{color:var(--marigold);opacity:1}
+.seasonscore.low{opacity:.45}
+.epscore{flex:none;font-family:var(--mono);font-size:11.5px;padding:2px 7px;border-radius:5px;white-space:nowrap;
+  background:hsl(var(--h) 55% 35% / .35);color:hsl(var(--h) 70% 72%)}
+.epscore.gem{outline:1px dashed hsl(var(--h) 70% 60% / .6)}
+.bestrow{display:flex;flex-direction:column;margin:4px 0 12px}
+.bestrow .seasoncount{color:var(--marigold)}
 .seasontab.part .flag{color:var(--marigold)}
 .seasontab.done .flag{color:var(--teal)}
 .seasontab.done:not([aria-selected="true"]){color:var(--muted)}
@@ -21607,6 +21651,11 @@ function seasonBrowser(d, seasons){
   let current = seasons.findIndex(s => s.episodes.some(ep => ep.id === d.next_up));
   if(current < 0) current = Math.max(0, seasons.findIndex(s => s.season > 0));
 
+  /* Each season's score, the strongest in the accent and the weakest
+     dimmer — only once there are two to compare. */
+  const scored = seasons.filter(s => s.season > 0 && s.score != null).map(s => s.score);
+  const top = scored.length > 1 ? Math.max(...scored) : null;
+  const low = scored.length > 1 ? Math.min(...scored) : null;
   const bar = el('div','seasonbar');
   const tabs = seasons.map((s, i) => {
     const seen = watched(s);
@@ -21614,12 +21663,25 @@ function seasonBrowser(d, seasons){
     const state = finished ? ' done' : (started(s) ? ' part' : '');
     const t = el('button','seasontab'+state);
     t.append(el('span',null, label(s)));
+    if(s.score != null){
+      const sc = el('span', 'seasonscore', s.score.toFixed(1));
+      if(s.season > 0 && s.score === top && top !== low) sc.classList.add('top');
+      else if(s.season > 0 && s.score === low && top !== low) sc.classList.add('low');
+      t.append(sc);
+    }
     if(state) t.append(el('span','flag', finished ? '✓' : '●'));
     t.title = label(s)+' — '+s.episodes.length+' owned, '+seen+' watched';
     t.onclick = () => show(i);
     bar.append(t);
     return t;
   });
+  /* The show's best five, above the seasons: each plays like any other. */
+  if(d.best && d.best.length){
+    const bestbox = el('div', 'bestrow');
+    bestbox.append(el('div', 'seasoncount', 'Best episodes'));
+    d.best.forEach(ep => bestbox.append(episodeRow(ep, d)));
+    wrap.append(bestbox);
+  }
   /* One season is not a choice, and a bar of one button reads as a bar with
      something missing from it. */
   if(seasons.length > 1) wrap.append(bar);
@@ -21654,6 +21716,15 @@ function episodeRow(ep, d){
   if(ep.percent) row.append(el('div','libline', ep.percent+'% in'));
   else if(ep.id===d.next_up) row.append(el('div','libline','carry on here'));
   else if(ep.played) row.append(el('div','libline','played here'));
+  /* Its score, on the library's colour scale; ★ for one you rated highly
+     or keep coming back to, ? for one you haven't seen that should be good. */
+  if(ep.score != null){
+    const sc = el('span', 'epscore', ep.score.toFixed(1));
+    sc.style.setProperty('--h', hueFor(ep.score));
+    if(ep.star){ sc.prepend('\u2605 '); sc.title = 'One of yours'; }
+    else if(ep.gem){ sc.classList.add('gem'); sc.append(' ?'); sc.title = 'Good in theory: you haven\u2019t seen it'; }
+    row.append(sc);
+  }
   const go = el('button','iconbtn','PLAY');
   go.onclick = async () => {
     go.textContent='…';

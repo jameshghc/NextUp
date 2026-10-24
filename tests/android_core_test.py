@@ -294,6 +294,9 @@ check("Remote: Continue where you left off, under the hint when idle and under t
 check("Remote idle: a status line, Continue from PC, On now with pictures, and a pick",
       'id="rm_status"' in page_src and "CONTINUE ON PC" in page_src and 'id="rm_onnow"' in page_src
       and 'id="rm_surprise"' in page_src and "Nothing playing on the PC" in page_src)
+check("show page: season scores, episode scores and marks, and Best episodes",
+      "'seasonscore'" in page_src and "'epscore'" in page_src and "'bestrow'" in page_src
+      and "Best episodes" in page_src)
 check("phone Favourites shows every favourite, not just the ones on the phone",
       "favWidened = true" in page_src)
 check("phone Now: a step-by-step chooser — kind, then genres in their colours, then what fits",

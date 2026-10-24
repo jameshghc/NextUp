@@ -97,5 +97,30 @@ check("a season is its episodes, vote-weighted (yours count as 100)", ss.get(1) 
 check("specials are scored, on their own", 0 in ss and ss[0] == sc.get(sp), ss)
 check("nothing to go on: no scores", n.episode_scores(dull) == {}, n.episode_scores(dull))
 
+# --- Task 3: on the show's page ----------------------------------------------------------
+conn = n.db()
+g5, g6 = ep(1, 5, 7.0, 100), ep(1, 6, 8.8, 300)
+conn.commit(); conn.close()
+reload()
+for _ in range(2):
+    setsql("INSERT INTO history (at,kind,item_id,title,event) VALUES ('2026-10-01 20:00:00','episode',?,'E1','watched')", g1)
+d = n.show_detail(show)
+eps = {e["id"]: e for s_ in d["seasons"] for e in s_["episodes"]}
+check("show_detail: a score on every episode it can score", eps[g1]["score"] is not None and eps[g6]["score"] == 8.8,
+      {k: v["score"] for k, v in eps.items()})
+check("and on every season", all(s_.get("score") is not None for s_ in d["seasons"]),
+      [(s_["season"], s_.get("score")) for s_ in d["seasons"]])
+best = [e["id"] for e in d.get("best") or []]
+check("Best episodes: five, highest first, no specials", len(best) == 5 and sp not in best and best[0] == g3,
+      [(eps[b]["code"], eps[b]["score"]) for b in best])
+check("a star for one you rated highly or keep coming back to", eps[g3]["star"] and eps[g1]["star"] and not eps[g5]["star"],
+      {k: v["star"] for k, v in eps.items()})
+check("'good in theory': unwatched, unrated and near the top", eps[g6]["gem"] and not eps[g3]["gem"] and not eps[g5]["gem"],
+      {k: v["gem"] for k, v in eps.items()})
+dd = n.show_detail(dull)
+check("a show with nothing to go on looks as it did",
+      all(e["score"] is None for s_ in dd["seasons"] for e in s_["episodes"])
+      and not dd.get("best") and all(s_.get("score") is None for s_ in dd["seasons"]), dd.get("best"))
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
