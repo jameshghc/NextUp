@@ -22,6 +22,7 @@ What changed in Next Up, version by version, newest first. Version numbers start
 - The Now page's reasons no longer quote ratings; the scores are still on the card.
 - The Remote shows Continue where you left off: under the message when nothing's playing, under the channels when something is.
 - The Library's Sort list has Recently watched: films by when you last played them, shows by their latest episode.
+- On the phone, a second tap on a tile opens its details; with the PC connected, a show the phone hasn't got opens the PC's full page for it (scores, stars, episode details), every episode playing HERE or ON PC. Episode rows put the name on its own line on a phone.
 - With the PC connected, the phone's Library opens on Show all, and Show and Sort share one line.
 - The phone's Now page is tidier: the chooser sits under Continue, the pick's buttons sit in two fixed rows that don't move, and no scroll bars take up space.
 

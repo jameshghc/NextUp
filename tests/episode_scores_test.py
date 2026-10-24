@@ -225,7 +225,7 @@ check("an episode's details: plot, air date, director, writers, guest stars, TMD
 check("an episode that isn't there: None", n.episode_info(99999999) is None)
 _pe = n.PAGE[n.PAGE.find("function episodeRow("):][:4000]
 check("the page: the star after the name, and the name opens the details",
-      "'epbest'" in _pe and _pe.find("'epbest'") > _pe.find("eptitle") and "toggleEpisodeInfo(row, ep)" in _pe
+      "'epbest'" in _pe and _pe.find("'epbest'") > _pe.find("eptitle") and "toggleEpisodeInfo(row, ep, d)" in _pe
       and "'epinfo'" in n.PAGE and "/api/episode?id=" in n.PAGE, "")
 
 print("\n%d/%d passed" % (sum(results), len(results)))

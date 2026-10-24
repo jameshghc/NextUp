@@ -12438,6 +12438,44 @@ def channel_ident(block, offset):
     return ident_for(kind, item_id), int(at or 0)
 
 
+def _phone_art_deep(value):
+    """Every /art/ picture anywhere in an answer, as a path the phone's link
+    can fetch (/phone/art/...)."""
+    if isinstance(value, dict):
+        return {k: _phone_art_deep(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_phone_art_deep(v) for v in value]
+    if isinstance(value, str) and value.startswith("/art/"):
+        return phone_art(value)
+    return value
+
+
+def phone_show(tmdb):
+    """A show's whole page, as this PC has it, for the phone to draw as its
+    own: seasons, scores, the best, the people. By TMDB id, since the
+    phone doesn't know this PC's ids; the episode ids inside are this PC's,
+    and the phone only ever hands them back (phone_episode)."""
+    conn = db()
+    try:
+        row = conn.execute("SELECT id FROM shows WHERE tmdb_id=? ORDER BY id LIMIT 1", (str(tmdb),)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return {"error": "The PC doesn't have that show."}
+    d = show_detail(row["id"])
+    if d.get("error"):
+        return d
+    d = _phone_art_deep(d)
+    d.update(pc=True, tmdb_id=str(tmdb))
+    return d
+
+
+def phone_episode(episode_id):
+    """One episode's details (episode_info), by this PC's own id."""
+    got = episode_info(episode_id)
+    return _phone_art_deep(got) if got else {"error": "The PC doesn't have that episode."}
+
+
 def phone_channels():
     """The PC's channels and what's on, for the phone. A film or episode
     channel says what to play and from where; live and YouTube ones don't
@@ -13496,6 +13534,13 @@ class PhoneHandler(BaseHTTPRequestHandler):
                 return self.send_json({"genres": available_genres((query.get("kind") or ["any"])[0], chosen)})
             if route == "/phone/channels":
                 return self.send_json(phone_channels())
+            if route == "/phone/show":
+                return self.send_json(phone_show((query.get("tmdb") or [""])[0]))
+            if route == "/phone/episode":
+                try:
+                    return self.send_json(phone_episode(int((query.get("id") or ["0"])[0])))
+                except ValueError:
+                    return self.send_json({"error": "The PC doesn't have that episode."})
             if route == "/phone/hello":
                 return self.send_json({"ok": True, "pc": snapshot_device_name(),
                                        "device_id": sync_device_id(),
@@ -14110,7 +14155,19 @@ def pc_library_call(path):
             _pc_art(item)
     for ch in reply.get("channels") or []:
         _pc_art(ch.get("now"))
-    return reply
+    return _pc_art_deep(reply)
+
+
+def _pc_art_deep(value):
+    """Every /phone/art/ picture anywhere in a passed-through answer, pointed
+    at this server, which fetches it with the token."""
+    if isinstance(value, dict):
+        return {k: _pc_art_deep(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_pc_art_deep(v) for v in value]
+    if isinstance(value, str) and value.startswith("/phone/art/"):
+        return "/api/pcremote/art/" + value[len("/phone/art/"):]
+    return value
 
 
 def mark_on_pc(rows):
@@ -14635,11 +14692,12 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/remote/state":
                 return self.send_json(remote_state())
 
-            if route in ("/api/pcnow", "/api/pcgenres", "/api/pcchannels"):
+            if route in ("/api/pcnow", "/api/pcgenres", "/api/pcchannels", "/api/pcshow", "/api/pcepisode"):
                 if PLATFORM != "android":
                     return self.send_json({"error": "only on the phone"}, 404)
                 target = {"/api/pcnow": "/phone/now", "/api/pcgenres": "/phone/genres",
-                          "/api/pcchannels": "/phone/channels"}[route]
+                          "/api/pcchannels": "/phone/channels", "/api/pcshow": "/phone/show",
+                          "/api/pcepisode": "/phone/episode"}[route]
                 qs = urllib.parse.urlparse(self.path).query
                 return self.send_json(pc_library_call(target + ("?" + qs if qs else "")))
 
@@ -17271,7 +17329,17 @@ body.android .tile.elsewhere .cap{padding-bottom:26px}
 .epfacts{font-family:var(--mono);font-size:11px;color:var(--marigold);letter-spacing:.03em}
 .epplot{margin:0;font-size:13.5px;line-height:1.5;color:var(--paper)}
 .epwho{font-size:12px;color:var(--muted)}
-@media (max-width:600px){ .epinfo{flex-direction:column} .epinfo img{width:100%;max-width:none} }
+@media (max-width:600px){
+  .epinfo{flex-direction:column} .epinfo img{width:100%;max-width:none}
+  /* The phone: the name on a line of its own, the whole of it; the code,
+     what's happening with it, the score and the buttons on the line under. */
+  .eprow{flex-wrap:wrap;row-gap:6px}
+  .eprow .name{order:-1;flex:1 1 100%}
+  .eprow .name .eptitle{white-space:normal}
+  .eprow .libline{margin-left:auto}
+  .eprow .epscore{margin-left:auto}
+  .eprow .libline + .epscore{margin-left:0}
+}
 .seasontab.part .flag{color:var(--marigold)}
 .seasontab.done .flag{color:var(--teal)}
 .seasontab.done:not([aria-selected="true"]){color:var(--muted)}
@@ -17987,6 +18055,9 @@ body:not(.onnow) #roomart{opacity:0}
    and the glass is the Now card's own: its poster washed across the card
    (.ppwash), drawn once per pick. */
 body.android #roomart{display:none}
+/* Without the blur, a see-through details page showed the Library through
+   it: on the phone they're solid. */
+body.android.glass :is(.sheetbody,.sheetpanel){background-color:rgba(18,18,22,.98)!important}   /* past the glass rule's #id */
 body.android.glass *{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
 body.glass .phonepick{position:relative;overflow:hidden;isolation:isolate}
 .phonepick .ppwash{position:absolute;inset:-60px;z-index:-1;pointer-events:none;
@@ -20553,7 +20624,8 @@ function tile(item){
     peek.append(go);
     if(item.kind === 'tvshow'){
       const more = el('button','iconbtn peekdetails','DETAILS');
-      more.onclick = (e) => { e.stopPropagation(); closePeeks(); openElsewhereShow(item.tmdb_id); };
+      more.onclick = (e) => { e.stopPropagation(); closePeeks();
+        pcLinkUp ? openPcShow(item.tmdb_id) : openElsewhereShow(item.tmdb_id); };
       peek.append(more);
     }
   }
@@ -20662,7 +20734,13 @@ function tile(item){
        and a tap on the poster again closes it. There's no hover on a touch
        screen to do this job, and the peek's own buttons say where to go. */
     if(document.body.classList.contains('android')){
-      if(b.classList.contains('peeking')){ closePeeks(); return; }
+      if(b.classList.contains('peeking')){
+        /* A second tap, anywhere but its buttons: what DETAILS does (the
+           buttons stop their own taps). Nothing to open: the peek shuts. */
+        const more = b.querySelector('.peekdetails');
+        if(more) more.click(); else closePeeks();
+        return;
+      }
       closePeeks();
       b.classList.add('peeking');
       return;
@@ -21708,14 +21786,19 @@ function fmtScoreShort(v){
   return String(Math.round(v*2)/2);
 }
 
-async function openShow(id){
+/* A show the PC has and this phone hasn't, while the PC is on the Wi-Fi:
+   the PC's own page for it — scores, the best, each episode's details —
+   with every episode playing HERE (streamed) or ON PC. */
+function openPcShow(tmdb){ return openShow(null, tmdb); }
+
+async function openShow(id, pcTmdb){
   const body = sheet();
   body.append(el('div','blank'));
   const right = el('div');
   right.append(el('p','empty','Loading…'));
   body.append(right);
 
-  const d = await api('/api/show?id='+id);
+  const d = await api(pcTmdb ? '/api/pcshow?tmdb=' + encodeURIComponent(pcTmdb) : '/api/show?id='+id);
   if(d.error){ right.innerHTML = '<p class="empty">'+esc(d.error)+'</p>'; return; }
 
   body.innerHTML = '';
@@ -21732,6 +21815,10 @@ async function openShow(id){
   col.append(el('div','subline', esc([d.year, d.tmdb?('TMDB '+d.tmdb):null,
     (d.genres||[]).join(' / ')].filter(Boolean).join('  ·  '))));
   if(d.plot) col.append(el('p','plot', esc(d.plot.slice(0,320))+'…'));
+  /* The PC's show: its ids are the PC's, so nothing here marks or rates
+     it (that's the PC's, or the Library's). */
+  if(d.pc) col.append(el('div', 'nowsource', 'From the PC' + '\u2019' + 's library'));
+  if(!d.pc){
   col.append(rateControl({rate_type:'tvshow', rate_id:d.id, userrating:d.userrating},
                          {label:'Your rating for the show',
                           onRated:() => { libraryChanged(); loadLibrary(); }}));
@@ -21757,6 +21844,7 @@ async function openShow(id){
     libraryChanged(); loadLibrary();
   };
   col.append(fav);
+  }
   if(d.facts && d.facts.length) col.append(factStrip(d.facts));
   body.append(col);
 
@@ -21857,13 +21945,13 @@ function seasonBrowser(d, seasons){
 /* An episode's own details, under its row: the still, the plot, when it
    aired and how long it runs, TMDB's rating, who made it and who guested.
    Asked for when opened (/api/episode). Click the name again to close. */
-async function toggleEpisodeInfo(row, ep){
+async function toggleEpisodeInfo(row, ep, d){
   const next = row.nextElementSibling;
   if(next && next.classList.contains('epinfo')){ next.remove(); return; }
   const box = el('div', 'epinfo');
   box.append(el('p', 'empty', 'Loading\u2026'));
   row.after(box);
-  const r = await api('/api/episode?id=' + ep.id);
+  const r = await api((d && d.pc ? '/api/pcepisode?id=' : '/api/episode?id=') + ep.id);
   box.innerHTML = '';
   if(!r || r.error){ box.append(el('p', 'empty', 'Nothing more is known about this one.')); return; }
   if(r.still){ const i = el('img'); i.src = r.still; i.alt = ''; i.loading = 'lazy'; box.append(i); }
@@ -21892,7 +21980,7 @@ function episodeRow(ep, d){
   t.title = (ep.title || '') + ' \u2014 details';
   name.append(t);
   if(ep.best){ const st = el('span', 'epbest', '\u2605'); st.title = 'One of the best episodes'; name.append(st); }
-  t.onclick = e => { e.stopPropagation(); toggleEpisodeInfo(row, ep); };
+  t.onclick = e => { e.stopPropagation(); toggleEpisodeInfo(row, ep, d); };
   row.append(name);
   if(ep.percent) row.append(el('div','libline', ep.percent+'% in'));
   else if(ep.id===d.next_up) row.append(el('div','libline','carry on here'));
@@ -21912,7 +22000,7 @@ function episodeRow(ep, d){
                  + ' \u2014 click to rate it yourself';
     };
     paintScore();
-    sc.onclick = e => {
+    if(!d.pc) sc.onclick = e => {           // the PC's episode: rated on the PC
       e.stopPropagation();
       const next = row.nextElementSibling;
       if(next && next.classList.contains('eprate')){ next.remove(); return; }
@@ -21937,7 +22025,9 @@ function episodeRow(ep, d){
     go.textContent = r.error ? 'FAILED' : 'PLAYING';
     if(!r.error) pollPlaying();
   };
-  row.append(go);
+  /* The PC's episode: HERE streams it, ON PC plays it there. */
+  row.append(d.pc ? playChoice({ident: {kind: 'episode', tmdb: d.tmdb_id, season: ep.season, episode: ep.episode},
+                                type: 'episode', id: ep.id}, true) : go);
   return row;
 }
 

@@ -274,8 +274,8 @@ check("phone: a tap shows the peek — facts and colour-coded genres up top, PLA
       "'play peekplay'" in page_src and "classList.add('peeking')" in page_src
       and "body.android .tile.peeking .peek{" in page_src and "peekdetails" in page_src
       and "function genreHue(" in page_src and "peektop" in page_src)
-check("phone: a second tap on the poster closes the peek rather than opening details",
-      "if(b.classList.contains('peeking')){ closePeeks(); return; }" in page_src)
+check("phone: a second tap on the poster opens the details (what DETAILS does), or shuts a peek with none",
+      "const more = b.querySelector('.peekdetails');" in page_src and "if(more) more.click(); else closePeeks();" in page_src)
 check("phone Now: the pick in its own layout, a short why between the plot and the rating",
       "function phonePick(" in page_src and "'ppwhy'" in page_src and 'id="whythis"' not in page_src
       and "body.android #view-now:not(.hidden)" in page_src)

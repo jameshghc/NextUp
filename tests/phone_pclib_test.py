@@ -176,6 +176,35 @@ n.pc_link_call = real_call
 n.require_media_file = real_req
 check("HERE streams when the phone's own copy has gone", "/phone/play" in streamed and not r.get("error"), (r, streamed))
 
+# --- A PC show's full page on the phone (2026-10-24) -------------------------------------
+conn = n.db()
+_sh = conn.execute("SELECT s.id, s.tmdb_id FROM shows s WHERE s.tmdb_id<>'' AND"
+                   " EXISTS (SELECT 1 FROM episodes e WHERE e.show_id=s.id AND e.season>0) LIMIT 1").fetchone()
+_ep = conn.execute("SELECT id FROM episodes WHERE show_id=? AND season>0 ORDER BY season, episode LIMIT 1",
+                   (_sh["id"],)).fetchone()
+conn.execute("UPDATE episodes SET still='/art/teststill.jpg' WHERE id=?", (_ep["id"],))
+conn.commit(); conn.close()
+n.LIB.loaded_at = 0
+_ps = dget("/api/pcshow?tmdb=" + _sh["tmdb_id"])
+check("the phone gets a PC show's whole page: seasons and episodes, the show's identity, marked as the PC's",
+      _ps.get("pc") is True and _ps.get("tmdb_id") == _sh["tmdb_id"] and _ps.get("seasons")
+      and all("score" in e for se in _ps["seasons"] for e in se["episodes"]), {k: _ps.get(k) for k in ("pc", "tmdb_id", "error")})
+_arts = [x for x in [_ps.get("poster"), _ps.get("backdrop")] + [c.get("photo") for c in _ps.get("cast") or []] if x]
+check("its pictures come through this phone (or straight from TMDB)",
+      all(a.startswith("/api/pcremote/art/") or a.startswith("https://") for a in _arts)
+      and not any(a.startswith(("/art/", "/phone/art/")) for a in _arts), _arts[:3])
+_pe = dget("/api/pcepisode?id=%d" % _ep["id"])
+check("and an episode's details, its still through this phone too",
+      _pe.get("title") is not None and (_pe.get("still") or "").startswith("/api/pcremote/art/"), _pe.get("still"))
+check("a show the PC hasn't got says so", dget("/api/pcshow?tmdb=no-such-show").get("error"))
+_pg = n.PAGE
+check("the page: a second tap on a peeking tile does what DETAILS does",
+      "const more = b.querySelector('.peekdetails');" in _pg)
+check("the page: a PC show opens the full page while the PC is there, the simple list without it",
+      "function openPcShow(" in _pg and "pcLinkUp ? openPcShow(item.tmdb_id) : openElsewhereShow(item.tmdb_id)" in _pg)
+check("the page: on the PC's show, episodes play HERE or ON PC, and the episode details come from the PC",
+      "d.pc ? playChoice(" in _pg and "d.pc ? '/api/pcepisode?id=' : '/api/episode?id='" in _pg)
+
 n.phone_link_stop()
 n.PC_LINK.update(checked=0)
 got = dget("/api/pcnow?kind=film")
