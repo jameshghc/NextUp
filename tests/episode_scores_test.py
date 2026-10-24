@@ -142,5 +142,50 @@ check("a show with no scores builds as before", len(n.channel_blocks(favstv)) ==
 check("only the TV favourites channel is weighted",
       [c["id"] for c in n.CHANNELS if c.get("weight_by_score")] == ["favstv"])
 
+# --- Final review fixes --------------------------------------------------------------------
+# I1: a show TMDB rates as a whole, but whose episodes nobody has voted on
+# yet (every show, until the first scan after this) — no made-up scores.
+conn = n.db()
+flat = conn.execute("INSERT INTO shows (name,title,tmdb_id,tmdb_rating) VALUES ('flat','Flat','880004',7.5)").lastrowid
+for k in range(1, 7):
+    conn.execute("INSERT INTO episodes (path,show_id,season,episode,title,runtime,tmdb_rating,tmdb_votes)"
+                 " VALUES (?,?,1,?,?,1800,0,0)", ("X:/fl/%d.mkv" % k, flat, k, "F%d" % k))
+conn.commit(); conn.close()
+reload()
+fd = n.show_detail(flat)
+check("no votes anywhere: no scores, no marks, no Best row",
+      n.episode_scores(flat) == {} and not fd["best"]
+      and all(e["score"] is None and not e["gem"] for s_ in fd["seasons"] for e in s_["episodes"]),
+      n.episode_scores(flat))
+# A season nobody's voted on yet, in a show that otherwise has votes.
+conn = n.db()
+fresh = [conn.execute("INSERT INTO episodes (path,show_id,season,episode,title,runtime,tmdb_rating,tmdb_votes)"
+                      " VALUES (?,?,2,?,?,1800,0,0)", ("X:/gr/s2e%d.mkv" % k, show, k, "N%d" % k)).lastrowid
+         for k in (1, 2)]
+conn.commit(); conn.close()
+reload()
+gd = n.show_detail(show)
+s2 = next(s_ for s_ in gd["seasons"] if s_["season"] == 2)
+check("a season nobody's voted on gets no chip", s2.get("score") is None, s2.get("score"))
+best_ids = [e["id"] for e in gd["best"]]
+check("and its fallback scores never reach Best or 'good in theory'",
+      not any(f in best_ids for f in fresh) and not any(e["gem"] for e in s2["episodes"]), best_ids)
+# I2: the channel's order holds through a rewatch.
+setsql("UPDATE shows SET favourited_at=NULL")
+setsql("UPDATE shows SET favourited_at='2026-10-01 20:00:00' WHERE id=?", show)
+before = [b["sub"] for b in n.channel_blocks(favstv)]
+for _ in range(3):
+    setsql("INSERT INTO history (at,kind,item_id,title,event) VALUES ('2026-10-02 20:00:00','episode',?,'E5','watched')", g5)
+check("Non-stop Favs: TV keeps its order through a rewatch", [b["sub"] for b in n.channel_blocks(favstv)] == before)
+# I3: a scoring failure never takes the channels down.
+_real = n.episode_scores
+def _broken(*a, **k):
+    raise RuntimeError("database is locked")
+n.episode_scores = _broken
+got = n.channel_blocks(favstv)
+n.episode_scores = _real
+check("a scoring error leaves the channel unweighted, not broken", len(got) == len(n.channel_blocks(plain)),
+      (len(got), len(n.channel_blocks(plain))))
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

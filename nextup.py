@@ -5941,13 +5941,26 @@ def _vote_mean(pairs):
     return sum(r * v for r, v in pairs) / float(total) if total else None
 
 
-def episode_scores(show_id):
+def _episode_evidence(e):
+    """Whether anyone has said anything about this episode itself: TMDB
+    votes, or a rating of yours. Without it a score is only a fallback."""
+    return bool((e.get("tmdb_votes") or 0) > 0 or e.get("userrating"))
+
+
+def episode_scores(show_id, rewatches=True, episodes=None):
     """{episode id: score} for one show. Episodes with nothing at all to go
-    on are left out rather than guessed."""
+    on are left out rather than guessed — and so is a whole show whose
+    episodes nobody has voted on or rated, which would otherwise be its own
+    rating copied onto every one of them. rewatches=False leaves out the
+    history (what the channel weighting needs: an order that holds).
+    episodes, when given, is this show's episodes, already picked out."""
     LIB.load()
     show = next((s for s in LIB.shows if s.get("tvshowid") == show_id), None)
-    eps = sorted([e for e in LIB.episodes if e.get("tvshowid") == show_id], key=episode_order)
+    eps = sorted(episodes if episodes is not None else
+                 [e for e in LIB.episodes if e.get("tvshowid") == show_id], key=episode_order)
     if not show or not eps:
+        return {}
+    if not any(_episode_evidence(e) for e in eps if (e.get("season") or 0) > 0):
         return {}
     seasons = defaultdict(list)
     for e in eps:
@@ -5956,14 +5969,16 @@ def episode_scores(show_id):
     show_tmdb = show.get("rating") or _vote_mean(pair(e) for e in eps if (e.get("season") or 0) > 0)
     mine_show = show.get("userrating") or 0
 
-    conn = db()
-    try:
-        ids = [e["episodeid"] for e in eps]
-        seen = dict(conn.execute(
-            "SELECT item_id, COUNT(*) FROM history WHERE kind='episode' AND event='watched'"
-            " AND item_id IN (%s) GROUP BY item_id" % ",".join("?" * len(ids)), ids).fetchall())
-    finally:
-        conn.close()
+    seen = {}
+    if rewatches:
+        conn = db()
+        try:
+            ids = [e["episodeid"] for e in eps]
+            seen = dict(conn.execute(
+                "SELECT item_id, COUNT(*) FROM history WHERE kind='episode' AND event='watched'"
+                " AND item_id IN (%s) GROUP BY item_id" % ",".join("?" * len(ids)), ids).fetchall())
+        finally:
+            conn.close()
 
     out = {}
     for number, run in seasons.items():
@@ -5999,8 +6014,13 @@ def season_scores(show_id, scores):
     voted on each (one you rated counts as EPISODE_RATED_WEIGHT)."""
     LIB.load()
     sums = defaultdict(lambda: [0.0, 0])
+    # A season nobody has voted on or rated (the current one, say) gets no
+    # score rather than the show's own rating dressed up as one.
+    voiced = set(e.get("season") or 0 for e in LIB.episodes
+                 if e.get("tvshowid") == show_id and _episode_evidence(e))
     for e in LIB.episodes:
-        if e.get("tvshowid") != show_id or e["episodeid"] not in scores:
+        if (e.get("tvshowid") != show_id or e["episodeid"] not in scores
+                or (e.get("season") or 0) not in voiced):
             continue
         weight = EPISODE_RATED_WEIGHT if e.get("userrating") else max(1, e.get("tmdb_votes") or 0)
         acc = sums[e.get("season") or 0]
@@ -6065,8 +6085,10 @@ def show_detail(show_id):
             conn.close()
     # "Good in theory": unseen, unrated, and in the top fifth of the show.
     run = sorted((scores[e["episodeid"]] for e in episodes
-                  if e["episodeid"] in scores and (e.get("season") or 0) > 0), reverse=True)
-    gem_line = run[max(1, -(-len(run) // 5)) - 1] if len(run) >= 5 else None
+                  if e["episodeid"] in scores and (e.get("season") or 0) > 0
+                  and _episode_evidence(e)), reverse=True)
+    voiced = set(e["episodeid"] for e in episodes if _episode_evidence(e))
+    gem_line = run[int(len(run) * 0.2)] if len(run) >= 5 else None   # the 80th percentile
 
     seasons = {}
     for e in episodes:
@@ -6083,12 +6105,13 @@ def show_detail(show_id):
             "score": scores.get(e.get("episodeid")),
             "star": bool((e.get("userrating") or 0) >= 8 or (rewatched.get(e.get("episodeid")) or 0) >= 2),
             "gem": bool(gem_line is not None and not e.get("playcount") and not e.get("userrating")
-                        and (e.get("season") or 0) > 0
+                        and (e.get("season") or 0) > 0 and e.get("episodeid") in voiced
                         and (scores.get(e.get("episodeid")) or 0) >= gem_line),
         })
     # The show's best: needs five scored to mean anything, and specials sit
     # outside the run.
-    ranked = sorted((x for n, run_ in seasons.items() if n > 0 for x in run_ if x["score"] is not None),
+    ranked = sorted((x for n, run_ in seasons.items() if n > 0 for x in run_
+                     if x["score"] is not None and x["id"] in voiced),
                     key=lambda x: -x["score"])
     best = ranked[:5] if len(ranked) >= 5 else []
 
@@ -11168,15 +11191,25 @@ def _weighted_by_score(blocks):
     (episode_scores) weighted (score - 4) squared and scaled across this
     channel — the best three times, the weakest once, never left out. Still
     shuffled by the channel's own seed, so a day's order holds."""
+    # Without rewatches: a programme finished on this very channel would
+    # otherwise move its own weight, and the day's order with it.
     scores, weights = {}, {}
-    for b in blocks:
-        if b.get("kind") != "episodes":
-            continue
-        if b["showid"] not in scores:
-            scores[b["showid"]] = episode_scores(b["showid"])
-        got = [scores[b["showid"]][i] for i in b["episode_ids"] if i in scores[b["showid"]]]
-        if got:
-            weights[id(b)] = (max(sum(got) / len(got), 4.0) - 4.0) ** 2
+    try:
+        by_show = defaultdict(list)
+        for e in LIB.episodes:
+            by_show[e.get("tvshowid")].append(e)
+        for b in blocks:
+            if b.get("kind") != "episodes":
+                continue
+            if b["showid"] not in scores:
+                scores[b["showid"]] = episode_scores(b["showid"], rewatches=False,
+                                                     episodes=by_show.get(b["showid"], []))
+            got = [scores[b["showid"]][i] for i in b["episode_ids"] if i in scores[b["showid"]]]
+            if got:
+                weights[id(b)] = (max(sum(got) / len(got), 4.0) - 4.0) ** 2
+    except Exception:
+        log_problem("channel weighting")      # unweighted, never no channel at all
+        return blocks
     if not weights:
         return blocks
     low, high = min(weights.values()), max(weights.values())
