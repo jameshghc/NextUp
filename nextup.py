@@ -17209,8 +17209,13 @@ body.android .tile.elsewhere .cap{padding-bottom:26px}
 .epscore{flex:none;font-family:var(--mono);font-size:11.5px;padding:2px 7px;border-radius:5px;white-space:nowrap;
   background:hsl(var(--h) 55% 35% / .35);color:hsl(var(--h) 70% 72%)}
 .epscore.gem{outline:1px dashed hsl(var(--h) 70% 60% / .6)}
-.bestrow{display:flex;flex-direction:column;margin:4px 0 12px}
-.bestrow .seasoncount{color:var(--marigold)}
+/* Best episodes: a box of its own, in the accent, so it can't be mistaken
+   for the season list under it. */
+.bestrow{display:flex;flex-direction:column;margin:6px 0 16px;padding:8px 12px 4px;
+  border:1px solid rgba(var(--accent-rgb),.45);border-radius:var(--r-card);
+  background:rgba(var(--accent-rgb),.06)}
+.bestrow .seasoncount{color:var(--marigold);margin-bottom:2px}
+.bestrow .eprow:last-child{border-bottom:0}
 .seasontab.part .flag{color:var(--marigold)}
 .seasontab.done .flag{color:var(--teal)}
 .seasontab.done:not([aria-selected="true"]){color:var(--muted)}
