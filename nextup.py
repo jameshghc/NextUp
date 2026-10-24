@@ -6108,6 +6108,8 @@ def show_detail(show_id):
                      if x["score"] is not None and x["id"] in voiced),
                     key=lambda x: -x["score"])
     best = ranked[:5] if len(ranked) >= 5 else []
+    for x in best:
+        x["best"] = True        # its row wears the star (see episodeRow)
 
     return {
         "id": show_id, "title": show.get("title"), "year": show.get("year"),
@@ -17212,13 +17214,9 @@ body.android .tile.elsewhere .cap{padding-bottom:26px}
 .epscore:hover{outline:1px solid hsl(var(--h) 70% 60% / .7)}
 .eprate{padding:6px 0 12px 12px;border-bottom:1px solid var(--line)}
 .epscore.gem{outline:1px dashed hsl(var(--h) 70% 60% / .6)}
-/* Best episodes: a box of its own, in the accent, so it can't be mistaken
-   for the season list under it. */
-.bestrow{display:flex;flex-direction:column;margin:6px 0 16px;padding:8px 12px 4px;
-  border:1px solid rgba(var(--accent-rgb),.45);border-radius:var(--r-card);
-  background:rgba(var(--accent-rgb),.06)}
-.bestrow .seasoncount{color:var(--marigold);margin-bottom:2px}
-.bestrow .eprow:last-child{border-bottom:0}
+/* One of the show's best: a star in the accent (so it follows the colour
+   chosen in Settings), between the code and the name. */
+.epbest{flex:none;color:var(--marigold);font-size:13px;line-height:1;margin-right:-4px}
 .seasontab.part .flag{color:var(--marigold)}
 .seasontab.done .flag{color:var(--teal)}
 .seasontab.done:not([aria-selected="true"]){color:var(--muted)}
@@ -21777,13 +21775,6 @@ function seasonBrowser(d, seasons){
     bar.append(t);
     return t;
   });
-  /* The show's best five, above the seasons: each plays like any other. */
-  if(d.best && d.best.length){
-    const bestbox = el('div', 'bestrow');
-    bestbox.append(el('div', 'seasoncount', 'Best episodes'));
-    d.best.forEach(ep => bestbox.append(episodeRow(ep, d)));
-    wrap.append(bestbox);
-  }
   /* One season is not a choice, and a bar of one button reads as a bar with
      something missing from it. */
   if(seasons.length > 1) wrap.append(bar);
@@ -21811,6 +21802,8 @@ function seasonBrowser(d, seasons){
 function episodeRow(ep, d){
   const row = el('div','eprow'+(ep.played?' seen':'')+(ep.id===d.next_up?' next':''));
   row.append(el('div','code', ep.code));
+  /* One of the show's five best: a star in the accent, beside its name. */
+  if(ep.best){ const st = el('span', 'epbest', '\u2605'); st.title = 'One of the best episodes'; row.append(st); }
   const name = el('div','name');
   name.textContent = ep.title || '';
   name.title = ep.title || '';
@@ -21826,11 +21819,10 @@ function episodeRow(ep, d){
     const sc = el('button', 'epscore');
     const paintScore = () => {
       sc.textContent = ep.score.toFixed(1);
-      sc.classList.toggle('gem', !ep.star && !!ep.gem);
-      if(ep.star) sc.prepend('\u2605 ');
-      else if(ep.gem) sc.append(' ?');
+      sc.classList.toggle('gem', !!ep.gem);
+      if(ep.gem) sc.append(' ?');
       sc.style.setProperty('--h', hueFor(ep.score));
-      sc.title = (ep.star ? 'One of yours' : ep.gem ? 'Good in theory: you haven\u2019t seen it' : 'Its score')
+      sc.title = (ep.gem ? 'Good in theory: you haven\u2019t seen it' : 'Its score')
                  + ' \u2014 click to rate it yourself';
     };
     paintScore();

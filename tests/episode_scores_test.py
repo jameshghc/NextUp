@@ -115,6 +115,8 @@ check("and on every season", all(s_.get("score") is not None for s_ in d["season
 best = [e["id"] for e in d.get("best") or []]
 check("Best episodes: five, highest first, no specials", len(best) == 5 and sp not in best and best[0] == g3,
       [(eps[b]["code"], eps[b]["score"]) for b in best])
+check("and each of them says so on its own row", sorted(k for k, v in eps.items() if v.get("best")) == sorted(best),
+      [k for k, v in eps.items() if v.get("best")])
 check("a star for one you rated highly or keep coming back to", eps[g3]["star"] and eps[g1]["star"] and not eps[g5]["star"],
       {k: v["star"] for k, v in eps.items()})
 check("'good in theory': unwatched, unrated and near the top", eps[g6]["gem"] and not eps[g3]["gem"] and not eps[g5]["gem"],
