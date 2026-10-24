@@ -14635,6 +14635,8 @@ class Handler(BaseHTTPRequestHandler):
                                        "accents": list(ACCENTS.items())})
             if route == "/api/tray":
                 return self.send_json({"on": tray_on_close(), "running": TRAY["running"]})
+            if route == "/api/cutout":
+                return self.send_json(cutout_look())
 
             if route == "/api/status":
                 payload = self.status_payload()
@@ -15768,11 +15770,15 @@ header.mast{container-type:inline-size;gap:8px}
 }
 /* Library facts beside the name in the title bar, in the quiet face. */
 #titlebar .dragzone{min-width:0}
-#titlebar .dragzone #libline{
+#titlebar .dragzone :is(#libline,#libver){
   font-family:var(--mono);font-weight:400;font-size:11px;letter-spacing:.04em;
   color:var(--muted);margin-left:8px;min-width:0;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
+#titlebar .dragzone #libver{flex:none}
+#titlebar .dragzone #libver:empty{display:none}
+/* Together, it reads as one line, as it always did. */
+body:not(.cutout-centre) #titlebar .dragzone #libver:not(:empty)::after{content:" ·"}
 .libline{font-family:var(--mono);font-size:11.5px;color:var(--muted);letter-spacing:.04em}
 /* A segmented control on a tonal track. The underline read as a document
    with headings; a lit segment reads as a switch, which is what it is. */
@@ -17899,7 +17905,7 @@ body:not(.glass) #roomart{display:none}
   body.android:is(.cutout-centre,.cutout-side){padding-top:var(--cut-h,38px)}
   body.android:is(.cutout-centre,.cutout-side) #titlebar{height:var(--cut-h,38px)}
   body.android.cutout-centre #titlebar .dragzone{position:relative}
-  body.android.cutout-centre #titlebar .dragzone > span:not(#libline){white-space:nowrap;overflow:hidden;
+  body.android.cutout-centre #titlebar .dragzone > span:not(#libline):not(#libver){white-space:nowrap;overflow:hidden;
     max-width:calc(var(--cut-l) - 66px)}
   body.android.cutout-centre #libline{position:absolute;left:calc(var(--cut-r) + 10px);right:12px;
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -17937,7 +17943,7 @@ body.glass .pick .hero{opacity:.18}
 body.glass #titlebar{background:#000;border-bottom:1px solid rgba(255,255,255,.08)}
 body.glass #titlebar .dragzone span{font-family:var(--mono);font-weight:700;font-size:12.5px;
   letter-spacing:.12em;text-transform:uppercase;color:var(--marigold)}
-body.glass #titlebar .dragzone #libline{font-weight:400;letter-spacing:.04em;text-transform:none;
+body.glass #titlebar .dragzone :is(#libline,#libver){font-weight:400;letter-spacing:.04em;text-transform:none;
   color:rgba(var(--accent-rgb),.62)}
 /* Buttons that mustn't fade into the glass: a fill and a firm outline,
    and a disabled one still visible as itself. */
@@ -18176,6 +18182,7 @@ body:not(.android) #remotetab{display:none}
     <span>Next Up</span>
     <!-- Facts about the library, beside the name rather than on a line of
          their own above the tabs: the title bar had the room going spare. -->
+    <span class="libline" id="libver"></span>
     <span class="libline" id="libline">loading…</span>
   </div>
   <div class="wincontrols hidden">
@@ -18730,6 +18737,11 @@ function resetView(view){
 let currentView = 'now';
 /* The camera hole, from the Android app when it learns of it (app.py calls
    this; the page as served already carries it if it was known then). */
+/* Android tells the app where the hole is a moment before the page exists,
+   so its call can land on nothing and the page was served without it: the
+   page asks once it's up, too. */
+if(document.body.classList.contains('android'))
+  api('/api/cutout').then(look => { if(look && look.classes && look.classes.length) nextupCutout(look); });
 function nextupCutout(look){
   const b = document.body;
   b.classList.remove('cutout-centre', 'cutout-side');
@@ -18898,8 +18910,11 @@ async function loadStatus(){
     return;
   }
   $('#banner').innerHTML = '';
+  /* The version on its own: beside the name, left of a phone's camera
+     hole, with the counts to its right (see the cutout rules). */
+  $('#libver').textContent = 'v'+(STATUS.version||'?');
   $('#libline').textContent =
-    'v'+(STATUS.version||'?')+' · '+STATUS.movies+' films · '+STATUS.shows+' shows · '+
+    STATUS.movies+' films · '+STATUS.shows+' shows · '+
     STATUS.episodes+' episodes · '+STATUS.unrated_films+' unrated';
   const g = $('#genre');
   g.innerHTML = '<option value="">Any genre</option>';
