@@ -12082,6 +12082,7 @@ def remote_state():
         "fullscreen": False,
         # What POWER would start again, for the button when nothing's on.
         "last_title": last_sitting_label(),
+        "last": None if alive else last_sitting_card_cached(),
     }
     if alive:
         state["volume"] = int(round(mpv_get("volume", 0) or 0))
@@ -12234,6 +12235,8 @@ def phone_remote_state(state=None):
     art = state.get("art") or ""
     if art.startswith("/art/"):
         state["art"] = "/phone" + art
+    if state.get("last"):
+        state["last"] = dict(state["last"], art=phone_art(state["last"].get("art")))
     return state
 
 
@@ -12289,6 +12292,57 @@ def last_sitting_label():
             return None
         return title or None
     return None
+
+
+def last_sitting_card():
+    """What POWER would start, for the Remote's idle card: what it is, a
+    picture, how far in, and what pressing it does. None when there's
+    nothing to carry on. Asked once a second while the Remote is open, so
+    it reads only what's already in memory or one row."""
+    last = CONFIG.get("last_sitting") or {}
+    if last.get("channel_id"):
+        channel = next((c for c in CHANNELS if c["id"] == last["channel_id"]), None)
+        if not channel:
+            return None
+        return {"title": channel["name"], "sub": "Channel", "art": None, "percent": 0,
+                "note": "Back in where it's got to"}
+    kind, item_id = last.get("kind"), last.get("id")
+    if kind not in ("movie", "episode") or not item_id:
+        return None
+    title, sub, art = _play_display(kind, item_id)
+    if not title:
+        return None
+    pos = LOCAL.field(kind, item_id, "resume_pos") or 0
+    total = LOCAL.field(kind, item_id, "resume_total") or 0
+    if kind == "episode" and not pos:
+        # Seen to the end, or never started: POWER plays what the show's own
+        # PLAY would, so say that one.
+        LIB.load()
+        ep = next((e for e in LIB.episodes if e.get("episodeid") == item_id), None)
+        nxt = (show_detail(ep.get("tvshowid")) or {}).get("next_up") if ep else None
+        if nxt and nxt != item_id:
+            _t, sub, _a = _play_display("episode", nxt)
+            return {"title": title, "sub": sub, "art": art, "percent": 0, "note": "Next episode"}
+    if pos and total:
+        return {"title": title, "sub": sub, "art": art, "percent": int(100 * pos / total),
+                "note": "Stopped %d min in \u00B7 %d min left" % (minutes(pos), minutes(total - pos))}
+    return {"title": title, "sub": sub, "art": art, "percent": 0, "note": "From the start"}
+
+
+_LAST_CARD = {"key": None, "at": 0, "card": None}
+
+
+def last_sitting_card_cached():
+    """last_sitting_card, worked out at most every few seconds: the Remote
+    asks once a second and the answer only changes when something plays."""
+    key = json.dumps(CONFIG.get("last_sitting") or {}, sort_keys=True)
+    if _LAST_CARD["key"] != key or time.time() - _LAST_CARD["at"] > 5:
+        try:
+            card = last_sitting_card()
+        except Exception:
+            card = None
+        _LAST_CARD.update(key=key, at=time.time(), card=card)
+    return _LAST_CARD["card"]
 
 
 def play_last():
@@ -13798,6 +13852,8 @@ def pc_remote_call(method, path, body=None):
         # The page can't reach the PC's link itself; it asks this server,
         # which fetches the picture with the token (see /api/pcremote/art/).
         reply["art"] = "/api/pcremote/art/" + art[len("/phone/art/"):]
+    if isinstance(reply.get("last"), dict):
+        _pc_art(reply["last"])
     return reply
 
 
@@ -17737,15 +17793,76 @@ body.customround :is(.settings,.pick,.alt,.hubcard,.card,.coll,.dirblock,.profil
    column on a portrait phone; side by side in landscape. */
 .rmcol{display:flex;flex-direction:column;gap:12px;min-width:0}
 .rmhint{display:none;font-size:14px;line-height:1.5;color:var(--muted)}
-/* POWER, when nothing's on: the last thing, started again fullscreen. */
-.rmpower{display:flex;align-items:center;gap:14px;width:100%;min-height:64px;padding:12px 18px;
-  text-align:left;border-radius:var(--r-card)}
-.rmpower.hidden{display:none}
-.rmpower svg{flex:none}
-.rmpower span{display:flex;flex-direction:column;min-width:0}
-.rmpower small{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;opacity:.7}
-.rmpower b{font-size:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .rmfull svg{display:block;margin:auto}
+/* ---- nothing playing: somewhere to choose (see remoteIdleRender) ---- */
+.rmstatus,.rmhero,.rmonnow,.rmsurprise{display:none}
+#view-remote.rmidle:not(.rmaway) .rmstatus{display:flex}
+#view-remote.rmidle:not(.rmaway) .rmhero:not(.hidden){display:flex}
+#view-remote.rmidle:not(.rmaway) .rmonnow:not(.hidden){display:flex}
+#view-remote.rmidle:not(.rmaway) .rmsurprise:not(.hidden){display:flex}
+/* What it replaces: the "nothing playing" headline, the hint, and the plain
+   channel chips (On now is the channels, with pictures). */
+#view-remote.rmidle:not(.rmaway) :is(.rmnow,#rm_chlabel,#rm_presets,#rm_moves){display:none}
+#view-remote.rmidle:not(.rmaway) .rmhint{display:none}
+#view-remote.rmidle:not(.rmaway) .rmhero:not(.hidden) ~ .rmhint{display:none}
+#view-remote.rmidle:not(.rmaway) .rmhero.hidden ~ .rmhint{display:block}
+#view-remote.rmidle:not(.rmaway) .rmmsg:empty{display:none}
+.rmstatus{align-items:center;gap:8px;font-family:var(--mono);font-size:11px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--muted)}
+.rmstatus em{font-style:normal;margin-left:auto;text-transform:none;letter-spacing:.04em;color:rgba(255,255,255,.42)}
+.rmdot{width:8px;height:8px;border-radius:50%;background:var(--teal);box-shadow:0 0 10px rgba(79,168,160,.8)}
+.rmbar{height:4px;border-radius:2px;background:rgba(255,255,255,.14);overflow:hidden}
+.rmbar.hidden{display:none}
+.rmbar i{display:block;height:100%;background:var(--marigold)}
+.rmlabel em{font-style:normal;margin-left:8px;color:rgba(255,255,255,.42);letter-spacing:.06em;text-transform:none}
+/* The card: the poster washed across it, drawn once (the Now card's trick,
+   .ppwash — no live blur on the phone). */
+.rmhero{position:relative;overflow:hidden;isolation:isolate;border-radius:var(--r-panel);padding:14px;
+  border:1px solid var(--glass-line,var(--line));background:rgba(20,20,24,.5);flex-direction:column;gap:14px}
+.rmwash{position:absolute;inset:-60px;z-index:-1;pointer-events:none;background:#0c0c10 center/cover no-repeat;
+  filter:blur(40px) saturate(.85) brightness(.42);transform:scale(1.1)}
+.rmherotop{display:flex;gap:14px;align-items:flex-end;min-width:0}
+.rmherotop img{width:72px;aspect-ratio:2/3;object-fit:cover;border-radius:7px;box-shadow:0 10px 24px rgba(0,0,0,.55);flex:none}
+.rmherotop img.hidden{display:none}
+.rmherotxt{min-width:0;flex:1;display:flex;flex-direction:column;gap:4px}
+.rmeyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--marigold-2)}
+.rmherotxt h2{margin:0;font-family:var(--display);font-weight:700;font-size:23px;line-height:1.1;
+  text-shadow:0 1px 12px rgba(0,0,0,.6);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rmherosub{font-family:var(--mono);font-size:12px;color:#cfcfd8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rmherotxt .rmbar{margin-top:6px}
+.rmherowhen{font-family:var(--mono);font-size:11px;color:#bdbdc7;margin-top:3px}
+.rmherobtns{display:flex;gap:10px}
+.rmherobtns .rmreroll{min-height:54px;min-width:64px;font-size:18px}
+.rmherobtns .rmreroll.hidden{display:none}
+.rmpower{flex:1;display:flex;align-items:center;justify-content:center;gap:12px;min-height:54px;
+  font-family:var(--mono);font-weight:700;font-size:14px;letter-spacing:.06em}
+.rmpower svg{flex:none}
+/* On now: a channel is a picture and what's on it. */
+.rmonnow{flex-direction:column;gap:12px;min-width:0}
+.rmslide{display:flex;gap:10px;overflow-x:auto;scrollbar-width:none;scroll-snap-type:x proximity}
+.rmslide::-webkit-scrollbar{display:none}
+.rmch{flex:0 0 156px;display:flex;gap:10px;padding:8px;text-align:left;scroll-snap-align:start;min-height:88px;
+  background:var(--glass-panel,var(--ink-2));border:1px solid var(--glass-line,var(--line));border-radius:var(--r-card);
+  color:var(--paper);cursor:pointer}
+.rmch img,.rmch .rmph{width:48px;height:72px;object-fit:cover;border-radius:5px;flex:none}
+.rmch .rmph{display:grid;place-items:center;background:#22222a;font-family:var(--display);font-weight:800;font-size:15px}
+.rmch > div{min-width:0;display:flex;flex-direction:column;gap:3px;flex:1}
+.rmch small{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--marigold-2);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rmch strong{font-family:var(--display);font-weight:600;font-size:13.5px;line-height:1.15;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.rmch span{font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+.rmch .rmlive{color:var(--rust)}
+.rmch .rmbar{margin-top:auto;height:3px}
+/* Or something new: tonight's pick, one line. */
+.rmsurprise{align-items:center;gap:10px;padding:8px 8px 8px 10px;border-radius:var(--r-card);
+  background:var(--glass-panel,var(--ink-2));border:1px solid var(--glass-line,var(--line))}
+.rmsurprise img{width:34px;aspect-ratio:2/3;object-fit:cover;border-radius:4px}
+.rmsurprise img.hidden{display:none}
+.rmsurprise > div{min-width:0;flex:1}
+.rmsurprise small{display:block;font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.rmsurprise strong{display:block;font-family:var(--display);font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#view-remote .rmsurprise .iconbtn{padding:8px 10px;font-size:12px}
 /* Nothing playing, or the PC away: say what to do, not a wall of dead
    buttons. The channels stay — they're a way to start something. */
 #view-remote.rmidle .rmhint{display:block}
@@ -17782,6 +17899,9 @@ body.pcstripon .wrap{padding-bottom:calc(76px + env(safe-area-inset-bottom))}
   #view-remote .iconbtn{min-height:42px;padding:6px 12px}
   .rmtransport .iconbtn,.rmtransport .play{min-height:46px}
   .rmseek input{height:32px}
+  /* Nothing playing: the card on the left, On now and Continue on the
+     right. The pick is the one that gives way — there's no third row. */
+  #view-remote.rmidle:not(.rmaway) .rmsurprise:not(.hidden){display:none}
 }
 #pcstrip img{width:30px;aspect-ratio:2/3;object-fit:cover;border-radius:3px}
 #pcstrip .pstext{flex:1;min-width:0}
@@ -23892,6 +24012,136 @@ function clock(sec){
   return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(ss).padStart(2, '0');
 }
 
+/* ---- the Remote with nothing playing: somewhere to choose what's next ----
+   Not "nothing playing" but what you could put on: the last thing, to carry
+   on (POWER); the channels with what's on them now; Continue; and one of
+   tonight's picks. Each starts something on the PC in one tap. All of it is
+   asked for once when the Remote opens (remoteContinue) and drawn from
+   there — the bars and "until" times are worked out here, by the clock,
+   rather than asked again. */
+var remoteHeroMode = null, remotePicks = [], remotePickAt = 0, remoteChannels = null;   // var: drawn before this line may run
+
+function remoteIdleRender(st, away, alive){
+  const v = $('#view-remote');
+  const idle = !away && !alive;
+  v.classList.toggle('rmaway', !!away);
+  /* Where the parts go: under the card in portrait; the right-hand column
+     in landscape, so it all fits without a scroll. */
+  const land = window.matchMedia('(orientation:landscape) and (max-height:500px)').matches;
+  if(idle){
+    const parts = [$('#rm_onnow'), $('#rm_cont'), $('#rm_surprise')];
+    if(land){
+      const right = v.querySelector('.rmright');
+      parts.forEach(x => { if(x.parentNode !== right || right.lastElementChild !== x) right.append(x); });
+    } else {
+      let at = $('#rm_msg');
+      parts.forEach(x => { if(at.nextElementSibling !== x) at.after(x); at = x; });
+    }
+  }
+  const last = idle ? st.last : null;
+  const pick = remotePicks[remotePickAt];
+  remoteHeroMode = last ? 'last' : (idle && pick ? 'pick' : null);
+  $('#rm_hero').classList.toggle('hidden', !remoteHeroMode);
+  if(remoteHeroMode === 'last'){
+    remoteHero(last.art, 'Last on the PC', last.title, last.sub, last.percent, last.note, 'CONTINUE FROM PC');
+  } else if(remoteHeroMode === 'pick'){
+    remoteHero(pick.art, 'Tonight\u2019s pick', pick.title,
+               [pick.year, (pick.genres || [])[0], pick.runtime ? pick.runtime + ' min' : ''].filter(Boolean).join(' \u00B7 '),
+               0, 'From the PC\u2019s picks for tonight', 'PLAY ON THE PC');
+  }
+  $('#rm_reroll').classList.toggle('hidden', remoteHeroMode !== 'pick');
+  $('#rm_onnow').classList.toggle('hidden', !idle || !(remoteChannels && remoteChannels.length));
+  /* The pick sits on its own line under everything, unless it's already
+     the big card. */
+  const showSurprise = idle && remoteHeroMode === 'last' && pick;
+  $('#rm_surprise').classList.toggle('hidden', !showSurprise);
+  if(showSurprise){
+    const img = $('#rm_surpriseart');
+    if(pick.art){ if(img.getAttribute('src') !== pick.art) img.src = pick.art; img.classList.remove('hidden'); }
+    else img.classList.add('hidden');
+    $('#rm_surprisetitle').textContent = pick.title || '';
+  }
+  /* Continue, without whatever the big card is already showing. */
+  const heroTitle = remoteHeroMode === 'last' ? last.title : '';
+  if(heroTitle !== remoteIdleRender.shownFor){
+    remoteIdleRender.shownFor = heroTitle;
+    if(lastPcContinue) remoteContinueDraw(lastPcContinue);
+  }
+}
+
+function remoteHero(art, eyebrow, title, sub, percent, note, label){
+  const img = $('#rm_heroart'), wash = $('#rm_herowash');
+  if(art){
+    if(img.getAttribute('src') !== art){
+      img.src = art;
+      wash.style.backgroundImage = 'url("' + String(art).replace(/"/g, '%22') + '")';
+    }
+    img.classList.remove('hidden');
+  } else {
+    img.classList.add('hidden');
+    wash.style.backgroundImage = 'none';
+  }
+  $('#rm_heroeye').textContent = eyebrow;
+  $('#rm_herotitle').textContent = title || '';
+  $('#rm_herosub').textContent = sub || '';
+  $('#rm_herobar').classList.toggle('hidden', !percent);
+  $('#rm_herobar').firstElementChild.style.width = (percent || 0) + '%';
+  $('#rm_herowhen').textContent = note || '';
+  $('#rm_powerlabel').textContent = label;
+}
+
+function remoteChannelsDraw(data){
+  const out = $('#rm_onnowout');
+  out.innerHTML = '';
+  const loadedAt = Date.now();
+  remoteChannels = (data && data.channels) || [];
+  remoteChannels.forEach(ch => {
+    const now = ch.now || {};
+    const b = el('button', 'rmch');
+    if(now.art){ const i = el('img'); i.src = now.art; i.alt = ''; i.loading = 'lazy'; b.append(i); }
+    else b.append(el('span', 'rmph', esc((ch.name || '?').replace(/#\d+$/, '').trim().slice(0, 3).toUpperCase())));
+    const t = el('div');
+    t.append(el('small', null, esc(ch.name)));
+    t.append(el('strong', null, esc(ch.live ? 'Live' : (now.title || 'Nothing on'))));
+    if(ch.live){
+      t.append(el('span', 'rmlive', '\u25CF LIVE'));
+    } else if(now.duration){
+      const left = Math.max(0, (now.duration - (now.elapsed || 0)) * 1000);
+      const until = new Date(loadedAt + left);
+      t.append(el('span', null, 'until ' + String(until.getHours()).padStart(2, '0') + ':'
+                                + String(until.getMinutes()).padStart(2, '0')));
+      const bar = el('div', 'rmbar');
+      const fill = el('i');
+      fill.style.width = Math.min(100, 100 * (now.elapsed || 0) / now.duration) + '%';
+      bar.append(fill);
+      t.append(bar);
+    }
+    b.append(t);
+    b.onclick = () => remoteSend('channel', {channel: ch.id});
+    out.append(b);
+  });
+}
+
+async function remoteNextPick(){
+  remotePickAt += 1;
+  if(remotePickAt >= remotePicks.length){
+    /* Out of the ones already here: ask for more, past those. */
+    const seen = new Set(remotePicks.map(p => p.type + ':' + p.id));
+    const data = await nowFetch(tonightParams(seen, false));
+    remotePicks = (data && data._pc && data.picks) || [];
+    remotePickAt = 0;
+  }
+  if(remoteState) remoteRender(remoteState);
+}
+
+async function remotePlayPick(p){
+  if(!p) return;
+  const id = p.ident;
+  const r = await playOnPC(id ? {kind: id.kind, tmdb: id.tmdb, season: id.season, episode: id.episode}
+                              : {kind: 'pcid', type: p.type, id: p.id});
+  if(r && r.error) $('#rm_msg').textContent = r.error;
+}
+
 /* The Remote's Continue strip: the PC's, drawn from what Now last had and
    then asked afresh each time the Remote opens — never on a timer. */
 var lastPcContinue = null;      // var: loadTonight sets it before this line may run
@@ -23900,7 +24150,9 @@ function remoteContinueDraw(items){
   if(!box) return;
   const out = $('#rm_contout');
   out.innerHTML = '';
-  (items || []).forEach(u => {
+  const skip = remoteIdleRender.shownFor;
+  items = (items || []).filter(u => !skip || u.title !== skip);
+  items.forEach(u => {
     if(!u.why) u.why = u.percent + '% in · ' + u.left + ' min left';
     out.append(altCard(u));
   });
@@ -23909,11 +24161,15 @@ function remoteContinueDraw(items){
 async function remoteContinue(){
   if(lastPcContinue) remoteContinueDraw(lastPcContinue);
   if(!pcLinkUp) return;
-  const data = await nowFetch(tonightParams(new Set(), false));
+  const [data, chans] = await Promise.all([nowFetch(tonightParams(new Set(), false)), api('/api/pcchannels')]);
   if(data && data._pc){
     lastPcContinue = data['continue'] || [];
     remoteContinueDraw(lastPcContinue);
+    remotePicks = data.picks || [];
+    remotePickAt = 0;
   }
+  if(chans && !chans.error) remoteChannelsDraw(chans);
+  if(remoteState) remoteRender(remoteState);
 }
 
 function remoteBuild(){
@@ -23930,7 +24186,24 @@ function remoteBuild(){
       <img id="rm_art" alt="">
       <div><div class="rmtitle" id="rm_title"></div><div class="rmsub" id="rm_sub"></div></div>
     </div>
-    <button class="play rmpower hidden" id="rm_power" data-a="power"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 3v8"/><path d="M6.3 6.8a8 8 0 1 0 11.4 0"/></svg><span><small>Carry on</small><b id="rm_powertitle"></b></span></button>
+    <div class="rmstatus" id="rm_status"><span class="rmdot"></span><span>The PC is ready</span><em>nothing on yet</em></div>
+    <div class="rmhero hidden" id="rm_hero">
+      <div class="rmwash" id="rm_herowash"></div>
+      <div class="rmherotop">
+        <img id="rm_heroart" alt="">
+        <div class="rmherotxt">
+          <span class="rmeyebrow" id="rm_heroeye">Last on the PC</span>
+          <h2 id="rm_herotitle"></h2>
+          <span class="rmherosub" id="rm_herosub"></span>
+          <div class="rmbar" id="rm_herobar"><i></i></div>
+          <span class="rmherowhen" id="rm_herowhen"></span>
+        </div>
+      </div>
+      <div class="rmherobtns">
+        <button class="iconbtn rmreroll hidden" id="rm_reroll" aria-label="Another pick">\u21BB</button>
+        <button class="play rmpower" id="rm_power"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 3v8"/><path d="M6.3 6.8a8 8 0 1 0 11.4 0"/></svg><span id="rm_powerlabel">CONTINUE FROM PC</span></button>
+      </div>
+    </div>
     <div class="rmhint" id="rm_hint">Pick something in Library and choose \u25B6\uFE0E ON PC, or start a channel below.</div>
     <div class="rmseek"><span id="rm_pos">0:00</span><input type="range" id="rm_seek" min="0" max="1" step="1" value="0" aria-label="Position"><span id="rm_left">0:00</span></div>
     <div class="rmrow rmtransport">
@@ -23941,6 +24214,16 @@ function remoteBuild(){
       <button class="iconbtn rmfull" id="rm_full" data-a="fullscreen" aria-label="Fullscreen"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
     </div>
     <div class="rmmsg" id="rm_msg"></div>
+    <div class="rmonnow hidden" id="rm_onnow">
+      <div class="rmlabel">On now<em>tap to tune the PC</em></div>
+      <div class="rmslide" id="rm_onnowout"></div>
+    </div>
+    <div class="rmsurprise hidden" id="rm_surprise">
+      <img id="rm_surpriseart" alt="">
+      <div><small>Or something new</small><strong id="rm_surprisetitle"></strong></div>
+      <button class="iconbtn" id="rm_surprisenext" aria-label="Another pick">\u21BB</button>
+      <button class="iconbtn" id="rm_surpriseplay">\u25B6 ON PC</button>
+    </div>
     <div class="rmrow rmmoves" id="rm_moves">
       <button class="iconbtn" id="rm_prevep" data-a="prevep">\u2039 EPISODE</button>
       <button class="iconbtn" id="rm_nextep" data-a="nextep">EPISODE \u203A</button>
@@ -23966,11 +24249,19 @@ function remoteBuild(){
     delaydown: ['delay', {delta: -100}], delayup: ['delay', {delta: 100}],
     subs: ['toggle', {what: 'sub'}], findsubs: ['subtitles', {}], audio: ['toggle', {what: 'audio'}],
     prevep: ['episode', {step: -1}], nextep: ['episode', {step: 1}], skip: ['skip', {}], stop: ['stop', {}],
-    fullscreen: ['fullscreen', {}], power: ['power', {}],
+    fullscreen: ['fullscreen', {}],
   };
   v.querySelectorAll('[data-a]').forEach(b => {
     b.onclick = () => remoteSend(...acts[b.dataset.a]);
   });
+  /* The idle screen's own buttons. The big one carries on what was last on
+     (POWER), or, with nothing to carry on, starts the pick it's showing. */
+  $('#rm_power').onclick = () => {
+    if(remoteHeroMode === 'pick') remotePlayPick(remotePicks[remotePickAt]);
+    else remoteSend('power', {});
+  };
+  $('#rm_reroll').onclick = $('#rm_surprisenext').onclick = () => remoteNextPick();
+  $('#rm_surpriseplay').onclick = () => remotePlayPick(remotePicks[remotePickAt]);
   const seek = $('#rm_seek');
   seek.onpointerdown = () => { remoteSeeking = true; };
   seek.onpointerup = seek.onpointercancel = () => { remoteSeeking = false; };
@@ -23991,16 +24282,11 @@ function remoteRender(st){
   if(alive && st.art){ if(art.getAttribute('src') !== st.art) art.src = st.art; art.classList.remove('hidden'); }
   else art.classList.add('hidden');
   $('#view-remote').classList.toggle('rmidle', !alive);
-  /* POWER: what was last on, to start again fullscreen. Only when nothing
-     is, and only when there's something to name. */
-  const last = !away && !alive && st.last_title;
-  $('#rm_power').classList.toggle('hidden', !last);
-  $('#rm_powertitle').textContent = last || '';
+  remoteIdleRender(st, away, alive);
   $('#rm_full').classList.toggle('on', !!(alive && st.fullscreen));
   $('#rm_full').setAttribute('aria-pressed', String(!!(alive && st.fullscreen)));
   const cont = $('#rm_cont');
-  const home = alive ? $('#rm_presets') : $('#rm_hint');
-  if(cont.previousElementSibling !== home) home.after(cont);
+  if(alive && cont.previousElementSibling !== $('#rm_presets')) $('#rm_presets').after(cont);
   cont.classList.toggle('hidden', !!away || !$('#rm_contout').children.length);
   const dur = alive ? (st.duration || 0) : 0, pos = alive ? (st.position || 0) : 0;
   const seek = $('#rm_seek');

@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Remote home mock-up</title>
+<style>
+@font-face{font-family:"Bricolage Grotesque";font-weight:500 800;src:url(../../nextup_fonts/bricolage-500-latin.woff2) format("woff2")}
+@font-face{font-family:"Spline Sans";font-weight:400;src:url(../../nextup_fonts/spline-400-latin.woff2) format("woff2")}
+@font-face{font-family:"Space Mono";font-weight:400;src:url(../../nextup_fonts/spacemono-400-latin.woff2) format("woff2")}
+@font-face{font-family:"Space Mono";font-weight:700;src:url(../../nextup_fonts/spacemono-700-latin.woff2) format("woff2")}
+/* The app's own values: :root in PAGE, and the Glass look at its default
+   (appearance_look with glass 60, accent marigold). */
+:root{
+  --display:"Bricolage Grotesque","Segoe UI",sans-serif;
+  --body:"Spline Sans","Segoe UI",sans-serif;
+  --mono:"Space Mono",ui-monospace,Consolas,monospace;
+  --ink:#060509;--paper:#ece6dc;--muted:#a7a7b2;
+  --marigold:#e0a33e;--marigold-2:#f2bd5a;--accent-rgb:224,163,62;
+  --teal:#4fa8a0;--rust:#c2593c;
+  --glass-panel:rgba(42,42,48,.56);--glass-panel-2:rgba(42,42,48,.64);--glass-line:rgba(255,255,255,.13);
+  --shadow-card:inset 0 1px 0 rgba(255,255,255,.045),0 8px 24px rgba(0,0,0,.38);
+  --r-card:12px;--r-panel:16px;--r-btn:9px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:#050507;color:var(--paper);font-family:var(--body)}
+button{font:inherit;color:inherit;cursor:pointer}
+
+/* ---------- the sheet the frames sit on ---------- */
+.intro{max-width:1560px;margin:0 auto;padding:22px 24px 4px;font-family:var(--mono);font-size:12px;color:#9a9aa6;line-height:1.6}
+.intro b{color:var(--marigold);letter-spacing:.1em}
+.board{display:flex;flex-wrap:wrap;gap:34px;align-items:flex-start;justify-content:center;padding:18px 24px 48px}
+.cap{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:#9a9aa6;margin:0 0 8px 2px}
+.cap i{font-style:normal;color:var(--marigold)}
+
+/* ---------- a phone ---------- */
+.phone{position:relative;width:360px;height:760px;overflow:hidden;border-radius:26px;
+  background:radial-gradient(1100px 520px at 50% -160px,#24242c 0%,rgba(12,12,16,0) 70%),#0c0c10;
+  box-shadow:0 0 0 8px #000,0 0 0 9px #26262c,0 40px 90px rgba(0,0,0,.7);isolation:isolate}
+.phone.land{width:760px;height:360px}
+.titlebar{height:38px;background:#000;border-bottom:1px solid rgba(255,255,255,.08);display:flex;align-items:center;gap:10px;padding:0 14px 0 54px;position:relative}
+.titlebar::before{content:none;position:absolute;left:50%;top:12px;width:12px;height:12px;margin-left:-6px;border-radius:50%;background:#111;box-shadow:inset 0 0 0 2px #1d1d22}
+.titlebar .logo{position:absolute;left:14px;top:9px;width:20px;height:20px;border-radius:50%;background:radial-gradient(circle at 35% 35%,#e0607e,#381018)}
+.titlebar span{font-family:var(--mono);font-weight:700;font-size:12px;letter-spacing:.12em;color:var(--marigold)}
+.titlebar small{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:rgba(var(--accent-rgb),.62);white-space:nowrap}
+.tabs{margin:12px 12px 0;height:37px;border-radius:99px;background:var(--glass-panel);border:1px solid var(--glass-line);
+  display:flex;align-items:center;gap:2px;padding:0 4px;font-size:13px;font-weight:500;font-family:var(--display)}
+.tabs a{padding:6px 9px;border-radius:99px;color:#c9c9d2}
+.tabs .rt{margin-left:auto;width:30px;height:28px;border-radius:99px;display:grid;place-items:center;
+  background:rgba(var(--accent-rgb),.22);box-shadow:0 0 14px rgba(var(--accent-rgb),.35)}
+.tabs .rt i{width:9px;height:15px;border:1.5px solid var(--marigold);border-radius:3px;display:block}
+.tabs .gear{width:28px;text-align:center;color:#c9c9d2}
+.view{position:absolute;left:12px;right:12px;top:109px;bottom:0;display:flex;flex-direction:column;gap:14px;padding-bottom:12px}
+.land .tabs{margin:8px 12px 0}
+.land .view{top:92px;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px 18px;align-content:start}
+.land .col{display:flex;flex-direction:column;gap:10px;min-width:0}
+
+/* ---------- shared parts ---------- */
+.label{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);
+  display:flex;align-items:baseline;gap:8px;margin-bottom:-6px}
+.label em{font-style:normal;margin-left:auto;color:rgba(255,255,255,.42);letter-spacing:.06em;text-transform:none}
+.status{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.status .dot{width:8px;height:8px;border-radius:50%;background:var(--teal);box-shadow:0 0 10px rgba(79,168,160,.8)}
+.status em{font-style:normal;margin-left:auto;text-transform:none;letter-spacing:.04em;color:rgba(255,255,255,.42)}
+.bar{height:4px;border-radius:2px;background:rgba(255,255,255,.14);overflow:hidden}
+.bar i{display:block;height:100%;background:var(--marigold)}
+.iconbtn{font-family:var(--mono);font-size:13px;letter-spacing:.04em;text-transform:uppercase;white-space:nowrap;
+  min-height:48px;min-width:48px;padding:10px 14px;border-radius:var(--r-btn);color:var(--paper);
+  background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.3)}
+.iconbtn:active,.iconbtn.on{background:rgba(var(--accent-rgb),.22);border-color:rgba(var(--accent-rgb),.6);color:var(--marigold-2)}
+.play{font-family:var(--mono);font-weight:700;font-size:14px;letter-spacing:.06em;border:0;border-radius:99px;
+  background:var(--marigold);color:#1b1206;min-height:54px;padding:0 20px;box-shadow:0 10px 26px rgba(var(--accent-rgb),.28)}
+.play:active{transform:translateY(1px);filter:brightness(1.08)}
+.card{background:var(--glass-panel);border:1px solid var(--glass-line);border-radius:var(--r-card);box-shadow:var(--shadow-card)}
+
+/* The hero: the poster washed across the card, drawn once — the Now card's
+   own trick (.ppwash), so no live blur on the phone. */
+.hero{position:relative;overflow:hidden;isolation:isolate;border-radius:var(--r-panel);padding:14px;
+  border:1px solid var(--glass-line);background:rgba(20,20,24,.5);box-shadow:var(--shadow-card);display:flex;flex-direction:column;gap:14px}
+.hero .wash{position:absolute;inset:-60px;z-index:-1;background:#0c0c10 center/cover no-repeat;
+  filter:blur(40px) saturate(.85) brightness(.42);transform:scale(1.1)}
+.hero .top{display:flex;gap:14px;align-items:flex-end;min-width:0}
+.hero img{width:72px;aspect-ratio:2/3;object-fit:cover;border-radius:7px;box-shadow:0 10px 24px rgba(0,0,0,.55);flex:none}
+.hero .txt{min-width:0;flex:1;display:flex;flex-direction:column;gap:4px}
+.eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--marigold-2)}
+.hero h2{margin:0;font-family:var(--display);font-weight:700;font-size:23px;line-height:1.1;letter-spacing:-.01em;
+  text-shadow:0 1px 12px rgba(0,0,0,.6)}
+.hero .sub{font-family:var(--mono);font-size:12px;color:#cfcfd8}
+.hero .bar{margin-top:6px}
+.hero .when{font-family:var(--mono);font-size:11px;color:#bdbdc7;margin-top:3px}
+.power{display:flex;align-items:center;justify-content:center;gap:12px;width:100%}
+.power b{font-size:22px;line-height:1;font-weight:400}
+.pickrow{display:flex;gap:10px}
+.pickrow .play{flex:1}
+
+/* On now: a channel is a picture and what's on it, not a word in a pill. */
+.slide{display:flex;gap:10px;overflow-x:auto;scrollbar-width:none;scroll-snap-type:x proximity;margin-right:-12px;padding-right:12px}
+.slide::-webkit-scrollbar{display:none}
+.ch{flex:0 0 156px;display:flex;gap:10px;padding:8px;text-align:left;scroll-snap-align:start;min-height:88px;
+  background:var(--glass-panel);border:1px solid var(--glass-line);border-radius:var(--r-card);box-shadow:var(--shadow-card)}
+.ch img,.ch .ph{width:48px;height:72px;object-fit:cover;border-radius:5px;flex:none}
+.ch .ph{display:grid;place-items:center;background:#22222a;font-family:var(--display);font-weight:800;font-size:16px;color:#d8d8e0}
+.ch > div{min-width:0;display:flex;flex-direction:column;gap:3px;flex:1}
+.ch small{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--marigold-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ch strong{font-family:var(--display);font-weight:600;font-size:13.5px;line-height:1.15;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.ch span{font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+.ch .bar{margin-top:auto;height:3px}
+.ch .live{color:var(--rust)}
+.ch.on{border-color:rgba(var(--accent-rgb),.7);background:rgba(var(--accent-rgb),.16)}
+
+/* Continue: the Now page's tile, as it is (.alt, 176 × 91). */
+.alt{flex:0 0 176px;display:flex;gap:8px;padding:5px 7px;min-height:91px;
+  background:var(--glass-panel);border:1px solid var(--glass-line);border-radius:var(--r-card);box-shadow:var(--shadow-card)}
+.alt img{width:52px;aspect-ratio:2/3;object-fit:cover;border-radius:5px;align-self:center}
+.alt > div{min-width:0;display:flex;flex-direction:column;gap:2px;flex:1}
+.alt h3{margin:2px 0 0;font-family:var(--display);font-weight:600;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.alt p{margin:0;font-size:10.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.alt .two{display:flex;gap:5px;margin-top:auto}
+.alt .iconbtn{min-height:40px;min-width:0;padding:4px 6px;font-size:10.5px;flex:1}
+
+/* Surprise: tonight's pick from the PC, one line. */
+.surprise{display:flex;align-items:center;gap:10px;padding:8px 8px 8px 10px}
+.surprise img{width:34px;aspect-ratio:2/3;object-fit:cover;border-radius:4px}
+.surprise div{min-width:0;flex:1}
+.surprise small{display:block;font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.surprise strong{display:block;font-family:var(--display);font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.surprise .iconbtn{padding:8px 10px;font-size:12px}
+
+/* ---------- the playing state: the Remote as it is today ---------- */
+.glow{position:absolute;left:-12px;right:-12px;top:-30px;height:250px;z-index:-1;overflow:hidden;pointer-events:none;
+  -webkit-mask-image:linear-gradient(#000 40%,transparent);mask-image:linear-gradient(#000 40%,transparent)}
+.glow i{position:absolute;inset:-60px;background:center/cover no-repeat;filter:blur(40px) saturate(.85) brightness(.36);transform:scale(1.1)}
+.rmnow{display:flex;align-items:center;gap:14px}
+.rmnow img{width:46px;aspect-ratio:2/3;object-fit:cover;border-radius:5px;box-shadow:0 8px 20px rgba(0,0,0,.5)}
+.rmtitle{font-family:var(--display);font-weight:600;font-size:20px;line-height:1.2}
+.rmsub{font-family:var(--mono);font-size:12px;color:var(--muted);margin-top:3px}
+.seek{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:12px;color:var(--muted);height:40px}
+.seek .track{flex:1;height:6px;border-radius:3px;background:linear-gradient(90deg,var(--marigold) 46%,rgba(255,255,255,.16) 0);position:relative}
+.seek .track::after{content:"";position:absolute;left:46%;top:50%;width:22px;height:22px;margin:-11px;border-radius:50%;background:var(--marigold)}
+.row{display:flex;align-items:center;gap:8px;justify-content:center}
+.row > span{font-family:var(--mono);font-size:14px;min-width:3.2em;text-align:center}
+.transport .iconbtn{font-size:15px;min-height:54px;padding:12px 15px}
+.transport .play{min-width:84px;font-size:22px;background:var(--paper);color:#111;box-shadow:none}
+.grid{display:grid;grid-template-columns:auto minmax(0,1fr);gap:12px 12px;align-items:center}
+.grid > label{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.grid .row{justify-content:flex-start;flex-wrap:nowrap}
+.grid .iconbtn{padding:8px 10px}
+.plain{border-color:transparent!important;background:none!important}
+.moves .iconbtn{padding:10px 11px;font-size:12.5px}
+.chips{display:flex;gap:8px;overflow:hidden;margin-right:-12px}
+.chip{flex:0 0 auto;display:flex;align-items:center;gap:8px;min-height:46px;padding:4px 14px 4px 4px;border-radius:99px;
+  background:var(--glass-panel);border:1px solid var(--glass-line);font-family:var(--mono);font-size:12px;letter-spacing:.03em}
+.chip img,.chip .ph{width:36px;height:36px;border-radius:50%;object-fit:cover;flex:none}
+.chip .ph{display:grid;place-items:center;background:#22222a;font-family:var(--display);font-weight:800;font-size:12px}
+.chip.on{border-color:rgba(var(--accent-rgb),.7);background:rgba(var(--accent-rgb),.18);color:var(--marigold-2)}
+
+/* ---------- a tap answers ---------- */
+.toast{position:absolute;left:12px;right:12px;bottom:14px;z-index:9;padding:12px 14px;border-radius:var(--r-card);
+  background:rgba(16,16,20,.97);border:1px solid rgba(var(--accent-rgb),.55);font-size:13px;line-height:1.4;
+  box-shadow:0 20px 50px rgba(0,0,0,.6);opacity:0;transform:translateY(8px);transition:.18s;pointer-events:none}
+.toast.up{opacity:1;transform:none}
+.toast b{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;color:var(--marigold);display:block;margin-bottom:2px}
+.ruler{position:absolute;left:0;right:0;border-top:1px dashed rgba(79,168,160,.0)}
+body.measure .ruler{border-color:rgba(79,168,160,.6)}
+</style>
+</head>
+<body>
+<div class="intro">
+  <b>THE REMOTE · HOME</b> — a mock-up, not the app. Portrait frames are 360 × 760 CSS px (the smallest phone), landscape 760 × 360.
+  The header and tabs are drawn at the sizes measured in the sandbox (the Remote starts 109 px down). Tap POWER, a channel, ↻ or a tile to see what each would do.
+</div>
+
+<div class="board">
+
+<!-- ===================== 1. IDLE, the usual evening ===================== -->
+<div>
+<p class="cap"><i>1</i> · Nothing playing — the usual evening</p>
+<div class="phone" id="f-idle">
+  <div class="titlebar"><div class="logo"></div><span>NEXT UP</span><small>v0.2.1 · 412 films · 38 shows</small></div>
+  <div class="tabs"><a>Now</a><a>Library</a><a>Rate</a><a>Channels</a><span class="rt"><i></i></span><span class="gear">⚙</span></div>
+  <div class="view">
+    <div class="status"><span class="dot"></span>The PC is ready<em>nothing on yet</em></div>
+
+    <div class="hero">
+      <div class="wash" style="background-image:url(../../nextup_art/aCw8ONfyz3AhngVQa1E2Ss4KSUQ.jpg)"></div>
+      <div class="top">
+        <img src="../../nextup_art/aCw8ONfyz3AhngVQa1E2Ss4KSUQ.jpg" alt="">
+        <div class="txt">
+          <span class="eyebrow">Last on the PC</span>
+          <h2>Seinfeld</h2>
+          <span class="sub">S4 E11 · The Contest</span>
+          <div class="bar"><i style="width:48%"></i></div>
+          <span class="when">Stopped 11 min in · 12 min left</span>
+        </div>
+      </div>
+      <button class="play power" data-say="Seinfeld, S4 E11, from 11:02 — fullscreen on the PC."><b>⏻</b>CARRY ON, ON THE PC</button>
+    </div>
+
+    <div class="label">On now<em>tap to tune the PC</em></div>
+    <div class="slide">
+      <button class="ch" data-say="Everything #1 — Heat, 52 min in."><img src="../../nextup_art/umSVjVdbVwtx5ryCA2QXL44Durm.jpg" alt=""><div><small>Everything #1</small><strong>Heat</strong><span>until 23:10</span><div class="bar"><i style="width:31%"></i></div></div></button>
+      <button class="ch" data-say="Universal #2 — Amadeus, 1 h 20 in."><img src="../../nextup_art/gQRfiyfGvr1az0quaYyMram3Aqt.jpg" alt=""><div><small>Universal #2</small><strong>Amadeus</strong><span>until 22:35</span><div class="bar"><i style="width:56%"></i></div></div></button>
+      <button class="ch" data-say="True Life #3 — The Departed."><img src="../../nextup_art/nT97ifVT2J1yMQmeq20Qblg61T.jpg" alt=""><div><small>True Life #3</small><strong>The Departed</strong><span>until 23:40</span><div class="bar"><i style="width:12%"></i></div></div></button>
+      <button class="ch" data-say="Springfield — The Simpsons."><img src="../../nextup_art/uWpG7GqfKGQqX4YMAo3nv5OrglV.jpg" alt=""><div><small>Springfield</small><strong>The Simpsons</strong><span>S35 E4 · until 21:52</span><div class="bar"><i style="width:70%"></i></div></div></button>
+    </div>
+
+    <div class="label">Continue where you left off</div>
+    <div class="slide">
+      <div class="alt"><img src="../../nextup_art/ve72VxNqjGM69Uky4WTo2bK6rfq.jpg" alt=""><div><h3>2001: A Space Odyssey</h3><p>33% in · 99 min left</p><div class="two"><button class="iconbtn" data-say="2001 on this phone, from 49:10.">▶ HERE</button><button class="iconbtn" data-say="2001 on the PC, from 49:10.">▶ ON PC</button></div></div></div>
+      <div class="alt"><img src="../../nextup_art/b1xCNnyrPebIc7EWNZIa6jhb1Ww.jpg" alt=""><div><h3>Jurassic Park</h3><p>17% in · 105 min left</p><div class="two"><button class="iconbtn" data-say="Jurassic Park on this phone.">▶ HERE</button><button class="iconbtn" data-say="Jurassic Park on the PC.">▶ ON PC</button></div></div></div>
+      <div class="alt"><img src="../../nextup_art/uWpG7GqfKGQqX4YMAo3nv5OrglV.jpg" alt=""><div><h3>The Simpsons</h3><p>Up next · S35 E4</p><div class="two"><button class="iconbtn">▶ HERE</button><button class="iconbtn">▶ ON PC</button></div></div></div>
+    </div>
+
+    <div class="card surprise" data-pick>
+      <img src="../../nextup_art/lSSA64WF0M0BXnjwr2quMh6shCl.jpg" alt="">
+      <div><small>Or something new</small><strong>Life of Brian</strong></div>
+      <button class="iconbtn" data-reroll aria-label="Another pick">↻</button>
+      <button class="iconbtn" data-say-pick>▶ ON PC</button>
+    </div>
+  </div>
+  <div class="toast"></div>
+</div>
+</div>
+
+<!-- ===================== 2. PLAYING ===================== -->
+<div>
+<p class="cap"><i>2</i> · Playing — today's Remote, three small changes</p>
+<div class="phone" id="f-play">
+  <div class="titlebar"><div class="logo"></div><span>NEXT UP</span><small>v0.2.1 · 412 films · 38 shows</small></div>
+  <div class="tabs"><a>Now</a><a>Library</a><a>Rate</a><a>Channels</a><span class="rt"><i></i></span><span class="gear">⚙</span></div>
+  <div class="view" style="gap:12px">
+    <div class="glow"><i style="background-image:url(../../nextup_art/aCw8ONfyz3AhngVQa1E2Ss4KSUQ.jpg)"></i></div>
+    <div class="rmnow"><img src="../../nextup_art/aCw8ONfyz3AhngVQa1E2Ss4KSUQ.jpg" alt=""><div><div class="rmtitle">Seinfeld</div><div class="rmsub">S4 E11 · The Contest</div></div></div>
+    <div class="seek"><span>10:52</span><div class="track"></div><span>−12:31</span></div>
+    <div class="row transport"><button class="iconbtn">⏪︎ 10</button><button class="play">⏸︎</button><button class="iconbtn">30 ⏩︎</button><button class="iconbtn">■</button></div>
+    <div class="row moves"><button class="iconbtn">‹ EP</button><button class="iconbtn">EP ›</button><button class="iconbtn" data-say="mpv to fullscreen, and to the front.">⛶ FULL</button><button class="iconbtn">SKIP ›</button></div>
+    <div class="grid">
+      <label>Vol</label><div class="row"><button class="iconbtn" style="font-size:20px;min-width:52px">−</button><span>70</span><button class="iconbtn" style="font-size:20px;min-width:52px">+</button><button class="iconbtn">MUTE</button></div>
+      <label>Delay</label><div class="row"><button class="iconbtn">−100</button><span>0 ms</span><button class="iconbtn">+100</button></div>
+      <label>Tracks</label><div class="row"><button class="iconbtn">SUBS ENG ›</button><button class="iconbtn">FIND</button><button class="iconbtn plain">♪ ENG</button></div>
+    </div>
+    <div class="label">Channels</div>
+    <div class="chips">
+      <button class="chip" data-say="Everything #1 — Heat."><img src="../../nextup_art/umSVjVdbVwtx5ryCA2QXL44Durm.jpg" alt="">Everything #1</button>
+      <button class="chip" data-say="Universal #2 — Amadeus."><img src="../../nextup_art/gQRfiyfGvr1az0quaYyMram3Aqt.jpg" alt="">Universal #2</button>
+      <button class="chip"><img src="../../nextup_art/nT97ifVT2J1yMQmeq20Qblg61T.jpg" alt="">True Life #3</button>
+    </div>
+    <div class="label">Continue where you left off</div>
+    <div class="slide">
+      <div class="alt"><img src="../../nextup_art/ve72VxNqjGM69Uky4WTo2bK6rfq.jpg" alt=""><div><h3>2001: A Space Odyssey</h3><p>33% in · 99 min left</p><div class="two"><button class="iconbtn">▶ HERE</button><button class="iconbtn">▶ ON PC</button></div></div></div>
+      <div class="alt"><img src="../../nextup_art/b1xCNnyrPebIc7EWNZIa6jhb1Ww.jpg" alt=""><div><h3>Jurassic Park</h3><p>17% in · 105 min left</p><div class="two"><button class="iconbtn">▶ HERE</button><button class="iconbtn">▶ ON PC</button></div></div></div>
+    </div>
+  </div>
+  <div class="toast"></div>
+</div>
+</div>
+
+<!-- ===================== 3. IDLE, first night ===================== -->
+<div>
+<p class="cap"><i>3</i> · Nothing playing, nothing to carry on</p>
+<div class="phone" id="f-first">
+  <div class="titlebar"><div class="logo"></div><span>NEXT UP</span><small>v0.2.1 · 412 films · 38 shows</small></div>
+  <div class="tabs"><a>Now</a><a>Library</a><a>Rate</a><a>Channels</a><span class="rt"><i></i></span><span class="gear">⚙</span></div>
+  <div class="view">
+    <div class="status"><span class="dot"></span>The PC is ready<em>nothing on yet</em></div>
+    <div class="hero" data-pick>
+      <div class="wash" style="background-image:url(../../nextup_art/umSVjVdbVwtx5ryCA2QXL44Durm.jpg)"></div>
+      <div class="top">
+        <img src="../../nextup_art/umSVjVdbVwtx5ryCA2QXL44Durm.jpg" alt="">
+        <div class="txt">
+          <span class="eyebrow">Tonight's pick</span>
+          <h2>Heat</h2>
+          <span class="sub">1995 · Crime · 2 h 50</span>
+          <span class="when">From the PC's picks for tonight</span>
+        </div>
+      </div>
+      <div class="pickrow">
+        <button class="iconbtn" data-reroll style="min-height:54px;min-width:64px;font-size:18px" aria-label="Another pick">↻</button>
+        <button class="play power" data-say-pick><b>⏻</b>PLAY ON THE PC</button>
+      </div>
+    </div>
+    <div class="label">On now<em>tap to tune the PC</em></div>
+    <div class="slide">
+      <button class="ch" data-say="Everything #1 — Heat."><img src="../../nextup_art/umSVjVdbVwtx5ryCA2QXL44Durm.jpg" alt=""><div><small>Everything #1</small><strong>Heat</strong><span>until 23:10</span><div class="bar"><i style="width:31%"></i></div></div></button>
+      <button class="ch" data-say="BBC One — live, on the PC only."><span class="ph">BBC</span><div><small>BBC One</small><strong>Live TV</strong><span class="live">● LIVE</span></div></button>
+      <button class="ch"><img src="../../nextup_art/nT97ifVT2J1yMQmeq20Qblg61T.jpg" alt=""><div><small>True Life #3</small><strong>The Departed</strong><span>until 23:40</span><div class="bar"><i style="width:12%"></i></div></div></button>
+    </div>
+    <p style="margin:2px 2px 0;font-size:13px;line-height:1.5;color:var(--muted)">Anything you stop part way through on the PC will wait here, ready to carry on.</p>
+  </div>
+  <div class="toast"></div>
+</div>
+</div>
+
+<!-- ===================== 4. LANDSCAPE IDLE ===================== -->
+<div>
+<p class="cap"><i>4</i> · Nothing playing — landscape</p>
+<div class="phone land" id="f-land">
+  <div class="titlebar"><div class="logo"></div><span>NEXT UP</span><small>v0.2.1 · 412 films · 38 shows</small></div>
+  <div class="tabs"><a>Now</a><a>Library</a><a>Rate</a><a>Channels</a><span class="rt"><i></i></span><span class="gear">⚙</span></div>
+  <div class="view">
+    <div class="col">
+      <div class="hero" style="padding:12px;gap:10px">
+        <div class="wash" style="background-image:url(../../nextup_art/aCw8ONfyz3AhngVQa1E2Ss4KSUQ.jpg)"></div>
+        <div class="top">
+          <img src="../../nextup_art/aCw8ONfyz3AhngVQa1E2Ss4KSUQ.jpg" alt="" style="width:56px">
+          <div class="txt"><span class="eyebrow">Last on the PC</span><h2 style="font-size:20px">Seinfeld</h2><span class="sub">S4 E11 · 12 min left</span><div class="bar"><i style="width:48%"></i></div></div>
+        </div>
+        <button class="play power" style="min-height:48px" data-say="Seinfeld, S4 E11, from 11:02 — fullscreen on the PC."><b>⏻</b>CARRY ON, ON THE PC</button>
+      </div>
+      <div class="card surprise" data-pick style="padding:6px 6px 6px 10px">
+        <img src="../../nextup_art/lSSA64WF0M0BXnjwr2quMh6shCl.jpg" alt="" style="width:28px">
+        <div><small>Or something new</small><strong>Life of Brian</strong></div>
+        <button class="iconbtn" data-reroll style="min-height:42px" aria-label="Another pick">↻</button>
+        <button class="iconbtn" data-say-pick style="min-height:42px">▶ ON PC</button>
+      </div>
+    </div>
+    <div class="col">
+      <div class="label">On now</div>
+      <div class="slide">
+        <button class="ch"><img src="../../nextup_art/umSVjVdbVwtx5ryCA2QXL44Durm.jpg" alt=""><div><small>Everything #1</small><strong>Heat</strong><span>until 23:10</span><div class="bar"><i style="width:31%"></i></div></div></button>
+        <button class="ch"><img src="../../nextup_art/gQRfiyfGvr1az0quaYyMram3Aqt.jpg" alt=""><div><small>Universal #2</small><strong>Amadeus</strong><span>until 22:35</span><div class="bar"><i style="width:56%"></i></div></div></button>
+        <button class="ch"><img src="../../nextup_art/nT97ifVT2J1yMQmeq20Qblg61T.jpg" alt=""><div><small>True Life #3</small><strong>The Departed</strong><span>until 23:40</span><div class="bar"><i style="width:12%"></i></div></div></button>
+      </div>
+      <div class="label">Continue where you left off</div>
+      <div class="slide">
+        <div class="alt"><img src="../../nextup_art/ve72VxNqjGM69Uky4WTo2bK6rfq.jpg" alt=""><div><h3>2001: A Space Odyssey</h3><p>33% in · 99 min left</p><div class="two"><button class="iconbtn">▶ HERE</button><button class="iconbtn">▶ ON PC</button></div></div></div>
+        <div class="alt"><img src="../../nextup_art/b1xCNnyrPebIc7EWNZIa6jhb1Ww.jpg" alt=""><div><h3>Jurassic Park</h3><p>17% in · 105 min left</p><div class="two"><button class="iconbtn">▶ HERE</button><button class="iconbtn">▶ ON PC</button></div></div></div>
+      </div>
+    </div>
+  </div>
+  <div class="toast"></div>
+</div>
+</div>
+
+</div>
+
+<script>
+/* ?only=f-idle shows one frame alone, for its screenshot. */
+const only = new URLSearchParams(location.search).get('only');
+if(only){
+  document.querySelector('.intro').remove();
+  document.querySelectorAll('.board > div').forEach(d => { if(!d.querySelector('#' + only)) d.remove(); });
+  document.querySelector('.board').style.padding = '30px';
+  document.querySelector('.board').style.justifyContent = 'flex-start';
+}
+/* Only enough to feel each tap: what it WOULD do, said in the frame. */
+const PICKS = [
+  ['Life of Brian', '1979 · Comedy · 1 h 34', 'lSSA64WF0M0BXnjwr2quMh6shCl'],
+  ['Heat', '1995 · Crime · 2 h 50', 'umSVjVdbVwtx5ryCA2QXL44Durm'],
+  ['Amadeus', '1984 · Drama · 2 h 40', 'gQRfiyfGvr1az0quaYyMram3Aqt'],
+  ['The Departed', '2006 · Crime · 2 h 31', 'nT97ifVT2J1yMQmeq20Qblg61T'],
+  ['Jurassic Park', '1993 · Adventure · 2 h 7', 'b1xCNnyrPebIc7EWNZIa6jhb1Ww'],
+];
+function say(phone, head, text){
+  const t = phone.querySelector('.toast');
+  t.innerHTML = '<b>' + head + '</b>' + text;
+  t.classList.add('up');
+  clearTimeout(t.off); t.off = setTimeout(() => t.classList.remove('up'), 2200);
+}
+document.querySelectorAll('.phone').forEach(ph => {
+  ph.addEventListener('click', e => {
+    const b = e.target.closest('button');
+    if(!b) return;
+    if(b.matches('[data-reroll]')){
+      const box = b.closest('[data-pick]');
+      const i = ((+box.dataset.i || 0) + 1) % PICKS.length;
+      box.dataset.i = i;
+      const [t, s, art] = PICKS[i];
+      box.querySelector('strong, h2').textContent = t;
+      const sub = box.querySelector('.sub'); if(sub) sub.textContent = s;
+      box.querySelectorAll('img').forEach(im => im.src = '../../nextup_art/' + art + '.jpg');
+      const w = box.querySelector('.wash'); if(w) w.style.backgroundImage = 'url(../../nextup_art/' + art + '.jpg)';
+      return;
+    }
+    if(b.matches('[data-say-pick]')){
+      const box = b.closest('[data-pick]');
+      say(ph, 'STARTING ON THE PC', box.querySelector('strong, h2').textContent + ', from the start, fullscreen.');
+      return;
+    }
+    if(b.classList.contains('ch') || b.classList.contains('chip')){
+      ph.querySelectorAll('.ch.on,.chip.on').forEach(x => x.classList.remove('on'));
+      b.classList.add('on');
+    }
+    if(b.dataset.say) say(ph, b.classList.contains('power') ? 'POWER' : 'ON THE PC', b.dataset.say);
+  });
+});
+</script>
+</body>
+</html>

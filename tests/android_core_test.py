@@ -288,8 +288,12 @@ check("phone Glass: no blurred page behind and no live blur; the Now card carrie
       and "body.android.glass *{backdrop-filter:none!important" in page_src
       and "'ppwash'" in page_src[page_src.find("function phonePick("):][:5000])
 check("Remote: Continue where you left off, under the hint when idle and under the channels when playing",
-      'id="rm_cont"' in page_src and "alive ? $('#rm_presets') : $('#rm_hint')" in page_src
+      'id="rm_cont"' in page_src and "if(alive && cont.previousElementSibling !== $('#rm_presets'))" in page_src
+      and "const parts = [$('#rm_onnow'), $('#rm_cont'), $('#rm_surprise')];" in page_src
       and "if(view === 'remote' && pcLinkUp) remoteContinue();" in page_src)
+check("Remote idle: a status line, Continue from PC, On now with pictures, and a pick",
+      'id="rm_status"' in page_src and "CONTINUE FROM PC" in page_src and 'id="rm_onnow"' in page_src
+      and 'id="rm_surprise"' in page_src and "Nothing playing on the PC" in page_src)
 check("phone Favourites shows every favourite, not just the ones on the phone",
       "favWidened = true" in page_src)
 check("phone Now: a step-by-step chooser — kind, then genres in their colours, then what fits",
@@ -334,7 +338,7 @@ check("Remote: asks once a second only while showing, and stops when hidden",
       "function remotePoll(" in page_src and "clearInterval(remoteTimer)" in page_src
       and "remotePoll(false)" in page_src[page_src.find("'visibilitychange'"):][:2500]
       and "remotePoll(view === 'remote' && pcLinkUp)" in page_src)
-_rb = page_src[page_src.find("function remoteBuild("):][:5000]
+_rb = page_src[page_src.find("function remoteBuild("):][:9000]
 check("Remote: the bar seeks when let go, not while dragging", "seek.onchange" in _rb and "seek.oninput" not in _rb)
 check("Remote: the sleep timer's question can be answered there", "STILL HERE" in _rp and "THAT\\u2019S ENOUGH" in _rp
       or ("STILL HERE" in _rp and "ENOUGH" in _rp))
@@ -364,7 +368,7 @@ check("Remote layout: buttons at least 48px (42 in landscape, to fit one screen)
       re.search(r"#view-remote \.iconbtn\{[^}]*min-height:48px", page_src))
 check("Remote layout: the still-watching card sits at the bottom, moving nothing", ".rmafk{position:fixed" in page_src)
 check("Remote layout: mute shows whether it's on", "$('#rm_mute').classList.toggle('on'" in page_src)
-_tmpl = page_src[page_src.find("function remoteBuild("):][:4000]
+_tmpl = page_src[page_src.find("function remoteBuild("):][:7000]
 _trans = _tmpl[_tmpl.find('rmtransport'):][:700]
 check("Remote fits one screen: STOP sits in the main row (and so goes dead with it)", 'data-a="stop"' in _trans)
 check("Remote fits one screen: subtitles and audio share a row", "<label>Tracks</label>" in _tmpl

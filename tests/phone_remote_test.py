@@ -284,6 +284,21 @@ n.CONFIG["last_sitting"] = {"kind": "movie", "id": mv["id"], "channel_id": "come
 n.remote_do("power", {})
 n.tune_channel = _real_tune
 check("a channel: POWER rejoins it", tuned == ["comedy"], tuned)
+# The idle card: what POWER would do, in words.
+conn = n.db(); conn.execute("UPDATE movies SET resume_pos=660, resume_total=1380 WHERE id=?", (mv["id"],)); conn.commit(); conn.close()
+n.LOCAL.loaded_at = 0
+n.CONFIG["last_sitting"] = {"kind": "movie", "id": mv["id"], "channel_id": None}
+card = n.last_sitting_card()
+check("the card: a film part way, how far and how long left",
+      card and card["title"] == mv["title"] and card["percent"] == 47 and card["note"] == "Stopped 11 min in · 12 min left",
+      card)
+n.CONFIG["last_sitting"] = {"kind": "episode", "id": e1, "channel_id": None}
+card = n.last_sitting_card()
+check("an episode seen to the end: the card names the next one",
+      card and card["note"] == "Next episode" and "S01E02" in (card["sub"] or ""), card)
+ALIVE[0] = False
+_st = n.phone_remote_state()
+check("and the idle state carries it to the phone", (_st.get("last") or {}).get("note") == "Next episode", _st.get("last"))
 check("the page has both buttons", 'data-a="fullscreen"' in n.PAGE and 'id="rm_power"' in n.PAGE)
 
 desk.shutdown()
