@@ -47,5 +47,55 @@ got = next((e for e in n.LIB.episodes if e.get("episodeid") == e1), {})
 check("the library carries them", got.get("tmdb_rating") == 8.4 and got.get("tmdb_votes") == 120,
       {k: got.get(k) for k in ("tmdb_rating", "tmdb_votes")})
 
+# --- Task 2: the scores -----------------------------------------------------------------
+conn = n.db()
+show = conn.execute("INSERT INTO shows (name,title,tmdb_id,tmdb_rating) VALUES ('graded','Graded','880002',7.0)").lastrowid
+def ep(season, number, rating, votes):
+    return conn.execute("INSERT INTO episodes (path,show_id,season,episode,title,runtime,tmdb_rating,tmdb_votes)"
+                        " VALUES (?,?,?,?,?,1800,?,?)",
+                        ("X:/gr/s%de%d.mkv" % (season, number), show, season, number, "E%d" % number,
+                         rating, votes)).lastrowid
+g1, g2, g3, g4 = ep(1, 1, 8.0, 500), ep(1, 2, 9.5, 3), ep(1, 3, 6.0, 400), ep(1, 4, 0, 0)
+sp = ep(0, 1, 9.9, 900)
+dull = conn.execute("INSERT INTO shows (name,title,tmdb_id,tmdb_rating) VALUES ('blank','Blank','880003',0)").lastrowid
+conn.execute("INSERT INTO episodes (path,show_id,season,episode,title,runtime,tmdb_rating,tmdb_votes)"
+             " VALUES ('X:/bl/1.mkv',?,1,1,'x',1800,0,0)", (dull,))
+conn.commit(); conn.close()
+def reload():
+    n.LIB.loaded_at = 0; n.LOCAL.loaded_at = 0; n.LIB.load()
+def setsql(sql, *a):
+    c = n.db(); c.execute(sql, a); c.commit(); c.close(); reload()
+reload()
+
+sc = n.episode_scores(show)
+check("a well-voted episode keeps TMDB's rating", sc.get(g1) == 8.0, sc)
+mean_n = (8.0 * 500 + 6.0 * 400) / 900.0
+check("few votes: pulled towards the neighbours", mean_n < sc.get(g2, 0) < 9.5 and sc[g2] - mean_n < 9.5 - sc[g2],
+      (round(mean_n, 2), sc.get(g2)))
+season_mean = (8.0 * 500 + 9.5 * 3 + 6.0 * 400) / 903.0
+check("no votes: the season's average", abs(sc.get(g4, 0) - season_mean) <= 0.05, (round(season_mean, 2), sc.get(g4)))
+setsql("UPDATE episodes SET userrating=10 WHERE id=?", g3)
+check("your own rating wins", n.episode_scores(show).get(g3) == 10.0)
+setsql("UPDATE shows SET userrating=9 WHERE id=?", show)
+check("your show rating nudges a quarter of the way", n.episode_scores(show).get(g1) == 8.5, n.episode_scores(show).get(g1))
+setsql("UPDATE shows SET userrating=0 WHERE id=?", show)
+for _ in range(3):
+    setsql("INSERT INTO history (at,kind,item_id,title,event) VALUES ('2026-10-01 20:00:00','episode',?,'E1','watched')", g1)
+check("rewatched: +0.3 a time after the first", n.episode_scores(show).get(g1) == 8.6, n.episode_scores(show).get(g1))
+for _ in range(3):
+    setsql("INSERT INTO history (at,kind,item_id,title,event) VALUES ('2026-10-01 20:00:00','episode',?,'E1','watched')", g1)
+check("and capped", n.episode_scores(show).get(g1) == 8.9, n.episode_scores(show).get(g1))
+setsql("UPDATE episodes SET tmdb_rating=12 WHERE id=?", g1)
+check("never above 10", n.episode_scores(show).get(g1) == 10.0, n.episode_scores(show).get(g1))
+setsql("UPDATE episodes SET tmdb_rating=8.0 WHERE id=?", g1)
+setsql("DELETE FROM history WHERE kind='episode' AND item_id=?", g1)
+sc = n.episode_scores(show)
+ss = n.season_scores(show, sc)
+w = {g1: 500, g2: 3, g3: 100, g4: 1}
+expect = round(sum(sc[k] * w[k] for k in w) / float(sum(w.values())), 1)
+check("a season is its episodes, vote-weighted (yours count as 100)", ss.get(1) == expect, (ss.get(1), expect))
+check("specials are scored, on their own", 0 in ss and ss[0] == sc.get(sp), ss)
+check("nothing to go on: no scores", n.episode_scores(dull) == {}, n.episode_scores(dull))
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

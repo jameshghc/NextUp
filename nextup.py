@@ -5917,6 +5917,98 @@ def show_facts(row):
     return facts
 
 
+# --- season and episode scores -----------------------------------------------------
+#
+# Every episode of a show used to be the show: one rating for the lot. But
+# seasons dip and episodes stand out. The score is out of 10, in this order:
+# your own rating of the episode, full stop; otherwise TMDB's rating of it
+# (an episode only a handful voted on borrows from the ones either side, and
+# one nobody voted on takes its season's), moved a quarter of the way towards
+# how you rate the show, plus a little for each time you've come back to it.
+# Worked out when asked, never stored, so a rating or a rewatch shows at once.
+# See docs/superpowers/specs/2026-10-24-episode-scores-design.md.
+
+EPISODE_FEW_VOTES = 20          # below this TMDB's number is a handful of opinions
+EPISODE_REWATCH_STEP = 0.3      # each time after the first, seen to the end
+EPISODE_REWATCH_MAX = 0.9
+EPISODE_RATED_WEIGHT = 100      # a rating of yours counts this many votes in a season
+
+
+def _vote_mean(pairs):
+    """The vote-weighted mean of (rating, votes) pairs that have votes."""
+    pairs = [(r, v) for r, v in pairs if v and r]
+    total = sum(v for _r, v in pairs)
+    return sum(r * v for r, v in pairs) / float(total) if total else None
+
+
+def episode_scores(show_id):
+    """{episode id: score} for one show. Episodes with nothing at all to go
+    on are left out rather than guessed."""
+    LIB.load()
+    show = next((s for s in LIB.shows if s.get("tvshowid") == show_id), None)
+    eps = sorted([e for e in LIB.episodes if e.get("tvshowid") == show_id], key=episode_order)
+    if not show or not eps:
+        return {}
+    seasons = defaultdict(list)
+    for e in eps:
+        seasons[e.get("season") or 0].append(e)
+    pair = lambda e: (e.get("tmdb_rating") or 0, e.get("tmdb_votes") or 0)
+    show_tmdb = show.get("rating") or _vote_mean(pair(e) for e in eps if (e.get("season") or 0) > 0)
+    mine_show = show.get("userrating") or 0
+
+    conn = db()
+    try:
+        ids = [e["episodeid"] for e in eps]
+        seen = dict(conn.execute(
+            "SELECT item_id, COUNT(*) FROM history WHERE kind='episode' AND event='watched'"
+            " AND item_id IN (%s) GROUP BY item_id" % ",".join("?" * len(ids)), ids).fetchall())
+    finally:
+        conn.close()
+
+    out = {}
+    for number, run in seasons.items():
+        season_mean = _vote_mean(pair(e) for e in run)
+        for i, e in enumerate(run):
+            if e.get("userrating"):
+                out[e["episodeid"]] = round(max(1.0, min(10.0, float(e["userrating"]))), 1)
+                continue
+            rating, votes = pair(e)
+            if votes >= EPISODE_FEW_VOTES:
+                base = rating
+            else:
+                around = [pair(x) for x in run[max(0, i - 1):i] + run[i + 1:i + 2]]
+                near = _vote_mean(around) or season_mean or show_tmdb
+                if votes and rating:
+                    spare = EPISODE_FEW_VOTES - votes
+                    base = ((rating * votes + near * spare) / float(EPISODE_FEW_VOTES)
+                            if near else rating)
+                else:
+                    base = season_mean or show_tmdb
+            if not base:
+                continue
+            if mine_show and show_tmdb:
+                base += 0.25 * (mine_show - show_tmdb)
+            extra = max(0, (seen.get(e["episodeid"]) or 0) - 1)
+            base += min(EPISODE_REWATCH_MAX, EPISODE_REWATCH_STEP * extra)
+            out[e["episodeid"]] = round(max(1.0, min(10.0, base)), 1)
+    return out
+
+
+def season_scores(show_id, scores):
+    """{season number: score}: its episodes' scores, weighted by how many
+    voted on each (one you rated counts as EPISODE_RATED_WEIGHT)."""
+    LIB.load()
+    sums = defaultdict(lambda: [0.0, 0])
+    for e in LIB.episodes:
+        if e.get("tvshowid") != show_id or e["episodeid"] not in scores:
+            continue
+        weight = EPISODE_RATED_WEIGHT if e.get("userrating") else max(1, e.get("tmdb_votes") or 0)
+        acc = sums[e.get("season") or 0]
+        acc[0] += scores[e["episodeid"]] * weight
+        acc[1] += weight
+    return {season: round(total / weight, 1) for season, (total, weight) in sums.items() if weight}
+
+
 def show_detail(show_id):
     """Everything you own of one series, so you can jump straight to an
     episode rather than hunting through folders."""
