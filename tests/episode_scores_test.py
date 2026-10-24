@@ -18,8 +18,11 @@ def check(name, ok, detail=""):
 # --- Task 1: TMDB's ratings, stored ---------------------------------------------------
 calls = []
 SEASON = {"episodes": [
-    {"episode_number": 1, "name": "A", "overview": "", "still_path": None, "runtime": 30,
-     "vote_average": 8.4, "vote_count": 120},
+    {"episode_number": 1, "name": "A", "overview": "It begins.", "still_path": None, "runtime": 30,
+     "vote_average": 8.4, "vote_count": 120, "air_date": "2019-04-23",
+     "crew": [{"job": "Director", "name": "Alice Dee"}, {"job": "Writer", "name": "Bob Wry"},
+              {"job": "Writer", "name": "Cat Pen"}, {"job": "Editor", "name": "Ed Cut"}],
+     "guest_stars": [{"name": "Guest One"}, {"name": "Guest Two"}]},
     {"episode_number": 2, "name": "B", "overview": "", "still_path": None, "runtime": 30,
      "vote_average": 6.1, "vote_count": 3}]}
 def fake_tmdb(path, *a, **k):
@@ -211,6 +214,19 @@ check("and still in TMDB's order", ks[sk[3]] == max(ks[k] for k in sk) and ks[sk
 # Rating one yourself, from its score on the page.
 check("the page: the score is a button that opens the rating bar for that episode",
       "rate_type: 'episode'" in n.PAGE and "'epscore'" in n.PAGE and "button" in n.PAGE[n.PAGE.find("function episodeRow("):][:3000])
+
+# --- An episode's own details (2026-10-24) ------------------------------------------------
+info = n.episode_info(e1)
+check("an episode's details: plot, air date, director, writers, guest stars, TMDB's rating",
+      info and info["plot"] == "It begins." and info["aired"] == "2019-04-23"
+      and info["directors"] == ["Alice Dee"] and info["writers"] == ["Bob Wry", "Cat Pen"]
+      and info["guests"] == ["Guest One", "Guest Two"] and info["tmdb_rating"] == 8.4 and info["tmdb_votes"] == 120,
+      info)
+check("an episode that isn't there: None", n.episode_info(99999999) is None)
+_pe = n.PAGE[n.PAGE.find("function episodeRow("):][:4000]
+check("the page: the star after the name, and the name opens the details",
+      "'epbest'" in _pe and _pe.find("'epbest'") > _pe.find("eptitle") and "toggleEpisodeInfo(row, ep)" in _pe
+      and "'epinfo'" in n.PAGE and "/api/episode?id=" in n.PAGE, "")
 
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

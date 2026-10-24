@@ -1830,6 +1830,12 @@ LATER_COLUMNS = [
     # and an episode score is worked out from (episode_scores).
     ("episodes", "tmdb_rating", "REAL"),
     ("episodes", "tmdb_votes", "INTEGER"),
+    # An episode's own facts, from the same season reply: when it aired, who
+    # directed and wrote it, who guested (names, "|"-joined like cast_names).
+    ("episodes", "air_date", "TEXT"),
+    ("episodes", "directors", "TEXT"),
+    ("episodes", "writers", "TEXT"),
+    ("episodes", "guests", "TEXT"),
     ("episodes", "plot", "TEXT"),
     # Audio delay set for this file, in ms — put back whenever it plays.
     ("movies", "audio_delay", "INTEGER"),
@@ -3101,7 +3107,8 @@ def enrich_episode_titles(conn, progress=None):
     seasons = conn.execute(
         "SELECT DISTINCT e.show_id, e.season, s.tmdb_id"
         " FROM episodes e JOIN shows s ON s.id = e.show_id"
-        " WHERE (e.title IS NULL OR e.runtime IS NULL OR e.tmdb_votes IS NULL) AND e.season > 0"
+        " WHERE (e.title IS NULL OR e.runtime IS NULL OR e.tmdb_votes IS NULL OR e.air_date IS NULL)"
+        " AND e.season > 0"
         " AND s.tmdb_id IS NOT NULL").fetchall()
     done = 0
     for index, row in enumerate(seasons):
@@ -3122,14 +3129,23 @@ def enrich_episode_titles(conn, progress=None):
             still = info.get("still_path")
             # The rating comes in the same reply; 0 votes is stored as 0 rather
             # than left empty, so the season isn't asked for again.
+            # Its own facts too, "" rather than empty where TMDB has none, so
+            # the season isn't asked for again either.
+            crew = info.get("crew") or []
+            jobs = lambda job: as_text([c.get("name") for c in crew if c.get("job") == job][:4])
             conn.execute(
-                "UPDATE episodes SET title=?,plot=?,still=?,runtime=?,tmdb_rating=?,tmdb_votes=?"
-                " WHERE id=?",
+                "UPDATE episodes SET title=?,plot=?,still=?,runtime=?,tmdb_rating=?,tmdb_votes=?,"
+                "air_date=?,directors=?,writers=?,guests=? WHERE id=?",
                 (info.get("name") or ("Episode %d" % ep["episode"]),
                  (info.get("overview") or "")[:1000],
                  POSTER + still if still else None,
                  (info.get("runtime") or 0) * 60,
-                 float(info.get("vote_average") or 0), int(info.get("vote_count") or 0), ep["id"]))
+                 float(info.get("vote_average") or 0), int(info.get("vote_count") or 0),
+                 info.get("air_date") or "", jobs("Director"),
+                 as_text([w for w in [c.get("name") for c in crew
+                                      if c.get("job") in ("Writer", "Teleplay", "Story", "Screenplay")]][:4]),
+                 as_text([g.get("name") for g in (info.get("guest_stars") or [])][:8]),
+                 ep["id"]))
             done += 1
     conn.commit()
     return done
@@ -6020,6 +6036,27 @@ def season_scores(show_id, scores):
         acc[0] += scores[e["episodeid"]] * weight
         acc[1] += weight
     return {season: round(total / weight, 1) for season, (total, weight) in sums.items() if weight}
+
+
+def episode_info(episode_id):
+    """One episode's own details for its panel on the show's page: asked for
+    when the panel opens, not sent with every episode of a long show."""
+    conn = db()
+    try:
+        r = conn.execute("SELECT id,season,episode,title,plot,still,runtime,air_date,directors,writers,"
+                         "guests,tmdb_rating,tmdb_votes,userrating FROM episodes WHERE id=?",
+                         (int(episode_id),)).fetchone()
+    finally:
+        conn.close()
+    if not r:
+        return None
+    return {"id": r["id"], "code": "S%02dE%02d" % (r["season"] or 0, r["episode"] or 0),
+            "title": r["title"] or "", "plot": r["plot"] or "",
+            "still": local_art(r["still"]), "runtime": minutes(r["runtime"]),
+            "aired": r["air_date"] or "", "directors": as_list(r["directors"]),
+            "writers": as_list(r["writers"]), "guests": as_list(r["guests"]),
+            "tmdb_rating": round(r["tmdb_rating"] or 0, 1), "tmdb_votes": r["tmdb_votes"] or 0,
+            "userrating": r["userrating"] or 0}
 
 
 def show_detail(show_id):
@@ -14633,6 +14670,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"on": tray_on_close(), "running": TRAY["running"]})
             if route == "/api/cutout":
                 return self.send_json(cutout_look())
+            if route == "/api/episode":
+                try:
+                    got = episode_info(int(one("id", "0")))
+                except ValueError:
+                    got = None
+                return self.send_json(got or {"error": "No such episode."})
 
             if route == "/api/status":
                 payload = self.status_payload()
@@ -17216,7 +17259,19 @@ body.android .tile.elsewhere .cap{padding-bottom:26px}
 .epscore.gem{outline:1px dashed hsl(var(--h) 70% 60% / .6)}
 /* One of the show's best: a star in the accent (so it follows the colour
    chosen in Settings), between the code and the name. */
-.epbest{flex:none;color:var(--marigold);font-size:13px;line-height:1;margin-right:-4px}
+.epbest{flex:none;color:var(--marigold);font-size:13px;line-height:1;margin-left:7px}
+/* The name and its star: the name gives way, the star stays beside it. */
+.eprow .name{display:flex;align-items:center;min-width:0}
+.eprow .eptitle{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}
+.eprow .eptitle:hover{text-decoration:underline;text-underline-offset:3px}
+/* An episode's details, opened under its row. */
+.epinfo{display:flex;gap:14px;align-items:flex-start;padding:8px 0 14px 12px;border-bottom:1px solid var(--line)}
+.epinfo img{width:200px;max-width:40%;aspect-ratio:16/9;object-fit:cover;border-radius:6px;flex:none}
+.epinfotext{min-width:0;display:flex;flex-direction:column;gap:6px}
+.epfacts{font-family:var(--mono);font-size:11px;color:var(--marigold);letter-spacing:.03em}
+.epplot{margin:0;font-size:13.5px;line-height:1.5;color:var(--paper)}
+.epwho{font-size:12px;color:var(--muted)}
+@media (max-width:600px){ .epinfo{flex-direction:column} .epinfo img{width:100%;max-width:none} }
 .seasontab.part .flag{color:var(--marigold)}
 .seasontab.done .flag{color:var(--teal)}
 .seasontab.done:not([aria-selected="true"]){color:var(--muted)}
@@ -21799,14 +21854,45 @@ function seasonBrowser(d, seasons){
   return wrap;
 }
 
+/* An episode's own details, under its row: the still, the plot, when it
+   aired and how long it runs, TMDB's rating, who made it and who guested.
+   Asked for when opened (/api/episode). Click the name again to close. */
+async function toggleEpisodeInfo(row, ep){
+  const next = row.nextElementSibling;
+  if(next && next.classList.contains('epinfo')){ next.remove(); return; }
+  const box = el('div', 'epinfo');
+  box.append(el('p', 'empty', 'Loading\u2026'));
+  row.after(box);
+  const r = await api('/api/episode?id=' + ep.id);
+  box.innerHTML = '';
+  if(!r || r.error){ box.append(el('p', 'empty', 'Nothing more is known about this one.')); return; }
+  if(r.still){ const i = el('img'); i.src = r.still; i.alt = ''; i.loading = 'lazy'; box.append(i); }
+  const text = el('div', 'epinfotext');
+  const facts = [r.aired ? 'Aired ' + r.aired : '', r.runtime ? r.runtime + ' min' : '',
+                 r.tmdb_votes ? 'TMDB ' + r.tmdb_rating.toFixed(1) + ' (' + r.tmdb_votes + ' votes)' : '']
+                .filter(Boolean).join(' \u00B7 ');
+  if(facts) text.append(el('div', 'epfacts', esc(facts)));
+  text.append(el('p', 'epplot', esc(r.plot || 'No description.')));
+  const who = [r.directors.length ? 'Directed by ' + r.directors.join(', ') : '',
+               r.writers.length ? 'Written by ' + r.writers.join(', ') : ''].filter(Boolean).join(' \u00B7 ');
+  if(who) text.append(el('div', 'epwho', esc(who)));
+  if(r.guests.length) text.append(el('div', 'epwho', esc('Guest starring ' + r.guests.join(', '))));
+  box.append(text);
+}
+
 function episodeRow(ep, d){
   const row = el('div','eprow'+(ep.played?' seen':'')+(ep.id===d.next_up?' next':''));
   row.append(el('div','code', ep.code));
-  /* One of the show's five best: a star in the accent, beside its name. */
-  if(ep.best){ const st = el('span', 'epbest', '\u2605'); st.title = 'One of the best episodes'; row.append(st); }
+  /* The name, then — for one of the show's five best — a star in the
+     accent, kept beside it however short the name has to be cut. A click
+     on the name opens the episode's own details under the row. */
   const name = el('div','name');
-  name.textContent = ep.title || '';
-  name.title = ep.title || '';
+  const t = el('span', 'eptitle');
+  t.textContent = ep.title || '';
+  t.title = (ep.title || '') + ' \u2014 details';
+  name.append(t);
+  if(ep.best){ const st = el('span', 'epbest', '\u2605'); st.title = 'One of the best episodes'; name.append(st); }
+  t.onclick = e => { e.stopPropagation(); toggleEpisodeInfo(row, ep); };
   row.append(name);
   if(ep.percent) row.append(el('div','libline', ep.percent+'% in'));
   else if(ep.id===d.next_up) row.append(el('div','libline','carry on here'));
