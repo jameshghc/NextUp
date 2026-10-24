@@ -5921,10 +5921,12 @@ def show_facts(row):
 #
 # Every episode of a show used to be the show: one rating for the lot. But
 # seasons dip and episodes stand out. The score is out of 10, in this order:
-# your own rating of the episode, full stop; otherwise TMDB's rating of it
-# (an episode only a handful voted on borrows from the ones either side, and
-# one nobody voted on takes its season's), moved a quarter of the way towards
-# how you rate the show, plus a little for each time you've come back to it.
+# your own rating of the episode, full stop; otherwise how much you like the
+# show (or, unrated, the show's usual), moved up or down by how TMDB rates
+# this episode against the show's others — as far as its votes justify —
+# plus a little for each time you've come back to it. (It began as TMDB's
+# number nudged towards yours; a loved sketch show whose episodes a handful
+# had voted down came out at 6. Asked for: weigh towards your rating.)
 # Worked out when asked, never stored, so a rating or a rewatch shows at once.
 # See docs/superpowers/specs/2026-10-24-episode-scores-design.md.
 
@@ -5962,9 +5964,6 @@ def episode_scores(show_id, rewatches=True, episodes=None):
         return {}
     if not any(_episode_evidence(e) for e in eps if (e.get("season") or 0) > 0):
         return {}
-    seasons = defaultdict(list)
-    for e in eps:
-        seasons[e.get("season") or 0].append(e)
     pair = lambda e: (e.get("tmdb_rating") or 0, e.get("tmdb_votes") or 0)
     show_tmdb = show.get("rating") or _vote_mean(pair(e) for e in eps if (e.get("season") or 0) > 0)
     mine_show = show.get("userrating") or 0
@@ -5980,32 +5979,26 @@ def episode_scores(show_id, rewatches=True, episodes=None):
         finally:
             conn.close()
 
+    # Where every episode starts: your rating of the show if you've given
+    # one, else the show's usual (its episodes' vote-weighted mean, or its
+    # TMDB rating). TMDB then says only how this episode compares with the
+    # show's usual — and only as far as its votes justify: five votes move
+    # it a fifth as far as twenty would (shrunk by EPISODE_FEW_VOTES).
+    usual = _vote_mean(pair(e) for e in eps if (e.get("season") or 0) > 0) or show_tmdb
+    start = mine_show or usual
     out = {}
-    for number, run in seasons.items():
-        season_mean = _vote_mean(pair(e) for e in run)
-        for i, e in enumerate(run):
-            if e.get("userrating"):
-                out[e["episodeid"]] = round(max(1.0, min(10.0, float(e["userrating"]))), 1)
-                continue
-            rating, votes = pair(e)
-            if votes >= EPISODE_FEW_VOTES:
-                base = rating
-            else:
-                around = [pair(x) for x in run[max(0, i - 1):i] + run[i + 1:i + 2]]
-                near = _vote_mean(around) or season_mean or show_tmdb
-                if votes and rating:
-                    spare = EPISODE_FEW_VOTES - votes
-                    base = ((rating * votes + near * spare) / float(EPISODE_FEW_VOTES)
-                            if near else rating)
-                else:
-                    base = season_mean or show_tmdb
-            if not base:
-                continue
-            if mine_show and show_tmdb:
-                base += 0.25 * (mine_show - show_tmdb)
-            extra = max(0, (seen.get(e["episodeid"]) or 0) - 1)
-            base += min(EPISODE_REWATCH_MAX, EPISODE_REWATCH_STEP * extra)
-            out[e["episodeid"]] = round(max(1.0, min(10.0, base)), 1)
+    for e in eps:
+        if e.get("userrating"):
+            out[e["episodeid"]] = round(max(1.0, min(10.0, float(e["userrating"]))), 1)
+            continue
+        if not start:
+            continue
+        rating, votes = pair(e)
+        lean = ((rating - usual) * votes / float(votes + EPISODE_FEW_VOTES)
+                if rating and votes and usual else 0.0)
+        extra = max(0, (seen.get(e["episodeid"]) or 0) - 1)
+        score = start + lean + min(EPISODE_REWATCH_MAX, EPISODE_REWATCH_STEP * extra)
+        out[e["episodeid"]] = round(max(1.0, min(10.0, score)), 1)
     return out
 
 
@@ -6103,6 +6096,7 @@ def show_detail(show_id):
             "played": bool(e.get("playcount")), "percent": percent,
             "code": "S%02dE%02d" % (e.get("season") or 0, e.get("episode") or 0),
             "score": scores.get(e.get("episodeid")),
+            "userrating": e.get("userrating") or 0,
             "star": bool((e.get("userrating") or 0) >= 8 or (rewatched.get(e.get("episodeid")) or 0) >= 2),
             "gem": bool(gem_line is not None and not e.get("playcount") and not e.get("userrating")
                         and (e.get("season") or 0) > 0 and e.get("episodeid") in voiced
@@ -17214,7 +17208,9 @@ body.android .tile.elsewhere .cap{padding-bottom:26px}
 .seasonscore.top{color:var(--marigold);opacity:1}
 .seasonscore.low{opacity:.45}
 .epscore{flex:none;font-family:var(--mono);font-size:11.5px;padding:2px 7px;border-radius:5px;white-space:nowrap;
-  background:hsl(var(--h) 55% 35% / .35);color:hsl(var(--h) 70% 72%)}
+  background:hsl(var(--h) 55% 35% / .35);color:hsl(var(--h) 70% 72%);border:0;cursor:pointer}
+.epscore:hover{outline:1px solid hsl(var(--h) 70% 60% / .7)}
+.eprate{padding:6px 0 12px 12px;border-bottom:1px solid var(--line)}
 .epscore.gem{outline:1px dashed hsl(var(--h) 70% 60% / .6)}
 /* Best episodes: a box of its own, in the accent, so it can't be mistaken
    for the season list under it. */
@@ -21825,10 +21821,35 @@ function episodeRow(ep, d){
   /* Its score, on the library's colour scale; ★ for one you rated highly
      or keep coming back to, ? for one you haven't seen that should be good. */
   if(ep.score != null){
-    const sc = el('span', 'epscore', ep.score.toFixed(1));
-    sc.style.setProperty('--h', hueFor(ep.score));
-    if(ep.star){ sc.prepend('\u2605 '); sc.title = 'One of yours'; }
-    else if(ep.gem){ sc.classList.add('gem'); sc.append(' ?'); sc.title = 'Good in theory: you haven\u2019t seen it'; }
+    /* Click the score to rate the episode yourself, for the odd one the
+       score has wrong. Your rating is then its score. */
+    const sc = el('button', 'epscore');
+    const paintScore = () => {
+      sc.textContent = ep.score.toFixed(1);
+      sc.classList.toggle('gem', !ep.star && !!ep.gem);
+      if(ep.star) sc.prepend('\u2605 ');
+      else if(ep.gem) sc.append(' ?');
+      sc.style.setProperty('--h', hueFor(ep.score));
+      sc.title = (ep.star ? 'One of yours' : ep.gem ? 'Good in theory: you haven\u2019t seen it' : 'Its score')
+                 + ' \u2014 click to rate it yourself';
+    };
+    paintScore();
+    sc.onclick = e => {
+      e.stopPropagation();
+      const next = row.nextElementSibling;
+      if(next && next.classList.contains('eprate')){ next.remove(); return; }
+      const box = el('div', 'eprate');
+      box.append(rateControl({rate_type: 'episode', rate_id: ep.id, userrating: ep.userrating || 0},
+        {label: 'Your rating for ' + ep.code, onRated: async () => {
+          /* The score as the server now has it: yours, or worked out
+             again if you cleared it. */
+          const fresh = await api('/api/show?id=' + d.id);
+          const now = fresh && (fresh.seasons || []).flatMap(x => x.episodes).find(x => x.id === ep.id);
+          if(now) Object.assign(ep, {score: now.score, star: now.star, gem: now.gem, userrating: now.userrating});
+          if(ep.score != null) paintScore();
+        }}));
+      row.after(box);
+    };
     row.append(sc);
   }
   const go = el('button','iconbtn','PLAY');

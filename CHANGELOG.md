@@ -18,7 +18,7 @@ What changed in Next Up, version by version, newest first. Version numbers start
 - Channels 2 to 5 (Universal, True Life, Action, Comedy) now show films only; Al Jazeera moves to the end of the dial, Cold Ones is gone, and Non-stop Favs is split into Films and TV.
 - On the phone, every pick has the same buttons in the same places: HERE and ON PC, then Back, Next and Watchlist, with whatever can't be done greyed out.
 - The phone's Remote, with nothing playing, is a place to choose: Continue on PC (the last thing, fullscreen), On now (the channels with what's on them), Continue where you left off, and one of tonight's picks. While something plays there's a Fullscreen button that also brings the player to the front.
-- Season and episode scores on a show's page: a score on each season tab and each episode, ★ on the ones you rated highly or keep rewatching, a mark on unseen ones that should be good, and a Best episodes row. Non-stop Favs: TV comes round to the better episodes more often.
+- Season and episode scores on a show's page: a score on each season tab and each episode, ★ on the ones you rated highly or keep rewatching, a mark on unseen ones that should be good, and a Best episodes row. The scores start from your own rating of the show, and clicking one lets you rate that episode yourself. Non-stop Favs: TV comes round to the better episodes more often.
 - The Now page's reasons no longer quote ratings; the scores are still on the card.
 - The Remote shows Continue where you left off: under the message when nothing's playing, under the channels when something is.
 - The Library's Sort list has Recently watched: films by when you last played them, shows by their latest episode.

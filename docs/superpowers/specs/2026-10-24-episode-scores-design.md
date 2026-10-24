@@ -58,3 +58,11 @@ Still random: each programme block is still chosen at random. Better episodes ju
   - Over many days, a high-scoring episode comes up more often than a low-scoring one in the same show.
   - Every episode still comes up sometimes.
   - The same day gives the same schedule.
+
+## Changed after first use (2026-10-24)
+
+The score as first built started from TMDB's rating of the episode and nudged it a quarter of the way towards your rating of the show. A show the user loves (I Think You Should Leave, rated 8.5) has episodes only 4–10 people voted on, harshly, so its episodes came out at about 6. The user asked for the score to weigh towards their rating.
+
+The score now starts from your rating of the show, or the show's usual (the vote-weighted mean of its episodes) if you haven't rated it. TMDB then moves it up or down by how that episode compares with the show's usual, scaled by `votes / (votes + 20)`, so a handful of votes barely moves it. Neighbours no longer come into it. Your own episode rating still wins, and rewatches still add.
+
+You can rate an episode yourself by clicking its score on the show's page. It's meant for the odd one the score has wrong.

@@ -69,15 +69,16 @@ reload()
 
 sc = n.episode_scores(show)
 check("a well-voted episode keeps TMDB's rating", sc.get(g1) == 8.0, sc)
-mean_n = (8.0 * 500 + 6.0 * 400) / 900.0
-check("few votes: pulled towards the neighbours", mean_n < sc.get(g2, 0) < 9.5 and sc[g2] - mean_n < 9.5 - sc[g2],
-      (round(mean_n, 2), sc.get(g2)))
-season_mean = (8.0 * 500 + 9.5 * 3 + 6.0 * 400) / 903.0
-check("no votes: the season's average", abs(sc.get(g4, 0) - season_mean) <= 0.05, (round(season_mean, 2), sc.get(g4)))
+show_mean = (8.0 * 500 + 9.5 * 3 + 6.0 * 400) / 903.0
+check("few votes: barely moved from the show's usual", show_mean < sc.get(g2, 0) < 9.5
+      and sc[g2] - show_mean < 9.5 - sc[g2], (round(show_mean, 2), sc.get(g2)))
+check("no votes: the show's usual", abs(sc.get(g4, 0) - show_mean) <= 0.05, (round(show_mean, 2), sc.get(g4)))
 setsql("UPDATE episodes SET userrating=10 WHERE id=?", g3)
 check("your own rating wins", n.episode_scores(show).get(g3) == 10.0)
 setsql("UPDATE shows SET userrating=9 WHERE id=?", show)
-check("your show rating nudges a quarter of the way", n.episode_scores(show).get(g1) == 8.5, n.episode_scores(show).get(g1))
+_want = round(9 + (8.0 - show_mean) * 500 / 520.0, 1)
+check("your show rating is where its episodes start", n.episode_scores(show).get(g1) == _want,
+      (n.episode_scores(show).get(g1), _want))
 setsql("UPDATE shows SET userrating=0 WHERE id=?", show)
 for _ in range(3):
     setsql("INSERT INTO history (at,kind,item_id,title,event) VALUES ('2026-10-01 20:00:00','episode',?,'E1','watched')", g1)
@@ -106,7 +107,8 @@ for _ in range(2):
     setsql("INSERT INTO history (at,kind,item_id,title,event) VALUES ('2026-10-01 20:00:00','episode',?,'E1','watched')", g1)
 d = n.show_detail(show)
 eps = {e["id"]: e for s_ in d["seasons"] for e in s_["episodes"]}
-check("show_detail: a score on every episode it can score", eps[g1]["score"] is not None and eps[g6]["score"] == 8.8,
+check("show_detail: a score on every episode it can score",
+      eps[g1]["score"] is not None and eps[g6]["score"] > eps[g5]["score"],
       {k: v["score"] for k, v in eps.items()})
 check("and on every season", all(s_.get("score") is not None for s_ in d["seasons"]),
       [(s_["season"], s_.get("score")) for s_ in d["seasons"]])
@@ -186,6 +188,27 @@ got = n.channel_blocks(favstv)
 n.episode_scores = _real
 check("a scoring error leaves the channel unweighted, not broken", len(got) == len(n.channel_blocks(plain)),
       (len(got), len(n.channel_blocks(plain))))
+
+# --- Weighted to your rating (2026-10-24) ------------------------------------------------
+# A show you love whose episodes only a handful voted on, harshly — I Think
+# You Should Leave, in the user's library: 4-10 votes an episode, 4.6-7.4,
+# show 7.0 on TMDB and 8.5 from you. Its episodes should sit near your 8.5.
+conn = n.db()
+itysl = conn.execute("INSERT INTO shows (name,title,tmdb_id,tmdb_rating,userrating) VALUES "
+                     "('sketch','Sketch','880005',7.0,8.5)").lastrowid
+sk = [conn.execute("INSERT INTO episodes (path,show_id,season,episode,title,runtime,tmdb_rating,tmdb_votes)"
+                   " VALUES (?,?,1,?,?,1800,?,?)", ("X:/sk/%d.mkv" % k, itysl, k, "S%d" % k, r, v)).lastrowid
+      for k, (r, v) in enumerate([(5.0, 5), (6.5, 10), (4.6, 5), (7.4, 5), (5.7, 6), (6.8, 6)], 1)]
+conn.commit(); conn.close()
+reload()
+ks = n.episode_scores(itysl)
+check("a show you rate 8.5 whose episodes few voted on: they sit near 8.5",
+      all(8.0 <= ks[k] <= 9.0 for k in sk), [ks[k] for k in sk])
+check("and still in TMDB's order", ks[sk[3]] == max(ks[k] for k in sk) and ks[sk[2]] == min(ks[k] for k in sk),
+      [ks[k] for k in sk])
+# Rating one yourself, from its score on the page.
+check("the page: the score is a button that opens the rating bar for that episode",
+      "rate_type: 'episode'" in n.PAGE and "'epscore'" in n.PAGE and "button" in n.PAGE[n.PAGE.find("function episodeRow("):][:3000])
 
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
