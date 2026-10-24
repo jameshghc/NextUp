@@ -24043,7 +24043,7 @@ function remoteIdleRender(st, away, alive){
   remoteHeroMode = last ? 'last' : (idle && pick ? 'pick' : null);
   $('#rm_hero').classList.toggle('hidden', !remoteHeroMode);
   if(remoteHeroMode === 'last'){
-    remoteHero(last.art, 'Last on the PC', last.title, last.sub, last.percent, last.note, 'CONTINUE FROM PC');
+    remoteHero(last.art, 'Last on the PC', last.title, last.sub, last.percent, last.note, 'CONTINUE ON PC');
   } else if(remoteHeroMode === 'pick'){
     remoteHero(pick.art, 'Tonight\u2019s pick', pick.title,
                [pick.year, (pick.genres || [])[0], pick.runtime ? pick.runtime + ' min' : ''].filter(Boolean).join(' \u00B7 '),
@@ -24201,7 +24201,7 @@ function remoteBuild(){
       </div>
       <div class="rmherobtns">
         <button class="iconbtn rmreroll hidden" id="rm_reroll" aria-label="Another pick">\u21BB</button>
-        <button class="play rmpower" id="rm_power"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 3v8"/><path d="M6.3 6.8a8 8 0 1 0 11.4 0"/></svg><span id="rm_powerlabel">CONTINUE FROM PC</span></button>
+        <button class="play rmpower" id="rm_power"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 3v8"/><path d="M6.3 6.8a8 8 0 1 0 11.4 0"/></svg><span id="rm_powerlabel">CONTINUE ON PC</span></button>
       </div>
     </div>
     <div class="rmhint" id="rm_hint">Pick something in Library and choose \u25B6\uFE0E ON PC, or start a channel below.</div>

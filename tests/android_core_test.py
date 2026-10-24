@@ -292,7 +292,7 @@ check("Remote: Continue where you left off, under the hint when idle and under t
       and "const parts = [$('#rm_onnow'), $('#rm_cont'), $('#rm_surprise')];" in page_src
       and "if(view === 'remote' && pcLinkUp) remoteContinue();" in page_src)
 check("Remote idle: a status line, Continue from PC, On now with pictures, and a pick",
-      'id="rm_status"' in page_src and "CONTINUE FROM PC" in page_src and 'id="rm_onnow"' in page_src
+      'id="rm_status"' in page_src and "CONTINUE ON PC" in page_src and 'id="rm_onnow"' in page_src
       and 'id="rm_surprise"' in page_src and "Nothing playing on the PC" in page_src)
 check("phone Favourites shows every favourite, not just the ones on the phone",
       "favWidened = true" in page_src)
