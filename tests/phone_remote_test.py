@@ -55,7 +55,8 @@ film = film_playing()
 
 # --- Task 1: one set of actions ----------------------------------------------------------
 check("the actions are named", set(n.REMOTE_ACTIONS) == {"volume", "toggle", "channel", "delay", "episode",
-                                                          "skip", "subtitles", "stop", "seek", "afk"})
+                                                          "skip", "subtitles", "stop", "seek", "afk",
+                                                          "fullscreen", "power"})
 a = n.remote_do("volume", {"delta": 5}); b = n.remote_do("volume", {"delta": 5})
 check("volume +5 twice: each answers with the state after it", a["volume"] == 55 and b["volume"] == 60,
       (a["volume"], b["volume"]))
@@ -118,6 +119,7 @@ def call(method, path, body=None, tok=token):
 PLAYED = []
 n.require_media_file = lambda path: path
 n.mpv_play = lambda path, start=0, keep_open=False: PLAYED.append((path, int(start or 0))) or Alive()
+REAL_NOTE = n.note_now_playing
 n.note_now_playing = lambda proc, kind, item_id, title, **k: n.NOW_PLAYING.update(
     type=kind, id=item_id, title=title, position=None, duration=None, channel=None, channel_id=None)
 
@@ -236,6 +238,53 @@ n.PLATFORM = "windows"
 _copy = re.search(r'const PC_AWAY_COPY = "([^"]*)";', n.PAGE)
 check("the page recognises the phone server's 'PC gone' words exactly",
       _copy and _copy.group(1).replace("\u2019", "’") == n.PC_AWAY, (_copy and _copy.group(1), n.PC_AWAY))
+
+# --- Fullscreen and Power (2026-10-24) ---------------------------------------------------
+ALIVE[0] = True
+MPV["fullscreen"] = False
+SENT.clear()
+st = n.remote_do("fullscreen", {})
+check("FULLSCREEN puts the player fullscreen", MPV["fullscreen"] is True and st.get("fullscreen") is True,
+      (MPV["fullscreen"], st.get("fullscreen")))
+time.sleep(0.8)
+check("and pulls it to the front (on top for a moment, then not)",
+      ("set_property", "ontop", True) in SENT and MPV.get("ontop") is False, [x for x in SENT if "ontop" in x])
+n.remote_do("fullscreen", {})
+check("pressed again, back to a window", MPV["fullscreen"] is False)
+ALIVE[0] = False
+check("FULLSCREEN with nothing playing says so", raises(n.remote_do, "fullscreen", {}) == "Nothing is playing.")
+
+# Power: whatever was last on, fullscreen.
+n.CONFIG.pop("last_sitting", None)
+check("POWER with nothing ever played says so", raises(n.remote_do, "power", {}))
+REAL_NOTE(Alive(), "movie", mv["id"], mv["title"])
+check("starting something remembers it for POWER", n.CONFIG.get("last_sitting", {}).get("id") == mv["id"],
+      n.CONFIG.get("last_sitting"))
+st = n.remote_state()
+check("the idle Remote can name it", st.get("last_title") == mv["title"], st.get("last_title"))
+PLAYED.clear(); MPV["fullscreen"] = False
+n.remote_do("power", {})
+ALIVE[0] = True
+time.sleep(1.0)
+check("POWER starts the last film again", PLAYED and PLAYED[-1][0] == mv["path"], PLAYED[-1:])
+check("fullscreen", MPV["fullscreen"] is True)
+ALIVE[0] = False
+conn = n.db()
+conn.execute("UPDATE episodes SET playcount=1, resume_pos=0 WHERE id=?", (e1,))
+conn.execute("UPDATE episodes SET playcount=0, resume_pos=0 WHERE id=?", (e2,))
+conn.commit(); conn.close()
+n.LIB.loaded_at = 0; n.LOCAL.loaded_at = 0
+n.CONFIG["last_sitting"] = {"kind": "episode", "id": e1, "channel_id": None}
+n.remote_do("power", {})
+check("an episode seen to the end: POWER plays the next", PLAYED[-1][0] == "X:/rt/s1e2.mkv", PLAYED[-1:])
+tuned = []
+_real_tune = n.tune_channel
+n.tune_channel = lambda channel, **k: tuned.append(channel["id"])
+n.CONFIG["last_sitting"] = {"kind": "movie", "id": mv["id"], "channel_id": "comedy"}
+n.remote_do("power", {})
+n.tune_channel = _real_tune
+check("a channel: POWER rejoins it", tuned == ["comedy"], tuned)
+check("the page has both buttons", 'data-a="fullscreen"' in n.PAGE and 'id="rm_power"' in n.PAGE)
 
 desk.shutdown()
 print("\n%d/%d passed" % (sum(results), len(results)))

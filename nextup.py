@@ -1020,10 +1020,9 @@ def build_tonight(kind, mood, max_mins, genre, count=3, exclude=None,
                 reason.append("on your watchlist")
             if recent_bonus(m) >= 0.8:
                 reason.append("added since your last scan")
-            if (m.get("userrating") or 0) >= 8:
-                reason.append("you've scored it %s/10" % m["userrating"])
-            if rating >= 7.5:
-                reason.append("well regarded — TMDB %.1f" % rating)
+            # No scores in the why: they're on the card for whoever wants
+            # them, and Now isn't the place to argue from them (asked for,
+            # 2026-10-24).
             if mins and mins <= 100:
                 reason.append("%s min, in and out" % mins)
             elif mins:
@@ -1037,7 +1036,7 @@ def build_tonight(kind, mood, max_mins, genre, count=3, exclude=None,
                 "genres": genres[:3], "art": art_url(m.get("art", {}).get("poster")),
                 "backdrop": m.get("backdrop"),
                 "plot": (m.get("plot") or "")[:280],
-                "why": " · ".join(reason[:3]) or "sitting there unrated",
+                "why": " · ".join(reason[:3]) or "from your shelf",
                 "score": score,
                 "rate_type": "movie", "rate_id": m["movieid"],
                 "rate_label": "Your rating",
@@ -1127,8 +1126,6 @@ def build_tonight(kind, mood, max_mins, genre, count=3, exclude=None,
                 why = "starts at %s" % code
             if plays >= 3:
                 why = ("%d episodes in the last %d days · " % (plays, HABIT_DAYS)) + why
-            elif (s.get("userrating") or 0) >= 8:
-                why = "you've scored it %s/10 · " % s["userrating"] + why
             if s.get("watchlisted"):
                 why = "on your watchlist · " + why
 
@@ -4259,6 +4256,14 @@ def note_now_playing(proc, kind, item_id, fallback_title, channel=None,
                            channel=channel, channel_id=channel_id,
                            position=None, duration=None)
     remember_playing(kind, item_id, channel_id, _KEEP_OPEN[0])
+    remember_last_sitting(kind, item_id, channel_id)
+
+
+def remember_last_sitting(kind, item_id, channel_id=None):
+    """What POWER on the phone's Remote starts again. Kept in the config,
+    not in the play state, which is wiped the moment playback stops."""
+    CONFIG["last_sitting"] = {"kind": kind, "id": item_id, "channel_id": channel_id}
+    save_json(CONFIG_PATH, CONFIG)
 
 
 def note_live_playing(proc, title, channel):
@@ -5990,14 +5995,6 @@ def show_detail(show_id):
 # the argument that actually applies to them.
 
 
-def ordinal_pct(value, population):
-    """Where this sits against your own shelf, as a percentage."""
-    if not population:
-        return None
-    below = sum(1 for v in population if v < value)
-    return int(round(100.0 * below / len(population)))
-
-
 def ensure_cast_lists():
     """Attach each owned film's cast and keyword lists to the in-memory
     library, once per load rather than once per query — library_index() and
@@ -6106,7 +6103,7 @@ def build_reasons(kind, item_id):
         item["tagline"] = row["tagline"] if row else ""
         item["country_list"] = as_list(row["country"]) if row else []
 
-    builders = [reason_director, reason_cast, reason_reception,
+    builders = [reason_director, reason_cast,
                 reason_themes, reason_series, reason_standout, reason_pitch]
     cards = []
     for build in builders:
@@ -6222,51 +6219,6 @@ def reason_cast(item, kind):
                     cast[:4], weight)
 
     return card("cast", "Who's in it", "Led by %s." % top, cast[:4], 3)
-
-
-def reason_reception(item, kind):
-    rating = item.get("rating") or 0
-    if not rating:
-        return None
-    others = [m.get("rating") or 0 for m in LIB.movies
-              if (m.get("rating") or 0) and m.get("movieid") != item.get("movieid")]
-    pct = ordinal_pct(rating, others)
-    chips = ["TMDB %.1f" % rating]
-
-    if pct is None:
-        return card("reception", "How it landed",
-                    "Scores %.1f on TMDB." % rating, chips, 3)
-
-    if pct >= 98:
-        mine = item.get("userrating") or 0
-        body = ("At %.1f it's the best-rated thing in your entire library, %s."
-                % (rating, "and you gave it %s yourself" % (round(mine * 2) / 2.0)
-                   if mine else "and you still haven't rated it"))
-        weight = 11
-    elif pct >= 75:
-        body = ("Scores %.1f on TMDB, better than %d%% of everything else you "
-                "own. One of the stronger files sitting there." % (rating, pct))
-        weight = 8 + (pct - 75) / 12.0
-    elif pct <= 5:
-        body = ("At %.1f it's about the worst-rated thing you own. Either a "
-                "guilty pleasure or a mistake — only one way to find out."
-                % rating)
-        weight = 5
-    elif pct <= 25:
-        body = ("Scores %.1f, which only beats %d%% of your library. Low "
-                "expectations are the right approach." % (rating, pct))
-        weight = 4
-    else:
-        body = "Scores %.1f on TMDB, middle of the pack for your shelf." % rating
-        weight = 3
-
-    # A percentile is only worth printing when it's actually flattering or
-    # actually damning — "top 100%" means nothing.
-    if pct >= 60:
-        chips.append("better than %d%% of your shelf" % pct)
-    elif pct <= 20:
-        chips.append("bottom %d%% of your shelf" % max(1, pct + 1))
-    return card("reception", "How it landed", body, chips, weight)
 
 
 def reason_themes(item, kind):
@@ -12127,10 +12079,14 @@ def remote_state():
         "afk": afk_state(),
         # SKIP works on a channel, or on anything with a queue behind it.
         "queue_count": queue_count(),
+        "fullscreen": False,
+        # What POWER would start again, for the button when nothing's on.
+        "last_title": last_sitting_label(),
     }
     if alive:
         state["volume"] = int(round(mpv_get("volume", 0) or 0))
         state["muted"] = bool(mpv_get("mute", False))
+        state["fullscreen"] = bool(mpv_get("fullscreen", False))
         state["paused"] = bool(mpv_get("pause", False))
         # One question about the tracks rather than four about the ids and
         # their languages — and this one also says how many there ARE, which
@@ -12281,6 +12237,84 @@ def phone_remote_state(state=None):
     return state
 
 
+def mpv_to_front():
+    """Bring the player in front of everything. Windows won't let an app in
+    the background simply take the focus, but a window set always-on-top
+    rises above the rest; set back at once, it stays there and behaves like
+    any other window afterwards."""
+    def pulse():
+        try:
+            mpv_command("set_property", "ontop", True)
+            time.sleep(0.4)
+            mpv_command("set_property", "ontop", False)
+        except Exception:
+            pass
+    threading.Thread(target=pulse, daemon=True, name="mpv to front").start()
+
+
+def mpv_fullscreen(on=None):
+    """Fullscreen (or not; None turns it over), and in front."""
+    if on is None:
+        on = not mpv_get("fullscreen", False)
+    mpv_command("set_property", "fullscreen", bool(on))
+    if on:
+        mpv_to_front()
+
+
+def mpv_fullscreen_soon(timeout=10.0):
+    """Fullscreen once a player just started is answering."""
+    def wait():
+        end = time.time() + timeout
+        while time.time() < end:
+            if mpv_alive():
+                try:
+                    mpv_fullscreen(True)
+                    return
+                except Exception:
+                    pass
+            time.sleep(0.25)
+    threading.Thread(target=wait, daemon=True, name="fullscreen soon").start()
+
+
+def last_sitting_label():
+    """What POWER would start, in words, or None."""
+    last = CONFIG.get("last_sitting") or {}
+    if last.get("channel_id"):
+        channel = next((c for c in CHANNELS if c["id"] == last["channel_id"]), None)
+        return channel["name"] if channel else None
+    if last.get("kind") in ("movie", "episode") and last.get("id"):
+        try:
+            title, sub, _art = _play_display(last["kind"], last["id"])
+        except Exception:
+            return None
+        return title or None
+    return None
+
+
+def play_last():
+    """POWER: whatever was last on, fullscreen. A channel is rejoined where
+    its schedule has got to; a film resumes; an episode carries the show on
+    (the next one if it was seen to the end, as the show's own PLAY does)."""
+    last = CONFIG.get("last_sitting") or {}
+    if last.get("channel_id"):
+        channel = next((c for c in CHANNELS if c["id"] == last["channel_id"]), None)
+        if not channel:
+            raise AppError("That channel isn't there any more.")
+        tune_channel(channel)
+    elif last.get("kind") == "movie" and last.get("id"):
+        play_local("movie", int(last["id"]), resume=True)
+    elif last.get("kind") == "episode" and last.get("id"):
+        LIB.load()
+        ep = next((e for e in LIB.episodes if e.get("episodeid") == last["id"]), None)
+        if not ep:
+            raise AppError("That episode isn't on this PC any more.")
+        nxt = (show_detail(ep.get("tvshowid")) or {}).get("next_up") or ep["episodeid"]
+        play_local("episode", int(nxt), resume=True)
+    else:
+        raise AppError("Nothing's been played on this PC yet — pick something to start.")
+    mpv_fullscreen_soon()
+
+
 def play_on_pc(kind, tmdb, season=None, episode=None, resume=True):
     """Start something here because the phone asked: a film, an episode, or
     a show — this PC's next-up episode of it, the one its own PLAY would
@@ -12327,7 +12361,7 @@ def play_on_pc(kind, tmdb, season=None, episode=None, resume=True):
 # Everything a remote can do, for the desktop remote window and the paired
 # phone alike: one set, so the two can never drift apart.
 REMOTE_ACTIONS = ("volume", "toggle", "channel", "delay", "episode", "skip",
-                  "subtitles", "stop", "seek", "afk")
+                  "subtitles", "stop", "seek", "afk", "fullscreen", "power")
 
 
 def remote_do(action, data):
@@ -12336,7 +12370,7 @@ def remote_do(action, data):
     if action not in REMOTE_ACTIONS:
         raise AppError("No such control.")
     data = data or {}
-    if action in ("volume", "toggle", "delay", "seek") and not mpv_alive():
+    if action in ("volume", "toggle", "delay", "seek", "fullscreen") and not mpv_alive():
         raise AppError("Nothing is playing.")
     if action == "volume":
         if data.get("value") is not None:
@@ -12401,6 +12435,10 @@ def remote_do(action, data):
         return dict(remote_state(), subtitles=result)
     elif action == "stop":
         stop_current_playback()
+    elif action == "fullscreen":
+        mpv_fullscreen()
+    elif action == "power":
+        play_last()
     elif action == "seek":
         # Absolute, always: a relative jump from a stale position would
         # land somewhere else. Kept inside the file — dragging the bar to
@@ -17699,6 +17737,15 @@ body.customround :is(.settings,.pick,.alt,.hubcard,.card,.coll,.dirblock,.profil
    column on a portrait phone; side by side in landscape. */
 .rmcol{display:flex;flex-direction:column;gap:12px;min-width:0}
 .rmhint{display:none;font-size:14px;line-height:1.5;color:var(--muted)}
+/* POWER, when nothing's on: the last thing, started again fullscreen. */
+.rmpower{display:flex;align-items:center;gap:14px;width:100%;min-height:64px;padding:12px 18px;
+  text-align:left;border-radius:var(--r-card)}
+.rmpower.hidden{display:none}
+.rmpower svg{flex:none}
+.rmpower span{display:flex;flex-direction:column;min-width:0}
+.rmpower small{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;opacity:.7}
+.rmpower b{font-size:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rmfull svg{display:block;margin:auto}
 /* Nothing playing, or the PC away: say what to do, not a wall of dead
    buttons. The channels stay — they're a way to start something. */
 #view-remote.rmidle .rmhint{display:block}
@@ -23883,6 +23930,7 @@ function remoteBuild(){
       <img id="rm_art" alt="">
       <div><div class="rmtitle" id="rm_title"></div><div class="rmsub" id="rm_sub"></div></div>
     </div>
+    <button class="play rmpower hidden" id="rm_power" data-a="power"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 3v8"/><path d="M6.3 6.8a8 8 0 1 0 11.4 0"/></svg><span><small>Carry on</small><b id="rm_powertitle"></b></span></button>
     <div class="rmhint" id="rm_hint">Pick something in Library and choose \u25B6\uFE0E ON PC, or start a channel below.</div>
     <div class="rmseek"><span id="rm_pos">0:00</span><input type="range" id="rm_seek" min="0" max="1" step="1" value="0" aria-label="Position"><span id="rm_left">0:00</span></div>
     <div class="rmrow rmtransport">
@@ -23890,6 +23938,7 @@ function remoteBuild(){
       <button class="play" id="rm_pause" data-a="pause" aria-label="Play or pause">\u23EF\uFE0E</button>
       <button class="iconbtn" data-a="fwd30" aria-label="Forward 30 seconds">30 \u23E9\uFE0E</button>
       <button class="iconbtn" data-a="stop" aria-label="Stop">\u25A0\uFE0E</button>
+      <button class="iconbtn rmfull" id="rm_full" data-a="fullscreen" aria-label="Fullscreen"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
     </div>
     <div class="rmmsg" id="rm_msg"></div>
     <div class="rmrow rmmoves" id="rm_moves">
@@ -23917,6 +23966,7 @@ function remoteBuild(){
     delaydown: ['delay', {delta: -100}], delayup: ['delay', {delta: 100}],
     subs: ['toggle', {what: 'sub'}], findsubs: ['subtitles', {}], audio: ['toggle', {what: 'audio'}],
     prevep: ['episode', {step: -1}], nextep: ['episode', {step: 1}], skip: ['skip', {}], stop: ['stop', {}],
+    fullscreen: ['fullscreen', {}], power: ['power', {}],
   };
   v.querySelectorAll('[data-a]').forEach(b => {
     b.onclick = () => remoteSend(...acts[b.dataset.a]);
@@ -23941,6 +23991,13 @@ function remoteRender(st){
   if(alive && st.art){ if(art.getAttribute('src') !== st.art) art.src = st.art; art.classList.remove('hidden'); }
   else art.classList.add('hidden');
   $('#view-remote').classList.toggle('rmidle', !alive);
+  /* POWER: what was last on, to start again fullscreen. Only when nothing
+     is, and only when there's something to name. */
+  const last = !away && !alive && st.last_title;
+  $('#rm_power').classList.toggle('hidden', !last);
+  $('#rm_powertitle').textContent = last || '';
+  $('#rm_full').classList.toggle('on', !!(alive && st.fullscreen));
+  $('#rm_full').setAttribute('aria-pressed', String(!!(alive && st.fullscreen)));
   const cont = $('#rm_cont');
   const home = alive ? $('#rm_presets') : $('#rm_hint');
   if(cont.previousElementSibling !== home) home.after(cont);

@@ -86,5 +86,19 @@ rest = [i["title"] for i in got[3:40]]
 check("and never-watched after, A to Z", rest == sorted(rest, key=n.norm_title), rest[:6])
 check("the Sort list offers it", '<option value="watched">Recently watched</option>' in n.PAGE)
 
+# --- Now doesn't argue from ratings (asked for, 2026-10-24) -------------------------------
+# The scores are on the card; the reasons are about the thing itself.
+n.LIB.loaded_at = 0
+n.LIB.load()
+_best = max((m for m in n.LIB.movies if m.get("rating")), key=lambda m: m["rating"])
+n.set_rating("movie", _best["movieid"], 9) if hasattr(n, "set_rating") else None
+_cards = n.build_reasons("movie", _best["movieid"])
+check("no 'best-rated / worst-rated in your library' card",
+      not any(c["kind"] == "reception" for c in _cards) and not hasattr(n, "reason_reception"),
+      [c["kind"] for c in _cards])
+_whys = [p["why"] for kind in ("film", "tv") for p in n.build_tonight(kind, "any", 0, "", count=12)]
+check("the pick's why doesn't quote your score or TMDB's",
+      _whys and not any(("scored it" in w) or ("TMDB" in w) or ("unrated" in w) for w in _whys), _whys[:6])
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
