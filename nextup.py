@@ -17123,6 +17123,13 @@ body.android .tile.elsewhere .cap{padding-bottom:26px}
   box-shadow:0 24px 70px rgba(0,0,0,.6);
 }
 .sheetbody img{width:180px;aspect-ratio:2/3;object-fit:cover;border-radius:3px;background:var(--ink-3)}
+/* A show's page: wider, with the people down the left under the poster and
+   the episodes on the right (see openShow). */
+.sheetbody.showsheet{max-width:1040px;grid-template-columns:220px minmax(0,1fr)}
+.sheetbody.showsheet > img{width:220px}
+.showsheet .showside{grid-column:1;display:flex;flex-direction:column;gap:18px;min-width:0}
+.showsheet .showside .castgrid{grid-template-columns:minmax(0,1fr);gap:6px}
+.showsheet .showeps{grid-column:2;min-width:0}
 .sheetbody h2{font-family:var(--display);font-weight:800;font-size:30px;margin:0 0 4px;
   line-height:1.08;letter-spacing:-.02em}
 /* three separate cards, not one long one — the dimmed backdrop between them
@@ -17887,6 +17894,11 @@ header.mast .libplaces.offview{visibility:hidden}
   .sheetstack{grid-template-columns:minmax(0,1fr);gap:12px}
   .sheetpanel,.sheetbody{padding:18px}
   .sheetpanel.main,.sheetbody{grid-template-columns:minmax(0,1fr);gap:14px}
+  /* A show's page too: one column, people then episodes. */
+  .sheetbody.showsheet{grid-template-columns:minmax(0,1fr)}
+  .showsheet .showside,.showsheet .showeps{grid-column:auto}
+  .sheetbody.showsheet > img{width:150px}
+  .showsheet .showside .castgrid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}
   .sheetpanel.main img,.sheetbody img{width:150px}
   .sheetpanel h2,.sheetbody h2{font-size:28px}
   .castgrid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}
@@ -21697,12 +21709,22 @@ async function openShow(id){
   };
   col.append(fav);
   if(d.facts && d.facts.length) col.append(factStrip(d.facts));
-  if(d.creators && d.creators.length) col.append(faceRow(d.creators, 'Created by', body));
-  if(d.cast && d.cast.length) col.append(faceRow(d.cast.slice(0,8), 'Cast', body));
-
-  const seasons = d.seasons || [];
-  if(seasons.length) col.append(seasonBrowser(d, seasons));
   body.append(col);
+
+  /* Wider than it is tall, on the PC: who made it and who's in it down the
+     left under the poster, the episodes (Best, then the seasons) beside
+     them. On the phone it's one column, in this same order. */
+  body.classList.add('showsheet');
+  const side = el('div', 'showside');
+  if(d.creators && d.creators.length) side.append(faceRow(d.creators, 'Created by', body));
+  if(d.cast && d.cast.length) side.append(faceRow(d.cast.slice(0,8), 'Cast', body));
+  if(side.children.length) body.append(side);
+  const seasons = d.seasons || [];
+  if(seasons.length){
+    const eps = el('div', 'showeps');
+    eps.append(seasonBrowser(d, seasons));
+    body.append(eps);
+  }
 }
 
 /* A season at a time, opened at whichever one you're in the middle of.
