@@ -1826,6 +1826,10 @@ LATER_COLUMNS = [
     ("shows", "rated_at", "TEXT"),
     ("episodes", "rated_at", "TEXT"),
     ("episodes", "last_played", "TEXT"),
+    # TMDB's own rating of each episode, and how many voted: what a season
+    # and an episode score is worked out from (episode_scores).
+    ("episodes", "tmdb_rating", "REAL"),
+    ("episodes", "tmdb_votes", "INTEGER"),
     ("episodes", "plot", "TEXT"),
     # Audio delay set for this file, in ms — put back whenever it plays.
     ("movies", "audio_delay", "INTEGER"),
@@ -3097,7 +3101,7 @@ def enrich_episode_titles(conn, progress=None):
     seasons = conn.execute(
         "SELECT DISTINCT e.show_id, e.season, s.tmdb_id"
         " FROM episodes e JOIN shows s ON s.id = e.show_id"
-        " WHERE (e.title IS NULL OR e.runtime IS NULL) AND e.season > 0"
+        " WHERE (e.title IS NULL OR e.runtime IS NULL OR e.tmdb_votes IS NULL) AND e.season > 0"
         " AND s.tmdb_id IS NOT NULL").fetchall()
     done = 0
     for index, row in enumerate(seasons):
@@ -3116,12 +3120,16 @@ def enrich_episode_titles(conn, progress=None):
             if not info:
                 continue
             still = info.get("still_path")
+            # The rating comes in the same reply; 0 votes is stored as 0 rather
+            # than left empty, so the season isn't asked for again.
             conn.execute(
-                "UPDATE episodes SET title=?,plot=?,still=?,runtime=? WHERE id=?",
+                "UPDATE episodes SET title=?,plot=?,still=?,runtime=?,tmdb_rating=?,tmdb_votes=?"
+                " WHERE id=?",
                 (info.get("name") or ("Episode %d" % ep["episode"]),
                  (info.get("overview") or "")[:1000],
                  POSTER + still if still else None,
-                 (info.get("runtime") or 0) * 60, ep["id"]))
+                 (info.get("runtime") or 0) * 60,
+                 float(info.get("vote_average") or 0), int(info.get("vote_count") or 0), ep["id"]))
             done += 1
     conn.commit()
     return done
@@ -3498,6 +3506,7 @@ class LocalLibrary(object):
             "title": r["title"] or ("Episode %d" % (r["episode"] or 0)),
             "plot": r["plot"] or "", "still": local_art(r["still"]),
             "playcount": r["playcount"] or 0, "runtime": r["runtime"] or 0,
+            "tmdb_rating": r["tmdb_rating"] or 0, "tmdb_votes": r["tmdb_votes"] or 0,
             "userrating": r["userrating"] or 0,
             "resume": {"position": r["resume_pos"] or 0, "total": r["resume_total"] or 0},
             "last_played": r["last_played"] or "",

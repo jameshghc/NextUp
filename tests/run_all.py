@@ -21,6 +21,7 @@ SUITES = [
     ("the look", "appearance_test.py"),
     ("closing to the tray", "tray_test.py"),
     ("short sittings", "short_sittings_test.py"),
+    ("episode scores", "episode_scores_test.py"),
     ("a friend's first run", "first_run_test.py"),
     ("are you still watching", "afk_test.py"),
     ("port release", "port_test.py"),
