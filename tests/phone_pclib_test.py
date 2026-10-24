@@ -205,6 +205,24 @@ check("the page: a PC show opens the full page while the PC is there, the simple
 check("the page: on the PC's show, episodes play HERE or ON PC, and the episode details come from the PC",
       "d.pc ? playChoice(" in _pg and "d.pc ? '/api/pcepisode?id=' : '/api/episode?id='" in _pg)
 
+# --- A PC film's page on the phone (2026-10-24) -------------------------------------------
+conn = n.db()
+_fm = conn.execute("SELECT id, tmdb_id FROM movies WHERE tmdb_id<>'' LIMIT 1").fetchone()
+conn.close()
+_pf = dget("/api/pcfilm?tmdb=" + _fm["tmdb_id"])
+check("the phone gets a PC film's whole page, marked as the PC's",
+      _pf.get("pc") is True and _pf.get("tmdb_id") == _fm["tmdb_id"] and _pf.get("title"),
+      {k: _pf.get(k) for k in ("pc", "tmdb_id", "title", "error")})
+check("its similar films carry their TMDB ids, to open from the phone",
+      all(f.get("tmdb_id") for f in _pf.get("similar") or []), [f.get("tmdb_id") for f in (_pf.get("similar") or [])][:3])
+check("a film the PC hasn't got says so", dget("/api/pcfilm?tmdb=no-such-film").get("error"))
+check("the page: a PC film's tile has DETAILS while the PC is there, opening the PC's page",
+      "function openPcFilm(" in n.PAGE and "openPcFilm(item.tmdb_id)" in n.PAGE)
+check("the page: the PC's film plays HERE or ON PC, and isn't rated or marked here",
+      "item.pc ? playChoice(" in n.PAGE)
+check("the page: a details window only shows once there's something in it, or after a moment",
+      ".sheet.loading{" in n.PAGE and "function sheetReady(" in n.PAGE)
+
 n.phone_link_stop()
 n.PC_LINK.update(checked=0)
 got = dget("/api/pcnow?kind=film")

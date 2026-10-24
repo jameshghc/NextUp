@@ -12470,6 +12470,27 @@ def phone_show(tmdb):
     return d
 
 
+def phone_film(tmdb):
+    """A film's whole page, as this PC has it, for the phone to draw: by
+    TMDB id, the similar films carrying theirs so the phone can open them."""
+    conn = db()
+    try:
+        row = conn.execute("SELECT id FROM movies WHERE tmdb_id=? ORDER BY id LIMIT 1", (str(tmdb),)).fetchone()
+        if not row:
+            return {"error": "The PC doesn't have that film."}
+        d = movie_detail_payload(row["id"])
+        if not isinstance(d, dict) or d.get("error"):
+            return d if isinstance(d, dict) else {"error": "The PC doesn't have that film."}
+        for f in d.get("similar") or []:
+            got = conn.execute("SELECT tmdb_id FROM movies WHERE id=?", (f.get("id"),)).fetchone()
+            f["tmdb_id"] = str(got["tmdb_id"] or "") if got else ""
+    finally:
+        conn.close()
+    d = _phone_art_deep(d)
+    d.update(pc=True, tmdb_id=str(tmdb))
+    return d
+
+
 def phone_episode(episode_id):
     """One episode's details (episode_info), by this PC's own id."""
     got = episode_info(episode_id)
@@ -13536,6 +13557,8 @@ class PhoneHandler(BaseHTTPRequestHandler):
                 return self.send_json(phone_channels())
             if route == "/phone/show":
                 return self.send_json(phone_show((query.get("tmdb") or [""])[0]))
+            if route == "/phone/film":
+                return self.send_json(phone_film((query.get("tmdb") or [""])[0]))
             if route == "/phone/episode":
                 try:
                     return self.send_json(phone_episode(int((query.get("id") or ["0"])[0])))
@@ -14692,12 +14715,13 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/remote/state":
                 return self.send_json(remote_state())
 
-            if route in ("/api/pcnow", "/api/pcgenres", "/api/pcchannels", "/api/pcshow", "/api/pcepisode"):
+            if route in ("/api/pcnow", "/api/pcgenres", "/api/pcchannels", "/api/pcshow", "/api/pcepisode",
+                         "/api/pcfilm"):
                 if PLATFORM != "android":
                     return self.send_json({"error": "only on the phone"}, 404)
                 target = {"/api/pcnow": "/phone/now", "/api/pcgenres": "/phone/genres",
                           "/api/pcchannels": "/phone/channels", "/api/pcshow": "/phone/show",
-                          "/api/pcepisode": "/phone/episode"}[route]
+                          "/api/pcepisode": "/phone/episode", "/api/pcfilm": "/phone/film"}[route]
                 qs = urllib.parse.urlparse(self.path).query
                 return self.send_json(pc_library_call(target + ("?" + qs if qs else "")))
 
@@ -16970,6 +16994,8 @@ body.android .tile.elsewhere.streamable .cap{padding-bottom:26px}
 .castchip small{font-family:var(--mono);font-size:10px;color:var(--muted)}
 
 /* the detail sheet */
+.sheet.loading{opacity:0;animation:sheetwait 0s linear .25s forwards}
+@keyframes sheetwait{to{opacity:1}}
 .sheet{
   /* Blur as well as dim: the library stays recognisably behind the sheet
      instead of vanishing into a black curtain, which is what places the
@@ -20623,6 +20649,11 @@ function tile(item){
       streamProblem(peek, r && r.error);
     };
     peek.append(go);
+    if(item.kind !== 'tvshow' && pcLinkUp){
+      const more = el('button','iconbtn peekdetails','DETAILS');
+      more.onclick = (e) => { e.stopPropagation(); closePeeks(); openPcFilm(item.tmdb_id); };
+      peek.append(more);
+    }
     if(item.kind === 'tvshow'){
       const more = el('button','iconbtn peekdetails','DETAILS');
       more.onclick = (e) => { e.stopPropagation(); closePeeks();
@@ -20835,6 +20866,7 @@ async function openElsewhereShow(tmdbId){
   body.classList.add('epsheet');
   body.append(el('p','empty','Loading…'));
   const d = await api('/api/elsewhere/episodes?tmdb_id=' + encodeURIComponent(tmdbId));
+  sheetReady(body);
   body.querySelector('.empty').remove();
   if(!d || d.error){ body.append(el('p','empty', esc((d && d.error) || 'Nothing here'))); return; }
   body.append(el('h2', null, esc(d.title || '')));
@@ -21494,8 +21526,15 @@ function sheetSwipe(back, body){
   });
 }
 
+/* A details window waits a moment before showing: a page that's ready by
+   then appears whole, rather than as "Loading…" for a blink first. */
+function sheetReady(body){
+  const back = body && body.closest('.sheet');
+  if(back) back.classList.remove('loading');
+}
+
 function sheet(){
-  const back = el('div','sheet');
+  const back = el('div','sheet loading');
   const body = el('div','sheetbody');
   body.style.position = 'relative';
   const x = el('button','closex','CLOSE ✕');
@@ -21515,11 +21554,16 @@ function sheet(){
   return body;
 }
 
-async function openFilm(id){
+/* A film the PC has and this phone hasn't, while the PC is on the Wi-Fi:
+   the PC's own page for it, playing HERE (streamed) or ON PC. */
+function openPcFilm(tmdb){ return openFilm(null, tmdb); }
+
+async function openFilm(id, pcTmdb){
   const body = sheet();
   body.append(el('p','empty','Loading…'));
 
-  const item = await api('/api/movie?id='+id);
+  const item = await api(pcTmdb ? '/api/pcfilm?tmdb=' + encodeURIComponent(pcTmdb) : '/api/movie?id='+id);
+  sheetReady(body);
   if(item.error){ body.innerHTML = '<p class="empty">'+esc(item.error)+'</p>'; return; }
 
   body.innerHTML = '';
@@ -21544,7 +21588,9 @@ async function openFilm(id){
   if(item.tagline) right.append(el('p','tagline', esc(item.tagline)));
   if(item.plot) right.append(el('p','plot', esc(item.plot)));
 
-  right.append(rateControl(
+  /* The PC's film: its id is the PC's, so nothing here rates or marks it. */
+  if(item.pc) right.append(el('div', 'nowsource', 'From the PC' + '\u2019' + 's library'));
+  else right.append(rateControl(
     {rate_type:'movie', rate_id:item.id, userrating:item.userrating},
     {onRated:() => { libraryChanged(); loadLibrary(); }}));
 
@@ -21584,8 +21630,13 @@ async function openFilm(id){
   };
   const fixToggle = el('button','iconbtn',
     item.identified === false ? 'FIX TITLE' : 'WRONG MATCH?');
-  btns.append(play, watch, fav, fixToggle);
-  right.append(btns, problem);
+  if(item.pc){
+    btns.append(item.pc ? playChoice({ident: {kind: 'movie', tmdb: item.tmdb_id}, type: 'movie', id: item.id}) : play);
+    right.append(btns);
+  } else {
+    btns.append(play, watch, fav, fixToggle);
+    right.append(btns, problem);
+  }
 
   const fixForm = el('div','fixform hidden');
   const fixTitle = el('input'); fixTitle.className = 'fixtitle';
@@ -21670,7 +21721,8 @@ async function openFilm(id){
       cap.append(el('small',null, esc([f.year, f.score ? 'you: '+fmtScoreShort(f.score) : null]
         .filter(Boolean).join('  ·  '))));
       card.append(cap);
-      card.onclick = () => { body.closest('.sheet').remove(); openFilm(f.id); };
+      card.onclick = () => { body.closest('.sheet').remove();
+        if(!item.pc) openFilm(f.id); else if(f.tmdb_id) openPcFilm(f.tmdb_id); };
       simGrid.append(card);
     });
     simPanel.append(simGrid);
@@ -21686,6 +21738,7 @@ async function openPerson(personId, name){
   body.append(el('p','empty','Loading…'));
   const p = await api('/api/person?id='+encodeURIComponent(personId||'')
                       +'&name='+encodeURIComponent(name||''));
+  sheetReady(body);
   body.innerHTML = '';
   body.className = 'sheetcolumn';
 
@@ -21800,6 +21853,7 @@ async function openShow(id, pcTmdb){
   body.append(right);
 
   const d = await api(pcTmdb ? '/api/pcshow?tmdb=' + encodeURIComponent(pcTmdb) : '/api/show?id='+id);
+  sheetReady(body);
   if(d.error){ right.innerHTML = '<p class="empty">'+esc(d.error)+'</p>'; return; }
 
   body.innerHTML = '';
@@ -22149,6 +22203,7 @@ async function openSuggestion(item, cardEl){
   const body = sheet();
   body.append(el('p', 'empty', 'Looking it up…'));
   const d = await api('/api/suggestion?' + new URLSearchParams({id: item.id, kind: item.kind === 'tv' ? 'tv' : 'movie'}));
+  sheetReady(body);
   body.innerHTML = '';
   const x = el('button', 'closex', 'CLOSE ✕');
   x.onclick = () => body.closest('.sheet').remove();
