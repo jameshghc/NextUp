@@ -122,5 +122,25 @@ check("a show with nothing to go on looks as it did",
       all(e["score"] is None for s_ in dd["seasons"] for e in s_["episodes"])
       and not dd.get("best") and all(s_.get("score") is None for s_ in dd["seasons"]), dd.get("best"))
 
+# --- Task 4: Non-stop Favs: TV leans to the better episodes -------------------------------
+setsql("UPDATE shows SET favourited_at=NULL")
+setsql("UPDATE movies SET favourited_at=NULL")
+setsql("UPDATE shows SET favourited_at='2026-10-01 20:00:00' WHERE id=?", show)
+favstv = next(c for c in n.CHANNELS if c["id"] == "favstv")
+plain = dict(favstv); plain.pop("weight_by_score", None)
+weighted = n.channel_blocks(favstv)
+unweighted = n.channel_blocks(plain)
+count = lambda blocks, eid: sum(1 for b in blocks if eid in (b.get("episode_ids") or []))
+check("better blocks come round more often",
+      count(weighted, g3) > count(weighted, g5) and count(weighted, g3) == 3, (count(weighted, g3), count(weighted, g5)))
+ids = lambda blocks: set(tuple(b.get("episode_ids") or []) for b in blocks)
+check("every block still comes round", ids(weighted) == ids(unweighted), (len(ids(weighted)), len(ids(unweighted))))
+check("the same day, the same order", [b["sub"] for b in n.channel_blocks(favstv)] == [b["sub"] for b in weighted])
+setsql("UPDATE shows SET favourited_at=NULL WHERE id=?", show)
+setsql("UPDATE shows SET favourited_at='2026-10-01 20:00:00' WHERE id=?", dull)
+check("a show with no scores builds as before", len(n.channel_blocks(favstv)) == len(n.channel_blocks(plain)))
+check("only the TV favourites channel is weighted",
+      [c["id"] for c in n.CHANNELS if c.get("weight_by_score")] == ["favstv"])
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

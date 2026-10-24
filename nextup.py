@@ -10881,7 +10881,10 @@ CHANNELS = [
     # to it still works.
     {"id": "favs", "name": "Non-stop Favs: Films", "type": "favourites", "film_only": True},
     {"id": "favstv", "name": "Non-stop Favs: TV", "type": "favourites", "tv_only": True,
-     "episode_block_size": 2},
+     "episode_block_size": 2,
+     # Still random, but the better episodes come round more often (asked
+     # for, 2026-10-24; see _weighted_by_score). The only channel that does.
+     "weight_by_score": True},
     # The other hand-filled one. Favourites is what you loved; this is what
     # you keep meaning to get to, which is a different evening entirely.
     {"id": "watchlist", "name": "The Watchlist", "type": "watchlist",
@@ -11157,6 +11160,32 @@ def channel_featured_person(channel, now=None):
     person, _ = rotating_person_films(field, channel.get("min_count", 4),
                                       solo_only=(ctype == "actor"))
     return person
+
+
+def _weighted_by_score(blocks):
+    """Better episodes come round more often: each block of episodes is in
+    the loop between one and three times, by its episodes' scores
+    (episode_scores) weighted (score - 4) squared and scaled across this
+    channel — the best three times, the weakest once, never left out. Still
+    shuffled by the channel's own seed, so a day's order holds."""
+    scores, weights = {}, {}
+    for b in blocks:
+        if b.get("kind") != "episodes":
+            continue
+        if b["showid"] not in scores:
+            scores[b["showid"]] = episode_scores(b["showid"])
+        got = [scores[b["showid"]][i] for i in b["episode_ids"] if i in scores[b["showid"]]]
+        if got:
+            weights[id(b)] = (max(sum(got) / len(got), 4.0) - 4.0) ** 2
+    if not weights:
+        return blocks
+    low, high = min(weights.values()), max(weights.values())
+    out = []
+    for b in blocks:
+        w = weights.get(id(b))
+        copies = 1 if w is None or high == low else 1 + int(round(2 * (w - low) / (high - low)))
+        out.extend(dict(b) for _ in range(copies))
+    return out
 
 
 def _episode_group_blocks(shows, block_size):
@@ -11452,6 +11481,8 @@ def channel_blocks(channel):
             blocks.extend(_episode_group_blocks(
                 [s for s in LIB.shows if s.get(flag)],
                 channel.get("episode_block_size", 1)))
+        if channel.get("weight_by_score"):
+            blocks = _weighted_by_score(blocks)
         blocks.sort(key=lambda b: (b["kind"], b.get("id") or b["showid"], b["sub"]))
         channel_rng(channel).shuffle(blocks)
         return blocks
