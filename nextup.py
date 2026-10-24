@@ -18056,8 +18056,9 @@ body:not(.onnow) #roomart{opacity:0}
    (.ppwash), drawn once per pick. */
 body.android #roomart{display:none}
 /* Without the blur, a see-through details page showed the Library through
-   it: on the phone they're solid. */
-body.android.glass :is(.sheetbody,.sheetpanel){background-color:rgba(18,18,22,.98)!important}   /* past the glass rule's #id */
+   it: on the phone they're solid, not see-through at all (asked for). */
+body.android :is(.sheetbody,.sheetpanel){background-color:#121216!important}   /* past the glass rule's #id */
+body.android .sheet{background:#0c0c10}       /* and nothing of the Library showing round it */
 body.android.glass *{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
 body.glass .phonepick{position:relative;overflow:hidden;isolation:isolate}
 .phonepick .ppwash{position:absolute;inset:-60px;z-index:-1;pointer-events:none;
