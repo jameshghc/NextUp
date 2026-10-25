@@ -10812,16 +10812,17 @@ def _daytime_key(title):
 
 CHANNELS = [
     {"id": "anything", "name": "Everything", "genres": []},
-    # 2 to 5 are films only, asked for: the front of the dial is somewhere to
-    # land on a film. Their television has homes further along — Saturday
+    # 2, 4 and 5 are films only, asked for: the front of the dial is somewhere
+    # to land on a film. Their television has homes further along — Saturday
     # Morning, Binge, All Day Daytime, Cartoon Swim — and on Everything.
+    # True Life, 3, is the other way round: documentary series only.
     # "Animation" alone isn't enough for Universal — South Park and
     # Invincible are animated but not remotely family viewing. Family/Kids
     # specifically is the bar; Animation on its own no longer qualifies.
     {"id": "kids", "name": "Universal",
      "genres": ["Family", "Kids"], "film_only": True},
     {"id": "docs", "name": "True Life",
-     "genres": ["Documentary"], "film_only": True},
+     "genres": ["Documentary"], "tv_only": True},
     {"id": "action", "name": "Action",
      "genres": ["Action", "Adventure", "Action & Adventure"], "film_only": True},
     {"id": "comedy", "name": "Comedy",

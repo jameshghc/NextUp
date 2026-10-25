@@ -79,8 +79,10 @@ n.LIB.loaded_at = 0
 n.CHANNELS.append({"id": "coldones", "name": "Cold Ones #22", "number": 22, "type": "youtube",
                    "source": "https://www.youtube.com/@ColdOnes/videos"})
 ch = n.CHANNELS[-1]
-check("channels 2 to 5 are films only",
-      all(c.get("film_only") for c in n.CHANNELS[1:5]), [(c["name"], c.get("film_only")) for c in n.CHANNELS[1:5]])
+check("channels 2, 4 and 5 are films only; 3 (True Life) is TV only",
+      all(n.CHANNELS[k].get("film_only") for k in (1, 3, 4))
+      and n.CHANNELS[2]["id"] == "docs" and n.CHANNELS[2].get("tv_only") and not n.CHANNELS[2].get("film_only"),
+      [(c["name"], c.get("film_only"), c.get("tv_only")) for c in n.CHANNELS[1:5]])
 
 def wait_fetch():
     for _ in range(300):
