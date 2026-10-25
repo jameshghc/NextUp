@@ -98,5 +98,39 @@ check("a stop the app saw keeps its place through a restart", ra["resume_pos"] =
 check("one it never saw end is still read as finished, as before", rb["resume_pos"] == 0 and rb["playcount"] == 1,
       tuple(rb))
 
+# --- 2026-10-25: flicking past on a channel ----------------------------------------
+# Changing channel had mpv save the outgoing film's place, and Continue showed
+# films that were only on for seconds, which History didn't list.
+k = n.db()
+d, e2 = [r[0] for r in k.execute("SELECT id FROM movies ORDER BY id LIMIT 2 OFFSET 5")]
+k.execute("UPDATE movies SET resume_pos=1500, resume_total=6000 WHERE id=?", (d,))
+k.execute("UPDATE movies SET resume_pos=0, resume_total=0 WHERE id=?", (e2,))
+k.commit(); k.close()
+n.stamp_played("movie", d)
+k = n.db(); k.execute("UPDATE movies SET resume_pos=4200 WHERE id=?", (d,)); k.commit(); k.close()   # mpv's save, folded in
+n.note_playback_finished("movie", d, 8, position=4210, duration=6000)
+check("a flick puts the place back where it was before", row(d)[0] == 1500, row(d))
+n.stamp_played("movie", e2)
+k = n.db(); k.execute("UPDATE movies SET resume_pos=4200 WHERE id=?", (e2,)); k.commit(); k.close()
+n.note_playback_finished("movie", e2, 8, position=4210, duration=6000)
+check("and one with no place before has none after", row(e2)[0] == 0, row(e2))
+
+k = n.db()
+k.execute("UPDATE movies SET resume_pos=4200, resume_total=6000, last_played=? WHERE id=?", (n.now_stamp(), e2))
+_p = k.execute("SELECT path FROM movies WHERE id=?", (e2,)).fetchone()[0]
+k.commit(); k.close()
+n._sync_watch_later(_p, 4200)        # mpv's own file, as a real one leaves
+n.log_event("movie", e2, "x", "tuned in via Comedy #5")
+n.LIB.loaded_at = 0
+check("Continue skips what was only tuned into", not any(c["type"] == "movie" and c["id"] == e2
+                                                         for c in n.build_resume_row(limit=0)))
+n.log_event("movie", e2, "x", "stopped", seconds=1800, position=4200, total=6000)
+n.LIB.loaded_at = 0
+check("but not a real stretch on a channel", any(c["type"] == "movie" and c["id"] == e2
+                                                 for c in n.build_resume_row(limit=0)))
+check("and an outgoing flick isn't saved by mpv at all",
+      "if not started or time.time() - started >= MIN_WATCH_SECONDS:\n        mpv_command(\"write-watch-later-config\")"
+      in open(n.__file__, encoding="utf-8").read())
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

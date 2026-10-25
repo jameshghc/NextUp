@@ -1233,6 +1233,24 @@ def build_resume_row(limit=4):
     """
     LIB.load()
     out = []
+    # Tuned into on a channel and never sat with: History doesn't list it,
+    # so Continue doesn't either. A real stretch on a channel is followed by
+    # a "stopped" or "watched", which takes it off this list.
+    flicked = set()
+    try:
+        conn = db()
+        for row in conn.execute(
+                "SELECT h.kind, h.item_id FROM history h"
+                " JOIN (SELECT kind, item_id, MAX(id) AS last FROM history"
+                "       WHERE kind IN ('movie','episode') AND item_id IS NOT NULL"
+                "       AND (event IN ('played','stopped','watched','next episode','previous episode')"
+                "            OR event LIKE 'tuned in via %' OR event LIKE 'next up on %')"
+                "       GROUP BY kind, item_id) x ON x.last = h.id"
+                " WHERE h.event LIKE 'tuned in via %' OR h.event LIKE 'next up on %'"):
+            flicked.add((row["kind"], row["item_id"]))
+        conn.close()
+    except Exception:
+        pass
 
     def entry(item, kind, item_id, title, sub, art):
         """One card, or None if this isn't far enough in to be one.
@@ -1246,7 +1264,7 @@ def build_resume_row(limit=4):
         """
         resume = item.get("resume") or {}
         position = resume.get("position") or 0
-        if position <= RESUME_FLOOR_SECONDS:
+        if position <= RESUME_FLOOR_SECONDS or (kind, item_id) in flicked:
             return None
         total = resume.get("total") or (item.get("runtime") or 0) * 60
         percent = int(100 * position / total) if total else 0
@@ -4097,7 +4115,12 @@ def _mpv_load(path, start, keep_open):
     in, but the argument list for it changed shape between mpv releases, so
     a plain load followed by a seek is kept as the fallback for older ones.
     """
-    mpv_command("write-watch-later-config")   # save where the outgoing file got to
+    # Save where the outgoing file got to — unless it was only on for
+    # moments (flicking channels), when there's nothing worth keeping.
+    with _PLAY_LOCK:
+        started = NOW_PLAYING.get("started_at") or 0
+    if not started or time.time() - started >= MIN_WATCH_SECONDS:
+        mpv_command("write-watch-later-config")
     mpv_command("set_property", "idle", "yes" if keep_open else "no")
 
     seek = int(start) if start and start > 5 else 0
@@ -4432,18 +4455,49 @@ def note_playback_finished(kind, item_id, ran_for, position=None, duration=None)
 # sitting of moments can put it back: flicking through five films shouldn't
 # make all five your most recently watched.
 _PRIOR_PLAYED = {}
+# And where it had got to. Changing channel has mpv save the outgoing file's
+# place, so flicking past a film on a channel 70 minutes in left it in
+# Continue at 70 minutes, though it was on for seconds and History, rightly,
+# didn't list it (asked about, 2026-10-25).
+_PRIOR_RESUME = {}
 
 
 def stamp_played(kind, item_id):
     """Mark something as played now, as it starts."""
     _PRIOR_PLAYED[(kind, item_id)] = LOCAL.field(kind, item_id, "last_played")
+    table = {"movie": "movies", "episode": "episodes"}.get(kind)
+    if table:
+        try:
+            conn = db()
+            row = conn.execute("SELECT path,resume_pos,resume_total FROM %s WHERE id=?" % table,
+                               (item_id,)).fetchone()
+            conn.close()
+            if row:
+                _PRIOR_RESUME[(kind, item_id)] = (row["path"], row["resume_pos"] or 0, row["resume_total"] or 0)
+        except Exception:
+            pass
     LOCAL.set_field(kind, item_id, "last_played", now_stamp())
 
 
 def unstamp_played(kind, item_id):
-    """It was closed within moments: "last played" goes back to what it was."""
+    """It was closed within moments: "last played" goes back to what it was,
+    and so does where it had got to."""
     if (kind, item_id) in _PRIOR_PLAYED:
         LOCAL.set_field(kind, item_id, "last_played", _PRIOR_PLAYED.pop((kind, item_id)))
+    prior = _PRIOR_RESUME.pop((kind, item_id), None)
+    table = {"movie": "movies", "episode": "episodes"}.get(kind)
+    if prior and table:
+        path, position, total = prior
+        try:
+            _sync_watch_later(path, position)
+            conn = db()
+            conn.execute("UPDATE %s SET resume_pos=?,resume_total=? WHERE id=?" % table,
+                         (position, total, item_id))
+            conn.commit()
+            conn.close()
+            LOCAL.loaded_at = 0
+        except Exception:
+            log_problem("putting back a place after a flick")
 
 
 def _note_playback_finished(kind, item_id, ran_for, position=None, duration=None):
@@ -4470,6 +4524,7 @@ def _note_playback_finished(kind, item_id, ran_for, position=None, duration=None
         unstamp_played(kind, item_id)
         return
     _PRIOR_PLAYED.pop((kind, item_id), None)
+    _PRIOR_RESUME.pop((kind, item_id), None)
     table = "movies" if kind == "movie" else "episodes"
     try:
         if position is not None and duration:
