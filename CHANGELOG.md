@@ -5,7 +5,7 @@ What changed in Next Up, version by version, newest first. Version numbers start
 ## 0.2.2 — 2026-10-25
 
 ### Headline
-- Home: the Library's new front page, where the app opens (the house before Films). Quick Suggest — the better episodes of shows you like and films you love that you haven't seen lately, plus a wildcard or two — and Continue, TV and films mixed, newest first. A tile plays (on the phone, it opens the details).
+- Home: the Library's new front page, where the app opens (the house before Films). Quick Suggest — the better episodes of shows you like and films you love that you haven't seen lately, plus a wildcard or two — and Continue, TV and films mixed, newest first. A tile plays (on the phone, it opens the details). On the PC both rows always fit the window: the tiles are the library's size when there's room and shrink to fit when there isn't.
 - Season and episode scores on a show's page: a score on each season tab and each episode, starting from your own rating of the show; a ★ in your accent colour after the show's five best episodes; a mark on unseen ones that should be good. Click a score to rate that episode yourself.
 - Click an episode's name for its details: picture, plot, air date, length, TMDB rating, director, writers and guest stars.
 - Closing Next Up on the PC hides it in the system tray, so the phone keeps working; click the icon to bring it back, right-click to quit, or switch it off in Settings › Playback.

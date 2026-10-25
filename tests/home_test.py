@@ -84,6 +84,8 @@ check("the page: wildcards aren't labelled (asked); the rows say Loading while t
       "'wildcard'" not in pg and "Loading" in pg[pg.find("async function loadHome("):][:600])
 check("the page: the wheel over a Home row never scrolls the page", "wheelSideways(strip, true)" in pg
       and "if(max <= 0 && !hold) return;" in pg)
+check("the page: on the PC the tiles size themselves so both rows fit the window",
+      "function sizeHome(" in pg and "var(--home-tile," in pg and "sizeHome();" in pg)
 check("the page: two rows, Quick Suggest and Continue, a tile plays",
       "Quick Suggest" in pg and "function loadHome(" in pg and "'tile hometile'" in pg)
 

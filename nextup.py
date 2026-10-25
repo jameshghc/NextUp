@@ -16015,7 +16015,7 @@ body{display:flex;flex-direction:column}
 .homesec{display:flex;flex-direction:column;gap:12px;min-width:0;margin-top:0}   /* not the page's usual section gap */
 .homehead{margin:0;font-family:var(--display);font-weight:700;font-size:19px}
 /* A row is the library's own tile size, six across, sliding for the rest. */
-.homerow{display:grid;grid-auto-flow:column;grid-auto-columns:calc((100% - 5 * 14px) / 6);gap:14px;
+.homerow{display:grid;grid-auto-flow:column;grid-auto-columns:var(--home-tile, calc((100% - 5 * 14px) / 6));gap:14px;
   overflow-x:auto;scrollbar-width:none;padding:2px 0 6px;scroll-snap-type:x proximity}
 .homerow::-webkit-scrollbar{display:none}
 .homerow .tile{scroll-snap-align:start}
@@ -20298,7 +20298,42 @@ async function loadHome(){
                  'Rate a few shows and films you love, and the best of them come back round here.', false));
   box.append(row('Continue where you left off', d['continue'] || [],
                  'Nothing part way through.', true));
+  sizeHome();
 }
+
+/* Both rows on the screen at once, whatever the window (asked for: no
+   scrolling by default). Tiles are the library's size when there's room —
+   six across — and only as much smaller as it takes for two rows to fit
+   the height there is. Windows' display scaling can leave a 1200 x 900
+   window 720 tall to the page, so this is measured, not assumed. The
+   phone keeps its two-across tiles and scrolls. */
+function sizeHome(){
+  if(document.body.classList.contains('android')) return;
+  const v = $('#view-home');
+  if(!v || !v.offsetParent) return;
+  const rows = [...v.querySelectorAll('.homerow')];
+  if(!rows.length) return;
+  const cs = getComputedStyle(v);
+  let fixed = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom)
+            + parseFloat(cs.rowGap || 0) * Math.max(0, v.children.length - 1);
+  v.querySelectorAll('.homesec').forEach(sec => {
+    const head = sec.querySelector('.homehead');
+    fixed += (head ? head.getBoundingClientRect().height : 0) + parseFloat(getComputedStyle(sec).rowGap || 0);
+    const empty = sec.querySelector('p.empty');
+    if(empty) fixed += empty.getBoundingClientRect().height;
+  });
+  const capEl = v.querySelector('.hometile .cap');
+  const cap = capEl ? capEl.getBoundingClientRect().height : 52;
+  const perRow = (v.clientHeight - fixed) / rows.length - 10;      // the row's own padding and borders
+  const fit = (perRow - cap) / 1.5;                                  // posters are 2:3
+  const full = (rows[0].clientWidth - 5 * 14) / 6;
+  v.style.setProperty('--home-tile', Math.max(90, Math.min(full, fit)) + 'px');
+}
+let homeSizing = null;
+window.addEventListener('resize', () => {
+  clearTimeout(homeSizing);
+  homeSizing = setTimeout(sizeHome, 80);
+});
 
 function homeTile(it, isCont, pc){
   const b = el('button', 'tile hometile');
