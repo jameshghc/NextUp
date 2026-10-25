@@ -16,6 +16,40 @@ at the top.
 
 ---
 
+## 2026-10-25 — v0.2.2, Home, episode scores, the tray, a Remote to choose from
+
+A long run of the user's requests between 0.2.1 and here; CHANGELOG.md has
+the list. The things worth knowing next time:
+
+- **Home** (`build_home`, `#view-home`, a Library panel like History): the
+  app opens on it (`libSection = 'home'`). Quick Suggest uses the episode
+  scores and `HOME_WILD_SHARE` of wildcards; Continue is `build_resume_row`.
+  The page's global `section{margin-top:40px}` bit it twice; `.homesec`
+  zeroes it.
+- **Episode scores** (`episode_scores`, `season_scores`; spec
+  `docs/superpowers/specs/2026-10-24-episode-scores-design.md`). They start
+  from your rating of the show; TMDB moves them by `votes/(votes+20)`.
+  Rewrote after a loved sketch show with harsh, thinly voted episodes came
+  out at 6. TMDB's per-episode rating, air date and credits are stored from
+  the season reply (`_store_season`); `refresh_unsettled_seasons` re-asks
+  fresh (`tmdb(..., fresh=True)`) for placeholder-named or recent seasons,
+  weekly — the TMDB cache never expires otherwise.
+- **The tray** (`Tray`, ctypes Shell_NotifyIcon, no new dependency):
+  pywebview's `destroy()` goes through the `closing` event, so the real Quit
+  sets `TRAY["quitting"]` first.
+- **Short sittings**: under `MIN_WATCH_SECONDS` nothing is recorded and
+  `last_played` is put back (`stamp_played` / `unstamp_played`).
+- **Quitting mid-episode**: mpv closed by us writes no watch-later file, and
+  `sync_playback_state` took "no file" as "finished". A last observed
+  'stopped' with a position now keeps the place.
+- **The phone**: details pages are solid (`!important` past the glass
+  rule's `#playingbar` specificity); the page asks `/api/cutout` itself
+  because app.py's call lands before the page exists; a PC show or film
+  opens the PC's page (`/phone/show`, `/phone/film`, `/phone/episode`,
+  passed through with `_pc_art_deep`).
+- Patch scripts: write them with the Write tool, not heredocs — a `\\0` in
+  a heredoc became a real NUL byte in nextup.py once (check for NULs).
+
 ## 2026-10-21 — v0.2.1, the phone draws on the PC's library
 
 The user: when the phone and PC are connected, the phone should work from

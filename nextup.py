@@ -115,7 +115,7 @@ ASSET_DIR = getattr(sys, "_MEIPASS", HERE)
 LOGO_PATH = os.path.join(ASSET_DIR, "nextup_logo.png")
 ICON_PATH = os.path.join(ASSET_DIR, "nextup.ico")
 
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.2.2"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -20003,13 +20003,16 @@ $('#chooserback').onclick = () => $('#spinback').click();
 
 /* A mouse wheel over a sideways strip moves the strip, not the page —
    while there's further for it to go. At either end the page has it back. */
-function wheelSideways(strip){
+/* hold: the wheel over the strip never scrolls the page, even at either
+   end (Home's rows — asked for: hovering a row and finding the page moved
+   instead was the surprise). Without it the page takes over at the ends. */
+function wheelSideways(strip, hold){
   strip.addEventListener('wheel', e => {
     if(Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;     // a trackpad's own sideways swipe
     const max = strip.scrollWidth - strip.clientWidth;
-    if(max <= 0) return;
+    if(max <= 0 && !hold) return;
     const step = e.deltaMode === 1 ? e.deltaY * 40 : e.deltaY;
-    if((step < 0 && strip.scrollLeft <= 0) || (step > 0 && strip.scrollLeft >= max - 1)) return;
+    if(!hold && ((step < 0 && strip.scrollLeft <= 0) || (step > 0 && strip.scrollLeft >= max - 1))) return;
     e.preventDefault();
     strip.scrollLeft += step;
   }, {passive: false});
@@ -20288,7 +20291,7 @@ async function loadHome(){
     const strip = el('div', 'homerow');
     items.forEach(it => strip.append(homeTile(it, isCont, fromPc && !d.error)));
     sec.append(strip);
-    wheelSideways(strip);
+    wheelSideways(strip, true);
     return sec;
   };
   box.append(row('Quick Suggest', d.suggest || [],

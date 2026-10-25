@@ -2,41 +2,51 @@
 
 What changed in Next Up, version by version, newest first. Version numbers start at 0.1.1; the work before that is grouped at the end under "Before 0.1".
 
-## 0.2.1 — 2026-10-21
+## 0.2.2 — 2026-10-25
 
 ### Headline
 - Home: the Library's new front page, where the app opens (the house before Films). Quick Suggest — the better episodes of shows you like and films you love that you haven't seen lately, plus a wildcard or two — and Continue, TV and films mixed, newest first. A tile plays (on the phone, it opens the details).
+- Season and episode scores on a show's page: a score on each season tab and each episode, starting from your own rating of the show; a ★ in your accent colour after the show's five best episodes; a mark on unseen ones that should be good. Click a score to rate that episode yourself.
+- Click an episode's name for its details: picture, plot, air date, length, TMDB rating, director, writers and guest stars.
+- Closing Next Up on the PC hides it in the system tray, so the phone keeps working; click the icon to bring it back, right-click to quit, or switch it off in Settings › Playback.
+- The phone's Remote, with nothing playing, is a place to choose: Continue on PC (the last thing, fullscreen), On now (the channels with what's on them), Continue where you left off, and one of tonight's picks. While something plays, Fullscreen also brings the player to the front.
+
+### Also new
+- The PC's now-playing bar has its own controls (previous and next episode, play/pause, mute, close the player), and its title opens what's playing.
+- On the phone, a second tap on a tile opens its details; with the PC connected, a show or film the phone hasn't got opens the PC's full page, playing HERE or ON PC.
+- The phone's Now page is redesigned: a box-sized poster with the facts beside it, everything on one screen, and the same buttons in the same places on every pick (what can't be done greyed out).
+- Channels: 2, 4 and 5 (Universal, Action, Comedy) are films only, 3 (True Life) mixes documentary films and series, Non-stop Favs is split into Films and TV (the TV one comes round to the better episodes more often), Al Jazeera moves to the end, Cold Ones is gone.
+- The Library's Sort list has Recently watched; with the PC connected the phone's Library opens on Show all, and Show and Sort share one line.
+- The show page is wider on the PC: who made it and who's in it down the left, the episodes beside them.
+- The Now page's reasons no longer quote ratings; the scores are still on the card.
+- The phone's header puts the version left of the camera hole and the counts to its right.
+
+### Fixes and polish
+- Quitting Next Up part way through an episode no longer has the next start mark it watched and move Continue on an episode.
+- A season added while it was still airing no longer keeps TMDB's placeholder names ("Episode 1") for good: newer and unnamed seasons are checked again on the library scan, at most once a week.
+- Anything closed within a minute, or flicked straight past, is no longer recorded: no History entry, no resume point, not counted as recently watched; old entries like that are hidden from History.
+- After a restart, the phone's link keeps trying if the previous copy of the app hasn't let go yet.
+- The phone finds its camera hole again (it was never told once the page had loaded), and its details pages are solid, with nothing of the Library showing through.
+- On the phone, Glass no longer flickers: no blurred page behind, the Now card wears its own poster colours.
+- Details windows wait a moment before showing, so a quick one appears whole rather than as "Loading…" for a blink.
+
+## 0.2.1 — 2026-10-21
+
+### Headline
 - When the phone can reach the PC, its Now page, Continue row and Channels come from the PC's full library.
 - Anything that can play either way offers the choice: ▶ HERE on the phone or ▶ ON PC on the big screen.
 - ▶ HERE plays the phone's own copy when it has one, and streams from the PC when it doesn't.
 
 ### Also new
-- The PC's now-playing bar has its own controls (previous and next episode, play/pause, mute, close the player), and its title opens what's playing.
-- Closing Next Up on the PC hides it in the system tray instead of quitting, so the phone keeps working; click the icon to bring it back, right-click to quit, or switch it off in Settings › Playback.
-- A pick from the PC says so in its label ("Now · from the PC"), and Channels says "Asking the PC what's on…" while it works out the schedule.
+- A pick from the PC says so, and Channels says "Asking the PC what's on…" while it works out the schedule.
 - A channel watched on the phone moves on to the next programme by itself; stopping it by hand ends it.
 - A channel joined from the phone starts at the point the schedule has reached.
-- The phone's Now page is redesigned: a box-sized poster with the facts, genres and why beside it, everything you need on one screen, and the plot and your rating below for whoever scrolls.
-- Channels 2, 4 and 5 (Universal, Action, Comedy) now show films only, while 3 (True Life) mixes documentary films and series; Al Jazeera moves to the end of the dial, Cold Ones is gone, and Non-stop Favs is split into Films and TV.
-- On the phone, every pick has the same buttons in the same places: HERE and ON PC, then Back, Next and Watchlist, with whatever can't be done greyed out.
-- The phone's Remote, with nothing playing, is a place to choose: Continue on PC (the last thing, fullscreen), On now (the channels with what's on them), Continue where you left off, and one of tonight's picks. While something plays there's a Fullscreen button that also brings the player to the front.
-- Season and episode scores on a show's page: a score on each season tab and each episode, a ★ in your accent colour after the names of the show's five best episodes, and a mark on unseen ones that should be good. Click an episode's name for its details: picture, plot, air date, length, TMDB rating, director, writers and guest stars. The scores start from your own rating of the show, and clicking one lets you rate that episode yourself. Non-stop Favs: TV comes round to the better episodes more often.
-- The Now page's reasons no longer quote ratings; the scores are still on the card.
-- The Remote shows Continue where you left off: under the message when nothing's playing, under the channels when something is.
-- The Library's Sort list has Recently watched: films by when you last played them, shows by their latest episode.
-- On the phone, a second tap on a tile opens its details; with the PC connected, a show the phone hasn't got opens the PC's full page for it (scores, stars, episode details), every episode playing HERE or ON PC. Episode rows put the name on its own line on a phone.
-- With the PC connected, the phone's Library opens on Show all, and Show and Sort share one line.
-- The phone's Now page is tidier: the chooser sits under Continue, the pick's buttons sit in two fixed rows that don't move, and no scroll bars take up space.
 
 ### Fixes and polish
 - ▶ ON PC on a poster's overlay now responds to a tap; before, the tap went through to the poster.
 - Fixed an error that could stop the phone's Now page loading when it first opened.
 - ON PC is offered for titles with no TMDB match, and a copy since removed from the phone streams instead.
 - A channel started from the phone no longer keeps relaunching itself.
-- A season added while it was still airing no longer keeps TMDB's placeholder names ("Episode 1") for good: newer and unnamed seasons are checked again on the library scan, at most once a week.
-- Quitting Next Up part way through an episode no longer has the next start mark it watched and move Continue on an episode; the place it stopped is kept.
-- Anything closed within a minute, or flicked straight past, is no longer recorded: no History entry, no resume point, and it doesn't count as recently watched. Old entries like that are hidden from History too.
-- After a restart, the phone's link keeps trying if the previous copy of the app hasn't let go yet.
 - A stray code showing instead of an apostrophe is fixed.
 
 ## 0.2.0 — 2026-10-20
