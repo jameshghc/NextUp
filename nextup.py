@@ -6133,14 +6133,14 @@ def episode_info(episode_id):
 #   Continue — what you're part way through, TV and films mixed, newest
 #   first (build_resume_row).
 
-HOME_SUGGEST = 8
+HOME_SUGGEST = 11
 HOME_CONTINUE = 8
 HOME_EPISODE_REST_DAYS = 30     # an episode seen more recently than this isn't suggested
 HOME_FILM_REST_DAYS = 180
-# Not everything by score: about this share of Quick Suggest is a wildcard,
-# drawn from the whole library — any film or show not seen lately — and
-# always at least one. Asked for, 2026-10-25.
-HOME_WILD_SHARE = 0.15
+# Not everything by score: this many of Quick Suggest are wildcards, drawn
+# from the whole library — any film or show not seen lately. Asked for,
+# 2026-10-25 (first ~15%, then three).
+HOME_WILD = 3
 
 
 def _days_ago_stamp(days):
@@ -6198,7 +6198,7 @@ def build_home():
             "score": m.get("userrating") or 0}))
     films.sort(key=lambda x: -x[0])
 
-    wild_n = max(1, int(round(HOME_SUGGEST * HOME_WILD_SHARE)))
+    wild_n = HOME_WILD
     suggest, tv, fm = [], [x[1] for x in shows], [x[1] for x in films]
     while len(suggest) < HOME_SUGGEST - wild_n and (tv or fm):
         for side in (tv, fm):
@@ -16014,6 +16014,8 @@ body{display:flex;flex-direction:column}
 #view-library.showing-home::-webkit-scrollbar,#view-library > #view-home::-webkit-scrollbar{display:none}
 .homesec{display:flex;flex-direction:column;gap:12px;min-width:0;margin-top:0}   /* not the page's usual section gap */
 .homehead{margin:0;font-family:var(--display);font-weight:700;font-size:19px}
+.homelink{align-self:flex-start;background:none;border:0;padding:0;color:var(--paper);cursor:pointer;text-align:left}
+.homelink:hover{color:var(--marigold)}
 /* A row is the library's own tile size, six across, sliding for the rest. */
 .homerow{display:grid;grid-auto-flow:column;grid-auto-columns:var(--home-tile, calc((100% - 5 * 14px) / 6));gap:14px;
   overflow-x:auto;scrollbar-width:none;padding:2px 0 6px;scroll-snap-type:x proximity}
@@ -16681,6 +16683,12 @@ section:first-child{margin-top:0}
 .resumerow{display:block;width:262px;max-width:100%}
 .searchrow{display:flex;gap:10px;flex-wrap:wrap;align-items:center;
   flex:1 1 auto;min-width:0;justify-content:flex-end}
+/* The Continue card that sat left of the toolbar has gone (Home has
+   Continue now); the toolbar takes the line: Sort and Show first, the
+   search box stretching between them and the buttons. */
+#view-library .libtopleft{display:none}
+#view-library .searchrow{justify-content:flex-start}
+#view-library .searchrow .searchbox{flex:1 1 260px;max-width:none}
 /* Labels sit BESIDE their control now rather than stacked above it. Stacked,
    the three of them cost about 20px of height each for three words. */
 .searchbox{flex:1 1 210px;max-width:340px;min-width:150px;
@@ -17463,7 +17471,7 @@ body.android .tile.elsewhere .cap{padding-bottom:26px}
    room to them; still there for anything reading the page aloud. */
 @media (orientation:portrait){
   body.android .searchrow{justify-content:flex-start}
-  body.android .searchrow .searchbox{flex:1 1 100%;max-width:none}
+  body.android .searchrow .searchbox{flex:1 1 100%;max-width:none;order:-1}
   body.android .searchrow label.f{flex:1 1 0;min-width:0}
   body.android .searchrow label.f > span{position:absolute;width:1px;height:1px;overflow:hidden;
     clip:rect(0 0 0 0);white-space:nowrap}
@@ -18769,18 +18777,6 @@ body:not(.android) #remotetab{display:none}
       </section>
     </div>
   <div class="searchrow">
-    <label class="searchbox">
-      <span>Search</span>
-      <input id="q" type="search" placeholder="Title, director, actor or genre…" autocomplete="off">
-    </label>
-    <label class="f"><span>Show</span>
-      <select id="shelf">
-        <option value="all">Show all</option>
-        <option value="progress">Part way through</option>
-        <option value="watchlist">Watchlist</option>
-        <option value="here">On this device</option>
-      </select>
-    </label>
     <label class="f"><span>Sort</span>
       <select id="libsort">
         <option value="title">A to Z</option>
@@ -18791,6 +18787,18 @@ body:not(.android) #remotetab{display:none}
         <option value="mine">Your score</option>
         <option value="runtime">Shortest first</option>
       </select>
+    </label>
+    <label class="f"><span>Show</span>
+      <select id="shelf">
+        <option value="all">Show all</option>
+        <option value="progress">Part way through</option>
+        <option value="watchlist">Watchlist</option>
+        <option value="here">On this device</option>
+      </select>
+    </label>
+    <label class="searchbox">
+      <span>Search</span>
+      <input id="q" type="search" placeholder="Title, director, actor or genre…" autocomplete="off">
     </label>
     <div class="libcount" id="libcount"></div>
     <div class="libscanmsg" id="libscanmsg"></div>
@@ -20284,9 +20292,17 @@ async function loadHome(){
   if(fromPc && (!d || d.error)) d = await api('/api/home');
   box.innerHTML = '';
   if(!d || d.error){ box.append(el('p', 'empty', esc((d && d.error) || 'Nothing to show yet.'))); return; }
+  /* The day's picks, in a new order each time the page comes up. */
+  shuffleInPlace(d.suggest || []);
   const row = (heading, items, empty, isCont) => {
     const sec = el('section', 'homesec');
-    sec.append(el('h2', 'homehead', heading));
+    if(isCont){
+      /* Continue's heading goes to History, the whole list it's the top of. */
+      const h = el('button', 'homehead homelink', heading + ' \u203A');
+      h.title = 'See everything you\u2019ve watched';
+      h.onclick = () => { libSection = 'history'; drawLibNav(); applyLibSection(); };
+      sec.append(h);
+    } else sec.append(el('h2', 'homehead', heading));
     if(!items.length){ sec.append(el('p', 'empty', empty)); return sec; }
     const strip = el('div', 'homerow');
     items.forEach(it => strip.append(homeTile(it, isCont, fromPc && !d.error)));
@@ -20334,6 +20350,14 @@ window.addEventListener('resize', () => {
   clearTimeout(homeSizing);
   homeSizing = setTimeout(sizeHome, 80);
 });
+
+function shuffleInPlace(list){
+  for(let i = list.length - 1; i > 0; i--){
+    const j = Math.floor(Math.random() * (i + 1));
+    [list[i], list[j]] = [list[j], list[i]];
+  }
+  return list;
+}
 
 function homeTile(it, isCont, pc){
   const b = el('button', 'tile hometile');

@@ -53,11 +53,11 @@ check("not from a show you don't much like", not any(e["show_id"] == meh for e i
 check("films you rated highly and haven't seen in six months, not one just seen or only liked",
       films[0] in [f["id"] for f in fms] and films[1] not in [f["id"] for f in fms]
       and films[2] not in [f["id"] for f in fms], [f["title"] for f in fms])
-check("at most 8, every one with a title and something to play", len(sug) <= 8
+check("at most 11, every one with a title and something to play", len(sug) <= 11
       and all(s.get("title") and s.get("id") for s in sug), len(sug))
 wild = [x for x in sug if x.get("wild")]
-check("about 15% are wildcards, picked from the whole library, not by rating: at least one",
-      1 <= len(wild) <= max(1, round(len(sug) * 0.25)) and all(x.get("id") for x in wild),
+check("three wildcards, picked from the whole library, not by rating",
+      len(wild) == 3 and all(x.get("id") for x in wild),
       [(x["title"], x["type"]) for x in wild])
 check("a wildcard isn't one of the rated picks twice over", len(set((x["type"], x["id"]) for x in sug)) == len(sug))
 check("the same day, the same suggestions", [s["id"] for s in n.build_home()["suggest"]] == [s["id"] for s in sug])
@@ -86,6 +86,12 @@ check("the page: the wheel over a Home row never scrolls the page", "wheelSidewa
       and "if(max <= 0 && !hold) return;" in pg)
 check("the page: on the PC the tiles size themselves so both rows fit the window",
       "function sizeHome(" in pg and "var(--home-tile," in pg and "sizeHome();" in pg)
+check("the page: Quick Suggest in a new order every time it loads", "shuffleInPlace(" in pg
+      and "shuffleInPlace(d.suggest" in pg)
+check("the page: Continue's heading opens History", "homehead homelink" in pg)
+_sr = pg[pg.find('<div class="searchrow">'):][:1200]
+check("the Library's toolbar: Sort, then Show, then the search box",
+      0 < _sr.find('id="libsort"') < _sr.find('id="shelf"') < _sr.find('id="q"'), "")
 check("the page: two rows, Quick Suggest and Continue, a tile plays",
       "Quick Suggest" in pg and "function loadHome(" in pg and "'tile hometile'" in pg)
 

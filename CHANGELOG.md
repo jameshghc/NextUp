@@ -5,7 +5,7 @@ What changed in Next Up, version by version, newest first. Version numbers start
 ## 0.2.2 — 2026-10-25
 
 ### Headline
-- Home: the Library's new front page, where the app opens (the house before Films). Quick Suggest — the better episodes of shows you like and films you love that you haven't seen lately, plus a wildcard or two — and Continue, TV and films mixed, newest first. A tile plays (on the phone, it opens the details). On the PC both rows always fit the window: the tiles are the library's size when there's room and shrink to fit when there isn't.
+- Home: the Library's new front page, where the app opens (the house before Films). Quick Suggest — the better episodes of shows you like and films you love that you haven't seen lately, plus three wildcards, in a new order each visit — and Continue, TV and films mixed, newest first (its heading opens History). A tile plays (on the phone, it opens the details). On the PC both rows always fit the window: the tiles are the library's size when there's room and shrink to fit when there isn't.
 - Season and episode scores on a show's page: a score on each season tab and each episode, starting from your own rating of the show; a ★ in your accent colour after the show's five best episodes; a mark on unseen ones that should be good. Click a score to rate that episode yourself.
 - Click an episode's name for its details: picture, plot, air date, length, TMDB rating, director, writers and guest stars.
 - Closing Next Up on the PC hides it in the system tray, so the phone keeps working; click the icon to bring it back, right-click to quit, or switch it off in Settings › Playback.
@@ -16,7 +16,7 @@ What changed in Next Up, version by version, newest first. Version numbers start
 - On the phone, a second tap on a tile opens its details; with the PC connected, a show or film the phone hasn't got opens the PC's full page, playing HERE or ON PC.
 - The phone's Now page is redesigned: a box-sized poster with the facts beside it, everything on one screen, and the same buttons in the same places on every pick (what can't be done greyed out).
 - Channels: 2, 4 and 5 (Universal, Action, Comedy) are films only, 3 (True Life) mixes documentary films and series, Non-stop Favs is split into Films and TV (the TV one comes round to the better episodes more often), Al Jazeera moves to the end, Cold Ones is gone.
-- The Library's Sort list has Recently watched; with the PC connected the phone's Library opens on Show all, and Show and Sort share one line.
+- The Library's toolbar is one line, Sort then Show then search (the Continue card that sat beside it is on Home now). Its Sort list has Recently watched; with the PC connected the phone's Library opens on Show all, and Show and Sort share one line.
 - The show page is wider on the PC: who made it and who's in it down the left, the episodes beside them.
 - The Now page's reasons no longer quote ratings; the scores are still on the card.
 - The phone's header puts the version left of the camera hole and the counts to its right.
