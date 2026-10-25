@@ -22,7 +22,7 @@ notes = re.search(r"^## \d{4}-\d{2}-\d{2} — v(\d+\.\d+\.\d+)", read("DEVELOPME
 check("the phone build is the same version as the app", phone == app, (app, phone))
 check("the newest changelog section is this version", log and log.group(1) == app, (app, log and log.group(1)))
 check("the newest development notes are this version", notes and notes.group(1) == app, (app, notes and notes.group(1)))
-section = read("CHANGELOG.md").split("## ", 2)[1] if log else ""
+section = re.split(r"^## (?=\d)", read("CHANGELOG.md"), flags=re.M)[1] if log else ""
 check("and it says what changed", section.count("\n- ") >= 1, section[:80])
 
 print("\n%d/%d passed" % (sum(results), len(results)))
