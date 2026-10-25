@@ -12,6 +12,8 @@ What changed in Next Up, version by version, newest first. Version numbers start
 - The phone's Remote, with nothing playing, is a place to choose: Continue on PC (the last thing, fullscreen), On now (the channels with what's on them), Continue where you left off, and one of tonight's picks. While something plays, Fullscreen also brings the player to the front.
 
 ### Also new
+- A third look in Settings › Appearance, Silver: Glass's panels in neutral greys over a charcoal background, with the silver accent.
+- The header is back to the page's own colour with a thin line under it, in every look (Glass had a black bar with gold lettering).
 - The PC's now-playing bar has its own controls (previous and next episode, play/pause, mute, close the player), and its title opens what's playing.
 - On the phone, a second tap on a tile opens its details; with the PC connected, a show or film the phone hasn't got opens the PC's full page, playing HERE or ON PC.
 - The phone's Now page is redesigned: a box-sized poster with the facts beside it, everything on one screen, and the same buttons in the same places on every pick (what can't be done greyed out).
@@ -531,3 +533,11 @@ Early work, before the version numbers were reset to 0.1.
 - Many library fixes: duplicate per-season shows merged, lettered episodes recognised, and missing episode lengths and show cast filled in.
 - Starting something new closes the old player politely, so its place is saved.
 - A paged Library, half-star ratings, and the Next Up logo as the app icon.
+- Export your ratings and history as a JSON file from Settings.
+- Fix a wrong match from the film page: type the right title and year and it looks it up again straight away, and remembers the fix through rescans.
+- Episodes get their real names, descriptions and pictures from TMDB.
+- Sorting the Library by Recently added now works for shows, and the Rate queue is shuffled instead of always highest-rated first.
+- A now-playing bar on every page, with the channel's name when you're watching one.
+- Up Next is renamed Recommendations, and the main tabs have hover hints.
+- Folders called "Incomplete…" or "quarantine" are skipped when looking for new files; anything already in the library stays.
+- The live news channel finds yt-dlp even if it was installed after Next Up started.

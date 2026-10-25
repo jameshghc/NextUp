@@ -4809,3 +4809,44 @@ startup failure produced no window and no message at all.
 - Rating control: each half-star is now a real distinct element — no more ambiguous "7.5 or 8" tooltip.
 - Nav tooltips, "Up Next" renamed to "Recommendations."
 - Logo added as header icon and favicon.
+
+### Also from the 4 August session
+These didn't make the lists above but are all still in the app.
+
+- **Export.** Settings has an EXPORT RATINGS & HISTORY button that downloads a
+  readable JSON file. It holds only ratings, plays and history: the database
+  backup covers everything, including metadata that's one rescan from TMDB,
+  while this covers only what's yours and can't be fetched back.
+- **Fixing a wrong match.** The `overrides` table was in the schema from the
+  start and nothing read or wrote it. The film page now has FIX TITLE (when a
+  film is unidentified) or WRONG MATCH?: type the right title and year and
+  `/api/override` saves the correction against the file's path, then re-matches
+  straight away through `apply_movie_match` — the same function the ordinary
+  matching pass uses, so a fix behaves exactly like a fresh match, and a later
+  scan still uses the corrected title for anything left unmatched.
+- **Episode names, plots and pictures.** `enrich_episode_titles` reads one TMDB
+  call per season rather than one per episode and stores the name, plot, still
+  and runtime. Runtime is the field whose absence kept TV off the channels
+  (above); the rest is what turned "Episode 7" into a real title with a
+  description and a picture.
+- **"Recently added" and the Rate queue.** Shows had `dateadded` hard-coded to
+  an empty string, so that sort did nothing for TV; a show now counts as added
+  when its newest episode was. Ties (a library scanned in one go shares one
+  date) fall back to A–Z through a two-pass stable sort instead of whatever
+  order the database returned. The Rate queue had been sorted by TMDB score on
+  the server; it is now shuffled in the page, each item keeping one random key
+  for the session so re-fetching after a rating doesn't reshuffle what's left
+  (that would have made SKIP and BACK meaningless). Refresh queue rerolls.
+- **A now-playing bar on every page.** `#playingbar` sits under the header,
+  outside every view, and polls `/api/playing` every eight seconds. There was
+  no live position at this point — that arrived with mpv's control channel in
+  v0.1.1 — so it could say how long ago something started, name the channel if
+  there was one, and clear itself when the process exited.
+
+### A pattern worth watching
+Three of the gaps this session were the same shape: a column or table existed,
+the code that read it was written, and nothing ever wrote to it —
+`episodes.runtime`, `shows.cast_names` and `overrides`. None of them errored;
+they just made features quietly come up empty (TV missing from every channel).
+When something "has no data", check that anything fills it in before looking
+at the code that reads it.
