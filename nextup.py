@@ -61,7 +61,7 @@ import urllib.request
 import uuid
 import webbrowser
 from collections import Counter, defaultdict
-from datetime import date
+from datetime import date, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # ---------------------------------------------------------------------------
@@ -358,7 +358,10 @@ class Budget(object):
         return True
 
 
-def tmdb(path, params=None):
+def tmdb(path, params=None, fresh=False):
+    """TMDB, through the saved answers. fresh asks again even when there is
+    one (and saves the new answer): for things that were still being filled
+    in when first asked, like a season that had just aired."""
     key = CONFIG.get("tmdb_key") or ""
     if not key:
         return None
@@ -368,7 +371,7 @@ def tmdb(path, params=None):
 
     ck = url.replace(key, "KEY")
     with CACHE_LOCK:
-        if ck in CACHE:
+        if ck in CACHE and not fresh:
             return CACHE[ck]
 
     for attempt in range(3):
@@ -3090,10 +3093,84 @@ def enrich_local(conn, progress=None):
     done += backfill_details(conn, progress)
     done += backfill_show_details(conn, progress)
     done += enrich_episode_titles(conn, progress)
+    done += refresh_unsettled_seasons(conn, progress)
     cache_artwork(conn, progress)
     if progress:
         progress(1, 1, "saving artwork for your favourites")
     cache_favourite_art()
+    return done
+
+
+def _store_season(conn, show_id, season, detail):
+    """One TMDB season answer into the episodes this library has of it:
+    names, plots, stills, lengths, ratings, air dates and the people.
+    Returns how many episodes it filled."""
+    done = 0
+    by_number = dict((e.get("episode_number"), e)
+                     for e in detail.get("episodes") or [])
+    if not by_number:
+        return 0
+    eps = conn.execute(
+        "SELECT id,episode FROM episodes WHERE show_id=? AND season=?",
+        (show_id, season)).fetchall()
+    for ep in eps:
+        info = by_number.get(ep["episode"])
+        if not info:
+            continue
+        still = info.get("still_path")
+        # The rating comes in the same reply; 0 votes is stored as 0 rather
+        # than left empty, so the season isn't asked for again.
+        # Its own facts too, "" rather than empty where TMDB has none, so
+        # the season isn't asked for again either.
+        crew = info.get("crew") or []
+        jobs = lambda job: as_text([c.get("name") for c in crew if c.get("job") == job][:4])
+        conn.execute(
+            "UPDATE episodes SET title=?,plot=?,still=?,runtime=?,tmdb_rating=?,tmdb_votes=?,"
+            "air_date=?,directors=?,writers=?,guests=? WHERE id=?",
+            (info.get("name") or ("Episode %d" % ep["episode"]),
+             (info.get("overview") or "")[:1000],
+             POSTER + still if still else None,
+             (info.get("runtime") or 0) * 60,
+             float(info.get("vote_average") or 0), int(info.get("vote_count") or 0),
+             info.get("air_date") or "", jobs("Director"),
+             as_text([w for w in [c.get("name") for c in crew
+                                  if c.get("job") in ("Writer", "Teleplay", "Story", "Screenplay")]][:4]),
+             as_text([g.get("name") for g in (info.get("guest_stars") or [])][:8]),
+             ep["id"]))
+        done += 1
+    return done
+
+
+def refresh_unsettled_seasons(conn, progress=None, days=7, recent_days=60):
+    """Ask TMDB again, fresh, about seasons that were still being filled in
+    when first asked — the saved answer is otherwise kept for good, so a
+    season added the week it aired kept "Episode 1", no length and no votes
+    (South Park S29). Unsettled: a placeholder name ("Episode 3"), or aired
+    within recent_days — not merely no votes, which an obscure show never
+    gets and would be asked about every week for nothing. Each season at
+    most once every `days` days."""
+    if not CONFIG.get("tmdb_key"):
+        return 0
+    since = (date.today() - timedelta(days=recent_days)).isoformat()
+    seasons = conn.execute(
+        "SELECT DISTINCT e.show_id, e.season, s.tmdb_id"
+        " FROM episodes e JOIN shows s ON s.id = e.show_id"
+        " WHERE e.season > 0 AND s.tmdb_id IS NOT NULL AND s.tmdb_id <> ''"
+        " AND (e.title = 'Episode ' || e.episode OR IFNULL(e.air_date, '') >= ?)", (since,)).fetchall()
+    checked = CONFIG.setdefault("season_checked", {})
+    now = time.time()
+    due = [r for r in seasons
+           if now - (checked.get("%s/%s" % (r["tmdb_id"], r["season"])) or 0) >= days * 86400]
+    done = 0
+    for index, row in enumerate(due):
+        if progress:
+            progress(index + 1, len(due), "checking newer seasons")
+        detail = tmdb("/tv/%s/season/%s" % (row["tmdb_id"], row["season"]), fresh=True) or {}
+        done += _store_season(conn, row["show_id"], row["season"], detail)
+        checked["%s/%s" % (row["tmdb_id"], row["season"])] = now
+    conn.commit()
+    if due:
+        save_json(CONFIG_PATH, CONFIG)
     return done
 
 
@@ -3115,38 +3192,7 @@ def enrich_episode_titles(conn, progress=None):
         if progress:
             progress(index + 1, len(seasons), "reading episode titles")
         detail = tmdb("/tv/%s/season/%s" % (row["tmdb_id"], row["season"])) or {}
-        by_number = dict((e.get("episode_number"), e)
-                         for e in detail.get("episodes") or [])
-        if not by_number:
-            continue
-        eps = conn.execute(
-            "SELECT id,episode FROM episodes WHERE show_id=? AND season=?",
-            (row["show_id"], row["season"])).fetchall()
-        for ep in eps:
-            info = by_number.get(ep["episode"])
-            if not info:
-                continue
-            still = info.get("still_path")
-            # The rating comes in the same reply; 0 votes is stored as 0 rather
-            # than left empty, so the season isn't asked for again.
-            # Its own facts too, "" rather than empty where TMDB has none, so
-            # the season isn't asked for again either.
-            crew = info.get("crew") or []
-            jobs = lambda job: as_text([c.get("name") for c in crew if c.get("job") == job][:4])
-            conn.execute(
-                "UPDATE episodes SET title=?,plot=?,still=?,runtime=?,tmdb_rating=?,tmdb_votes=?,"
-                "air_date=?,directors=?,writers=?,guests=? WHERE id=?",
-                (info.get("name") or ("Episode %d" % ep["episode"]),
-                 (info.get("overview") or "")[:1000],
-                 POSTER + still if still else None,
-                 (info.get("runtime") or 0) * 60,
-                 float(info.get("vote_average") or 0), int(info.get("vote_count") or 0),
-                 info.get("air_date") or "", jobs("Director"),
-                 as_text([w for w in [c.get("name") for c in crew
-                                      if c.get("job") in ("Writer", "Teleplay", "Story", "Screenplay")]][:4]),
-                 as_text([g.get("name") for g in (info.get("guest_stars") or [])][:8]),
-                 ep["id"]))
-            done += 1
+        done += _store_season(conn, row["show_id"], row["season"], detail)
     conn.commit()
     return done
 

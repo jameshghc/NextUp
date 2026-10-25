@@ -32,6 +32,7 @@ What changed in Next Up, version by version, newest first. Version numbers start
 - Fixed an error that could stop the phone's Now page loading when it first opened.
 - ON PC is offered for titles with no TMDB match, and a copy since removed from the phone streams instead.
 - A channel started from the phone no longer keeps relaunching itself.
+- A season added while it was still airing no longer keeps TMDB's placeholder names ("Episode 1") for good: newer and unnamed seasons are checked again on the library scan, at most once a week.
 - Quitting Next Up part way through an episode no longer has the next start mark it watched and move Continue on an episode; the place it stopped is kept.
 - Anything closed within a minute, or flicked straight past, is no longer recorded: no History entry, no resume point, and it doesn't count as recently watched. Old entries like that are hidden from History too.
 - After a restart, the phone's link keeps trying if the previous copy of the app hasn't let go yet.

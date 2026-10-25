@@ -228,5 +228,42 @@ check("the page: the star after the name, and the name opens the details",
       "'epbest'" in _pe and _pe.find("'epbest'") > _pe.find("eptitle") and "toggleEpisodeInfo(row, ep, d)" in _pe
       and "'epinfo'" in n.PAGE and "/api/episode?id=" in n.PAGE, "")
 
+# --- A season fetched while it was new gets fetched again (2026-10-25) ----------------------
+# South Park S29: added two weeks after airing, when TMDB still said
+# "Episode 1" with no length and no votes — and the saved answer was kept
+# for good. Seasons that look unsettled are asked again, fresh, weekly.
+import datetime as _dt
+recent = (_dt.date.today() - _dt.timedelta(days=30)).isoformat()
+conn = n.db()
+sp_show = conn.execute("INSERT INTO shows (name,title,tmdb_id) VALUES ('sp','SP','880006')").lastrowid
+sp_eps = [conn.execute("INSERT INTO episodes (path,show_id,season,episode,title,runtime,tmdb_rating,tmdb_votes,air_date)"
+                       " VALUES (?,?,29,?,?,0,0,0,?)", ("X:/sp/%d.mkv" % k, sp_show, k, "Episode %d" % k, recent)).lastrowid
+          for k in (1, 2)]
+old = conn.execute("INSERT INTO shows (name,title,tmdb_id) VALUES ('old','Old','880007')").lastrowid
+conn.execute("INSERT INTO episodes (path,show_id,season,episode,title,runtime,tmdb_rating,tmdb_votes,air_date)"
+             " VALUES ('X:/old/1.mkv',?,1,1,'A Real Name',1800,7.5,300,'1999-01-01')", (old,))
+conn.commit()
+asked = []
+def fake_tmdb2(path, params=None, fresh=False):
+    asked.append((path, fresh))
+    if path == "/tv/880006/season/29":
+        return {"episodes": [{"episode_number": k, "name": "Real Name %d" % k, "overview": "", "still_path": None,
+                              "runtime": 22, "vote_average": 7.9, "vote_count": 40, "air_date": recent}
+                             for k in (1, 2)]}
+    return {}
+n.tmdb = fake_tmdb2
+n.CONFIG.pop("season_checked", None)
+n.refresh_unsettled_seasons(conn)
+r1 = conn.execute("SELECT title, runtime, tmdb_votes FROM episodes WHERE id=?", (sp_eps[0],)).fetchone()
+check("an unsettled season is asked again, fresh, and gets its real names",
+      ("/tv/880006/season/29", True) in asked and r1["title"] == "Real Name 1" and r1["runtime"] == 22 * 60
+      and r1["tmdb_votes"] == 40, (tuple(r1), asked[:3]))
+check("a settled season isn't asked again", not any("880007" in p_ for p_, _f in asked), asked)
+asked.clear()
+n.refresh_unsettled_seasons(conn)
+check("and an unsettled one at most once a week", not any("880006" in p_ for p_, _f in asked), asked)
+conn.close()
+check("the scan does it", "refresh_unsettled_seasons(conn, progress)" in open(n.__file__, encoding="utf-8").read())
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
