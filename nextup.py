@@ -4950,8 +4950,22 @@ ACCENTS = {
     "marigold": "#e0a33e", "teal": "#4fb3a9", "rose": "#e0607e", "violet": "#9b7be0",
     "lime": "#9ccb4a", "sky": "#4ea4e6", "coral": "#e8774f", "silver": "#c9c9d4",
 }
+# The font sets: (headings, text, labels), every one bundled in
+# nextup_fonts. A short list on purpose rather than any font at all: Home,
+# the phone's Remote and its header by the camera are measured to fit, and
+# each set here has been looked at on them. Single quotes inside: these
+# go into the <body style="..."> attribute.
+FONT_SETS = {
+    "nextup": ("'Bricolage Grotesque','Segoe UI',sans-serif", "'Spline Sans','Segoe UI',sans-serif",
+               "'Space Mono',ui-monospace,Consolas,monospace"),
+    "sleek": ("'Manrope','Segoe UI',sans-serif", "'Manrope','Segoe UI',sans-serif",
+              "'IBM Plex Mono',ui-monospace,Consolas,monospace"),
+    "cinema": ("'Fraunces',Georgia,serif", "'Source Sans 3','Segoe UI',sans-serif",
+               "'IBM Plex Mono',ui-monospace,Consolas,monospace"),
+}
 APPEARANCE_DEFAULTS = {"theme": "glass", "accent": "marigold", "glass": 60, "art": 55,
-                       "round": None}      # None: each theme's own corners
+                       "round": None,      # None: each theme's own corners
+                       "font": "nextup"}
 
 
 def appearance_settings():
@@ -4966,6 +4980,8 @@ def appearance_settings():
         out["theme"] = saved["theme"]
     if saved.get("accent") in ACCENTS:
         out["accent"] = saved["accent"]
+    if saved.get("font") in FONT_SETS:
+        out["font"] = saved["font"]
     for key in ("glass", "art", "round"):
         if key not in saved or (key == "round" and saved[key] is None):
             continue
@@ -5015,6 +5031,8 @@ def appearance_look(settings=None):
         look["classes"].append("glass")
     if st["theme"] == "silver":
         look["classes"].append("silver")
+    if st.get("font", "nextup") != "nextup":
+        look["vars"].update(zip(("--display", "--body", "--mono"), FONT_SETS[st["font"]]))
     if st["round"] is not None:
         look["classes"].append("customround")
         look["vars"]["--r-user"] = "%dpx" % round(st["round"] * 22 / 100.0)
@@ -17409,6 +17427,8 @@ body:not(.android) .pick .rowbtns{margin:0 0 14px}
 body:not(.android) .pick > div{min-width:0}     /* or a one-line title widens its column past the card */
 body:not(.android) .pick h2{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
   height:48px;line-height:48px}      /* one fixed line, however small fitPickTitle makes the words */
+body:not(.android) .pick h2.twoline{white-space:normal;text-overflow:clip;line-height:1.08;
+  display:flex;align-items:center}    /* or two, for a title too long for one */
 body:not(.android) .pick .subline{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 body:not(.android) .pick .why{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;
   overflow:hidden;line-height:1.45;height:2.9em}
@@ -19134,6 +19154,8 @@ body:not(.android) #remotetab{display:none}
     <div class="apgrid">
       <label>Style</label>
       <div class="apthemes" id="ap_theme"></div>
+      <label>Font</label>
+      <div class="apthemes" id="ap_font"></div>
       <label>Accent colour</label>
       <div class="apswatches" id="ap_accent"></div>
       <label>Glass strength</label>
@@ -19267,6 +19289,7 @@ function applyLook(look){
   if(!look) return;
   ['glass', 'silver', 'customround'].forEach(c => document.body.classList.toggle(c, look.classes.includes(c)));
   if(!look.classes.includes('customround')) document.body.style.removeProperty('--r-user');
+  ['--display', '--body', '--mono'].forEach(k => { if(!(k in look.vars)) document.body.style.removeProperty(k); });
   Object.entries(look.vars).forEach(([k, v]) => document.body.style.setProperty(k, v));
 }
 
@@ -19290,6 +19313,15 @@ function apDraw(){
                                            key === 'silver' && st.theme !== 'silver' ? {accent: 'silver'} : {}));
     themes.append(b);
   });
+  const fonts = $('#ap_font'); fonts.innerHTML = '';
+  [['nextup', 'Next Up', 'Bricolage Grotesque'], ['sleek', 'Sleek', 'Manrope'], ['cinema', 'Cinema', 'Fraunces']]
+    .forEach(([key, label, face]) => {
+      const b = el('button', 'kchip' + ((st.font || 'nextup') === key ? ' on' : ''), label);
+      b.type = 'button';
+      b.style.fontFamily = '"' + face + '",sans-serif';
+      b.onclick = () => apSave(Object.assign({}, st, {font: key}));
+      fonts.append(b);
+    });
   const sw = $('#ap_accent'); sw.innerHTML = '';
   apState.accents.forEach(([key, colour]) => {
     const b = el('button', 'apswatch');
@@ -19548,13 +19580,33 @@ function paintBack(){
 
 /* A long title gets smaller until it fits on its one line (down to 26px),
    rather than wrapping and pushing the buttons below it down. */
+/* Never cut off (asked for, 2026-10-25: "Dr. Strangelove or: How I L…").
+   On the PC, one line down to 26px; past that, two lines in the same 48px,
+   smaller until the whole title is in — so the buttons below never move.
+   On the phone, its four lines, smaller until it all fits. */
 function fitPickTitle(h){
-  if(!h || document.body.classList.contains('android')) return;
+  if(!h) return;
   h.style.fontSize = '';
+  h.classList.remove('twoline');
   h.title = h.textContent;
   let size = parseFloat(getComputedStyle(h).fontSize);
+  if(document.body.classList.contains('android')){
+    while(h.scrollHeight > h.clientHeight + 1 && size > 12){
+      size -= 1;
+      h.style.fontSize = size + 'px';
+    }
+    return;
+  }
   while(h.scrollWidth > h.clientWidth + 1 && size > 26){
     size -= 2;
+    h.style.fontSize = size + 'px';
+  }
+  if(h.scrollWidth <= h.clientWidth + 1) return;
+  h.classList.add('twoline');
+  size = 22;
+  h.style.fontSize = size + 'px';
+  while(h.scrollHeight > h.clientHeight + 1 && size > 12){
+    size -= 1;
     h.style.fontSize = size + 'px';
   }
 }

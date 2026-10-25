@@ -57,13 +57,17 @@ def _nextup_unpack():
         return
     for name in os.listdir(src):
         target = os.path.join(dest, name)
-        if os.path.exists(target):
-            continue
+        path = os.path.join(src, name)
         try:
-            path = os.path.join(src, name)
             if os.path.isdir(path):
-                shutil.copytree(path, target)
-            else:
+                # Into a folder that's already there, too: a newer exe brings
+                # new files (fonts added in 0.2.2), and its .css lists them.
+                os.makedirs(target, exist_ok=True)
+                for inner in os.listdir(path):
+                    there = os.path.join(target, inner)
+                    if inner.endswith(".css") or not os.path.exists(there):
+                        shutil.copyfile(os.path.join(path, inner), there)
+            elif not os.path.exists(target):
                 shutil.copyfile(path, target)
         except OSError:
             pass        # a read-only folder: the app still runs, just plainer

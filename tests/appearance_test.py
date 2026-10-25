@@ -135,6 +135,20 @@ _t = [int(x) for x in sv["vars"]["--glass-panel"][5:].split(",")[:3]]
 check("and its panels are grey, not blue", _t[0] == _t[1] == _t[2], _t)
 check("the page knows it", "body.silver{" in page and "['silver', 'Silver']" in page
       and "'silver', 'customround'" in page)
+
+# Fonts (2026-10-25): three bundled sets, nothing else.
+n.CONFIG["appearance"] = {"font": "comic sans"}
+check("an unknown font is the usual one", n.appearance_settings()["font"] == "nextup"
+      and "--display" not in n.appearance_look()["vars"])
+n.CONFIG["appearance"] = {"font": "cinema"}
+fv = n.appearance_look()["vars"]
+check("a font set swaps the three faces", "Fraunces" in fv["--display"] and "Source Sans 3" in fv["--body"]
+      and "IBM Plex Mono" in fv["--mono"] and '"' not in fv["--display"] + fv["--body"] + fv["--mono"], fv)
+_css = open(os.path.join(n.FONTS_DIR, "fonts.css"), encoding="utf-8").read()
+_faces = set(re.findall(r"url\(/fonts/([^)]+)\)", _css))
+check("and every face is bundled", all(f in _css for f in ("'Manrope'", "'Fraunces'", "'Source Sans 3'", "'IBM Plex Mono'"))
+      and all(os.path.exists(os.path.join(n.FONTS_DIR, f)) and n._FONT_NAME_RE.match(f) for f in _faces))
+check("Settings offers them", 'id="ap_font"' in page and "['cinema', 'Cinema', 'Fraunces']" in page)
 n.CONFIG["appearance"] = {}
 check("BACK beside NEXT on the pick", "'iconbtn pickback'" in page
       and "pickback" in page[page.find("function paintBack("):][:400])
