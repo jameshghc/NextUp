@@ -6121,6 +6121,136 @@ def episode_info(episode_id):
             "userrating": r["userrating"] or 0}
 
 
+# --- Home: the Library's front page -----------------------------------------
+#
+# Asked for, 2026-10-25: the app opens here rather than on Films. Two rows,
+# about fifteen tiles in all, each one a tap from playing:
+#
+#   Quick Suggest — the better episodes of shows you like (rated 7+ or a
+#   favourite) that you haven't seen in a month, one a show, chosen by the
+#   episode scores; and films you rated 8+ or favourited that you haven't
+#   seen in six months. TV and films alternating, changing day to day.
+#   Continue — what you're part way through, TV and films mixed, newest
+#   first (build_resume_row).
+
+HOME_SUGGEST = 8
+HOME_CONTINUE = 8
+HOME_EPISODE_REST_DAYS = 30     # an episode seen more recently than this isn't suggested
+HOME_FILM_REST_DAYS = 180
+# Not everything by score: about this share of Quick Suggest is a wildcard,
+# drawn from the whole library — any film or show not seen lately — and
+# always at least one. Asked for, 2026-10-25.
+HOME_WILD_SHARE = 0.15
+
+
+def _days_ago_stamp(days):
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - days * 86400))
+
+
+def build_home():
+    LIB.load()
+    rng = random.Random("home-%s" % date.today().isoformat())
+    by_show = defaultdict(list)
+    for e in LIB.episodes:
+        if (e.get("season") or 0) > 0:
+            by_show[e.get("tvshowid")].append(e)
+
+    shows = []
+    rest = _days_ago_stamp(HOME_EPISODE_REST_DAYS)
+    for show in LIB.shows:
+        if not ((show.get("userrating") or 0) >= 7 or show.get("favourited")):
+            continue
+        eps = by_show.get(show.get("tvshowid")) or []
+        try:
+            scores = episode_scores(show["tvshowid"], rewatches=False, episodes=eps)
+        except Exception:
+            scores = {}
+        if not scores:
+            continue
+        best = set(sorted(scores, key=lambda i: -scores[i])[:5])
+        rested = [e for e in eps if e["episodeid"] in scores and (e.get("last_played") or "") < rest]
+        if not rested:
+            continue
+        top = max(scores[e["episodeid"]] for e in rested)
+        pick = rng.choice([e for e in rested if scores[e["episodeid"]] == top])
+        code = "S%02dE%02d" % (pick.get("season") or 0, pick.get("episode") or 0)
+        shows.append((top + rng.random() * 0.6, {
+            "type": "episode", "id": pick["episodeid"], "show_id": show["tvshowid"],
+            "tmdb_id": str((show.get("uniqueid") or {}).get("tmdb") or ""),
+            "season": pick.get("season"), "episode": pick.get("episode"),
+            "title": show.get("title") or "", "sub": "%s \u00B7 %s" % (code, pick.get("title") or ""),
+            "art": art_url(show.get("art", {}).get("poster")),
+            "score": scores[pick["episodeid"]], "best": pick["episodeid"] in best}))
+    shows.sort(key=lambda x: -x[0])
+
+    films = []
+    rest = _days_ago_stamp(HOME_FILM_REST_DAYS)
+    for m in LIB.movies:
+        if not ((m.get("userrating") or 0) >= 8 or m.get("favourited")):
+            continue
+        if (m.get("last_played") or "") >= rest or (m.get("resume") or {}).get("position"):
+            continue        # seen lately, or part way through (that's Continue)
+        films.append(((m.get("userrating") or 8) + rng.random() * 1.5, {
+            "type": "movie", "id": m["movieid"],
+            "tmdb_id": str((m.get("uniqueid") or {}).get("tmdb") or ""),
+            "title": m.get("title") or "", "sub": str(m.get("year") or ""),
+            "art": art_url(m.get("art", {}).get("poster")),
+            "score": m.get("userrating") or 0}))
+    films.sort(key=lambda x: -x[0])
+
+    wild_n = max(1, int(round(HOME_SUGGEST * HOME_WILD_SHARE)))
+    suggest, tv, fm = [], [x[1] for x in shows], [x[1] for x in films]
+    while len(suggest) < HOME_SUGGEST - wild_n and (tv or fm):
+        for side in (tv, fm):
+            if side and len(suggest) < HOME_SUGGEST - wild_n:
+                suggest.append(side.pop(0))
+
+    # The wildcards: anything in the library not already here and not seen
+    # lately, films and episodes alike, no rating asked. Each goes in at a
+    # place of its own, never first.
+    taken = set((x["type"], x["id"]) for x in suggest)
+    ep_rest, film_rest = _days_ago_stamp(HOME_EPISODE_REST_DAYS), _days_ago_stamp(HOME_FILM_REST_DAYS)
+    pool = [("movie", m) for m in LIB.movies
+            if ("movie", m["movieid"]) not in taken and (m.get("last_played") or "") < film_rest
+            and not (m.get("resume") or {}).get("position")]
+    shows_by_id = {x.get("tvshowid"): x for x in LIB.shows}
+    for sid, eps in by_show.items():
+        rested = [e for e in eps if (e.get("last_played") or "") < ep_rest
+                  and ("episode", e["episodeid"]) not in taken]
+        if rested and sid in shows_by_id:
+            pool.append(("episode", rng.choice(rested)))
+    rng.shuffle(pool)
+    for kind, x in pool[:wild_n]:
+        if kind == "movie":
+            item = {"type": "movie", "id": x["movieid"],
+                    "tmdb_id": str((x.get("uniqueid") or {}).get("tmdb") or ""),
+                    "title": x.get("title") or "", "sub": str(x.get("year") or ""),
+                    "art": art_url(x.get("art", {}).get("poster")), "wild": True}
+        else:
+            show = shows_by_id[x.get("tvshowid")]
+            code = "S%02dE%02d" % (x.get("season") or 0, x.get("episode") or 0)
+            item = {"type": "episode", "id": x["episodeid"], "show_id": x.get("tvshowid"),
+                    "tmdb_id": str((show.get("uniqueid") or {}).get("tmdb") or ""),
+                    "season": x.get("season"), "episode": x.get("episode"),
+                    "title": show.get("title") or "", "sub": "%s \u00B7 %s" % (code, x.get("title") or ""),
+                    "art": art_url(show.get("art", {}).get("poster")), "wild": True}
+        suggest.insert(rng.randint(1, max(1, len(suggest))), item)
+
+    cont = build_resume_row(limit=HOME_CONTINUE)
+    for c in cont:
+        # Its identity, for the phone (which opens the PC's page by it).
+        c["ident"] = ident_for(c.get("type"), c.get("id"))
+        if c.get("type") == "episode":
+            ep = next((e for e in LIB.episodes if e.get("episodeid") == c.get("id")), None)
+            show = next((x for x in LIB.shows if ep and x.get("tvshowid") == ep.get("tvshowid")), None)
+            c["show_id"] = ep.get("tvshowid") if ep else None
+            c["tmdb_id"] = str(((show or {}).get("uniqueid") or {}).get("tmdb") or "")
+        else:
+            m = next((x for x in LIB.movies if x.get("movieid") == c.get("id")), None)
+            c["tmdb_id"] = str(((m or {}).get("uniqueid") or {}).get("tmdb") or "")
+    return {"suggest": suggest, "continue": cont}
+
+
 def show_detail(show_id):
     """Everything you own of one series, so you can jump straight to an
     episode rather than hunting through folders."""
@@ -13622,6 +13752,8 @@ class PhoneHandler(BaseHTTPRequestHandler):
                 return self.send_json(phone_show((query.get("tmdb") or [""])[0]))
             if route == "/phone/film":
                 return self.send_json(phone_film((query.get("tmdb") or [""])[0]))
+            if route == "/phone/home":
+                return self.send_json(_phone_art_deep(build_home()))
             if route == "/phone/episode":
                 try:
                     return self.send_json(phone_episode(int((query.get("id") or ["0"])[0])))
@@ -14779,12 +14911,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(remote_state())
 
             if route in ("/api/pcnow", "/api/pcgenres", "/api/pcchannels", "/api/pcshow", "/api/pcepisode",
-                         "/api/pcfilm"):
+                         "/api/pcfilm", "/api/pchome"):
                 if PLATFORM != "android":
                     return self.send_json({"error": "only on the phone"}, 404)
                 target = {"/api/pcnow": "/phone/now", "/api/pcgenres": "/phone/genres",
                           "/api/pcchannels": "/phone/channels", "/api/pcshow": "/phone/show",
-                          "/api/pcepisode": "/phone/episode", "/api/pcfilm": "/phone/film"}[route]
+                          "/api/pcepisode": "/phone/episode", "/api/pcfilm": "/phone/film",
+                          "/api/pchome": "/phone/home"}[route]
                 qs = urllib.parse.urlparse(self.path).query
                 return self.send_json(pc_library_call(target + ("?" + qs if qs else "")))
 
@@ -14815,6 +14948,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"on": tray_on_close(), "running": TRAY["running"]})
             if route == "/api/cutout":
                 return self.send_json(cutout_look())
+            if route == "/api/home":
+                return self.send_json(build_home())
             if route == "/api/episode":
                 try:
                     got = episode_info(int(one("id", "0")))
@@ -15863,6 +15998,35 @@ body{display:flex;flex-direction:column}
 #view-library.showing-history > .seltray{display:none}
 #view-library:not(.showing-recs) > #view-upnext{display:none}
 #view-library:not(.showing-history) > #view-history{display:none}
+/* Home hides the shelf's own furniture, as History does. */
+#view-library.showing-home > .libtop,
+#view-library.showing-home > #tiles-out,
+#view-library.showing-home > .pager,
+#view-library.showing-home > .resumestrip,
+#view-library.showing-home > .resumehead,
+#view-library.showing-home > .seltray{display:none}
+#view-library:not(.showing-home) > #view-home{display:none}
+#view-library > #view-home{flex:1;min-height:0;overflow-y:auto;padding:32px 0 28px;
+  display:flex;flex-direction:column;gap:40px}
+.homesec{display:flex;flex-direction:column;gap:12px;min-width:0;margin-top:0}   /* not the page's usual section gap */
+.homehead{margin:0;font-family:var(--display);font-weight:700;font-size:19px}
+/* A row is the library's own tile size, six across, sliding for the rest. */
+.homerow{display:grid;grid-auto-flow:column;grid-auto-columns:calc((100% - 5 * 14px) / 6);gap:14px;
+  overflow-x:auto;scrollbar-width:none;padding:2px 0 6px;scroll-snap-type:x proximity}
+.homerow::-webkit-scrollbar{display:none}
+.homerow .tile{scroll-snap-align:start}
+.hometab{display:inline-flex;align-items:center;padding-top:6px;padding-bottom:6px}
+.hometab svg{display:block}
+.hometile.starting{opacity:.6}
+.hometile .wildcard{position:absolute;left:8px;top:8px;z-index:2;font-family:var(--mono);font-size:9.5px;letter-spacing:.1em;
+  text-transform:uppercase;padding:2px 7px;border-radius:99px;background:rgba(6,5,9,.8);color:var(--marigold)}
+/* One line each under the poster, so a row is the same height whatever
+   it holds; the full line is in the tooltip. */
+.hometile .cap b,.hometile .cap small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media (max-width:600px){
+  #view-library > #view-home{padding:22px 0 28px;gap:30px}
+  .homerow{grid-auto-columns:calc((100% - 14px) / 2)}
+}
 #view-library > #view-history{flex:1;min-height:0;overflow-y:auto;padding:14px 0 40px}
 /* ---- watch history ---- */
 .histtotals{
@@ -18712,6 +18876,11 @@ body:not(.android) #remotetab{display:none}
   </div>
   </div>
 
+  <!-- ================= HOME =================
+       The Library's front page, where the app opens: Quick Suggest and
+       Continue, two rows of tiles, each a tap from playing (loadHome). -->
+  <div id="view-home"></div>
+
   <!-- ================= WATCH HISTORY =================
        The third state of the Library view, on the same footing as
        Recommendations: still your collection, this time by the evenings you
@@ -18956,7 +19125,7 @@ document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
 
 function resetView(view){
   if(view === 'library'){
-    libSection = 'film';
+    libSection = 'home';
     libKind = 'film';
     libOffset = 0;
     $('#q').value = '';
@@ -20054,7 +20223,7 @@ let searchTimer = null;
    might, what's on a drive — and sit in a quieter row of their own at the
    top of the page, the same spot whichever section is up, so flicking
    between them never moves it. Six on one line read as one list of equals. */
-const LIB_SHELVES = [['film','Films'],['tv','TV shows'],['fav','Favourites']];
+const LIB_SHELVES = [['home','Home'],['film','Films'],['tv','TV shows'],['fav','Favourites']];
 const LIB_PLACES = [['history','History'],['recs','Recommendations']];
 const LIB_PLACE_ICONS = {
   history: '<circle cx="12" cy="12" r="9"></circle><polyline points="12 7 12 12 15.5 14"></polyline>',
@@ -20064,9 +20233,9 @@ const LIB_PLACE_ICONS = {
    pager of their own, and listing them once here means the three or four
    places that have to know can ask rather than each keeping their own list
    of exceptions — which is how one of them ends up out of date. */
-const LIB_PANELS = {recs:'#view-upnext', history:'#view-history'};
+const LIB_PANELS = {recs:'#view-upnext', history:'#view-history', home:'#view-home'};
 
-let libSection = 'film';
+let libSection = 'home';       // the Library, and so the app, opens on Home
 let favCount = null;
 let queueCount = 0;
 
@@ -20076,8 +20245,11 @@ let queueCount = 0;
 function applyLibSection(){
   const recs = libSection === 'recs';
   const hist = libSection === 'history';
+  const home = libSection === 'home';
   $('#view-library').classList.toggle('showing-recs', recs);
   $('#view-library').classList.toggle('showing-history', hist);
+  $('#view-library').classList.toggle('showing-home', home);
+  if(home) loadHome();
   /* Ticking is what tiles do while adding to a drive, on the shelves. */
   $('#view-library').classList.toggle('selecting', ticking());
   if(recs){
@@ -20091,6 +20263,70 @@ function applyLibSection(){
     }
   }
   if(hist) loadHistory();
+}
+
+/* ---- Home ----
+   Two rows of the library's own tiles, each sliding sideways: Quick
+   Suggest (build_home: the better episodes of shows you like, rested a
+   month; films you love, rested six) and Continue (TV and films, newest
+   first). On the PC a tile plays; on the phone it opens the details, where
+   HERE and ON PC are. With the PC on the Wi-Fi the phone shows the PC's. */
+async function loadHome(){
+  const box = $('#view-home');
+  if(!box.children.length) box.append(el('p', 'empty', 'Loading\u2026'));
+  const fromPc = document.body.classList.contains('android') && typeof pcLinkUp !== 'undefined' && pcLinkUp;
+  let d = await api(fromPc ? '/api/pchome' : '/api/home');
+  if(fromPc && (!d || d.error)) d = await api('/api/home');
+  box.innerHTML = '';
+  if(!d || d.error){ box.append(el('p', 'empty', esc((d && d.error) || 'Nothing to show yet.'))); return; }
+  const row = (heading, items, empty, isCont) => {
+    const sec = el('section', 'homesec');
+    sec.append(el('h2', 'homehead', heading));
+    if(!items.length){ sec.append(el('p', 'empty', empty)); return sec; }
+    const strip = el('div', 'homerow');
+    items.forEach(it => strip.append(homeTile(it, isCont, fromPc && !d.error)));
+    sec.append(strip);
+    wheelSideways(strip);
+    return sec;
+  };
+  box.append(row('Quick Suggest', d.suggest || [],
+                 'Rate a few shows and films you love, and the best of them come back round here.', false));
+  box.append(row('Continue where you left off', d['continue'] || [],
+                 'Nothing part way through.', true));
+}
+
+function homeTile(it, isCont, pc){
+  const b = el('button', 'tile hometile');
+  if(it.art){ const i = el('img', 'art'); i.src = it.art; i.alt = ''; i.loading = 'lazy'; b.append(i); }
+  else b.append(el('div', 'blank', esc(it.title || '')));
+  const cap = el('div', 'cap');
+  const name = el('b');
+  name.textContent = it.title || '';
+  if(it.best){ const st = el('span', 'epbest', '\u2605'); st.title = 'One of the best episodes'; name.append(st); }
+  cap.append(name);
+  const sub = el('small');
+  sub.textContent = isCont ? [it.sub, it.note].filter(Boolean).join('  \u00B7  ') : (it.sub || '');
+  if(it.wild){ const w = el('span', 'wildcard', 'wildcard'); w.title = 'A wildcard: picked at random, not by rating'; b.append(w); }
+  cap.append(sub);
+  b.title = [it.title, sub.textContent].filter(Boolean).join(' \u2014 ');
+  if(isCont && it.percent > 0 && it.percent < 100){
+    const bar = el('div', 'bar'); const fill = el('i'); fill.style.width = it.percent + '%';
+    bar.append(fill); cap.prepend(bar); bar.style.top = '-3px';
+  }
+  b.append(cap);
+  b.onclick = async () => {
+    if(document.body.classList.contains('android')){
+      /* The phone: its details, where HERE and ON PC are. */
+      if(pc) return it.type === 'movie' ? openPcFilm(it.tmdb_id) : openPcShow(it.tmdb_id);
+      return it.type === 'movie' ? openFilm(it.id) : openShow(it.show_id);
+    }
+    b.classList.add('starting');
+    const r = await post('/api/play', {type: it.type, id: it.id, resume: true});
+    b.classList.remove('starting');
+    if(r && r.error){ sub.textContent = r.error; return; }
+    pollPlaying();
+  };
+  return b;
 }
 
 function drawLibNav(){
@@ -20110,6 +20346,11 @@ function drawLibNav(){
          lives in the tooltip and aria-label too. */
       b.title = label; b.setAttribute('aria-label', label);
       b.append(el('span','lbl', label));
+    } else if(id === 'home'){
+      /* Home: a house, before Films. */
+      b.classList.add('hometab');
+      b.insertAdjacentHTML('beforeend', '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 11l9-7 9 7"></path><path d="M5 10v10h14V10"></path><path d="M10 20v-6h4v6"></path></svg>');
+      b.title = label; b.setAttribute('aria-label', label);
     } else b.append(document.createTextNode(label));
     if(id==='fav' && favCount!=null) b.append(el('span','count', String(favCount)));
     b.onclick = () => {

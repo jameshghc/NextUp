@@ -5,6 +5,7 @@ What changed in Next Up, version by version, newest first. Version numbers start
 ## 0.2.1 — 2026-10-21
 
 ### Headline
+- Home: the Library's new front page, where the app opens (the house before Films). Quick Suggest — the better episodes of shows you like and films you love that you haven't seen lately, plus a wildcard or two — and Continue, TV and films mixed, newest first. A tile plays (on the phone, it opens the details).
 - When the phone can reach the PC, its Now page, Continue row and Channels come from the PC's full library.
 - Anything that can play either way offers the choice: ▶ HERE on the phone or ▶ ON PC on the big screen.
 - ▶ HERE plays the phone's own copy when it has one, and streams from the PC when it doesn't.
