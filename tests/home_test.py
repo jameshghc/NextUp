@@ -80,8 +80,8 @@ pg = n.PAGE
 check("the page: a house before Films, Home as the Library's own panel, and where the Library opens",
       "['home','Home']" in pg and "home:'#view-home'" in pg and 'id="view-home"' in pg
       and "let libSection = 'home';" in pg)
-check("the page: a wildcard says so on its tile; the rows say Loading while they come",
-      "'wildcard'" in pg and "Loading" in pg[pg.find("async function loadHome("):][:600])
+check("the page: wildcards aren't labelled (asked); the rows say Loading while they come",
+      "'wildcard'" not in pg and "Loading" in pg[pg.find("async function loadHome("):][:600])
 check("the page: two rows, Quick Suggest and Continue, a tile plays",
       "Quick Suggest" in pg and "function loadHome(" in pg and "'tile hometile'" in pg)
 

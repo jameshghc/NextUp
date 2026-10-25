@@ -16018,8 +16018,6 @@ body{display:flex;flex-direction:column}
 .hometab{display:inline-flex;align-items:center;padding-top:6px;padding-bottom:6px}
 .hometab svg{display:block}
 .hometile.starting{opacity:.6}
-.hometile .wildcard{position:absolute;left:8px;top:8px;z-index:2;font-family:var(--mono);font-size:9.5px;letter-spacing:.1em;
-  text-transform:uppercase;padding:2px 7px;border-radius:99px;background:rgba(6,5,9,.8);color:var(--marigold)}
 /* One line each under the poster, so a row is the same height whatever
    it holds; the full line is in the tooltip. */
 .hometile .cap b,.hometile .cap small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -20306,7 +20304,6 @@ function homeTile(it, isCont, pc){
   cap.append(name);
   const sub = el('small');
   sub.textContent = isCont ? [it.sub, it.note].filter(Boolean).join('  \u00B7  ') : (it.sub || '');
-  if(it.wild){ const w = el('span', 'wildcard', 'wildcard'); w.title = 'A wildcard: picked at random, not by rating'; b.append(w); }
   cap.append(sub);
   b.title = [it.title, sub.textContent].filter(Boolean).join(' \u2014 ');
   if(isCont && it.percent > 0 && it.percent < 100){
