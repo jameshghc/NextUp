@@ -48,3 +48,11 @@ Old versions and extras/
 # Database backups taken before a data change
 nextup_library.before-*.db
 .superpowers/
+
+# --- running from source on a Mac or Linux --------------------------------------
+# run.sh makes this; it's a local Python, not part of the app.
+.venv/
+# A bundled Python and mpv for the Mac, hundreds of MB.
+mac/
+.DS_Store
+*.log
