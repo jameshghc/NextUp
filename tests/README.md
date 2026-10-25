@@ -25,6 +25,8 @@ The sorter suites also build a fake downloads folder and check that the real
 
 ## The suites
 
+`run_all.py` lists all of them (about twenty-five); a few of the older ones:
+
 | | checks | what it proves |
 |---|---|---|
 | `queue_test.py` | 19 | the queue hands over only when something ENDS, never when you close it |

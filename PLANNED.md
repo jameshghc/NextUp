@@ -9,125 +9,9 @@ summarised away and files don't.
 
 ---
 
-## The look: grey glass (built in v0.1.77: the user chose C)
+## Picky-user QA findings for 0.2 (2026-10-20; screenshots in docs/mockups/shots/qa-*.png)
 
-`docs/mockups/glass-ui.html` (serve with the "mockups" launch config, port
-8778) has A (today), B (smoked glass) and C (frosted glass). Screenshots are
-in `docs/mockups/shots/`. Once the user picks, build it as a choice under a
-new Settings → Appearance tab, keeping today's look available.
-
-## A remote for the PC, in the phone app (built in v0.2.0; the sketch below is history)
-
-Control what's playing on the PC from the phone, on the same Wi-Fi. It
-builds on two things that exist:
-- the PC's own remote (`remote_state`, `/api/remote/*`: play/pause,
-  volume, mute, audio delay, subtitle and audio tracks, next episode, skip,
-  channels, stop);
-- the Wi-Fi link (`PhoneHandler` on 8790, the token from SEND MY LIBRARY,
-  `pc_link_call`).
-
-1. **PC: `/phone/remote/*` on `PhoneHandler`.** Bearer-gated, home network
-   only, the same as every phone route.
-   - An explicit list: `state`, `toggle`, `volume`, `mute`, `delay`,
-     `subtitles`, `audio`, `seek`, `episode`, `skip`, `channel`, `stop`,
-     `afk` (answer "are you still watching?").
-   - Each calls the same function the desktop remote route does, so the
-     two can't drift. Nothing else from the desktop server is exposed.
-   - Every press calls `seen_you()`, so using the phone remote counts as
-     being there for the sleep timer.
-2. **PC: two additions to `remote_state`:**
-   - `position` and `duration`, so the phone can draw a seek bar;
-   - the AFK question, so the phone can show it.
-3. **Phone server: `/api/pcremote/*`.** It passes each call to the PC via
-   `pc_link_call`, so the token never reaches the page.
-4. **Phone page: a Remote screen.** A fifth tab, or a button in the
-   masthead that only shows while the PC answers.
-   - Now playing: art, title, a seek bar with times.
-   - Big play/pause, back 10 s / forward 30 s, volume with mute.
-   - Audio delay ±50/100 ms (remembered per film, as on the PC).
-   - Subtitles and audio track: tap to cycle, showing the language.
-   - Next episode and skip, shown only when they apply.
-   - The six channel presets, and stop.
-   - "Are you still watching?" appears there with STILL HERE / THAT'S
-     ENOUGH.
-5. **Battery.** The state is asked for once a second ONLY while the Remote
-   screen is on screen and the app is in front. It stops on hide, and
-   nothing runs in the background.
-6. **Later, if wanted:**
-   - "Play on PC" from a tile's peek, starting it on the PC instead of the
-     phone (`/phone/remote/play {key}`).
-   - The phone's own volume buttons driving the PC's volume while the
-     Remote screen is open.
-7. **Tests.** The `/phone/remote/*` list (and that nothing else is
-   reachable), the proxy, and the page source checks. The seek and AFK
-   fields are tested in `wifi_stream_test` style against a loopback link.
-   Then a real try on the S24.
-
-## The user's notes for next time (2026-10-20): phone + PC as one
-
-1. **When the phone and PC are connected, the phone works from the main
-   library.** The phone's library "just integrates": Now picks, Channels
-   and so on draw on the PC's full library, not only what's on the phone.
-   - Today the phone's Now and Channels use only local files (plus greyed
-     catalogue rows).
-   - To design: what the phone draws from while the PC answers (the
-     snapshot + streamable, or live from the PC); how Now's picks and
-     Channels choose between playing here (stream) and on the PC; what
-     happens when the link drops mid-session.
-2. **Starting something on the PC should be easy and obvious.** Instead of
-   a separate "▶ ON PC" button, PLAY asks "Where? This phone / The PC".
-   - While the PC isn't reachable, PLAY just plays here: no question.
-   - Applies everywhere PLAY appears: tile peek, details sheet, episode
-     rows, the Now pick, Continue cards, Channels.
-   - Maybe remember the last answer per session, or add a "PC by default"
-     setting. Ask the user.
-
-3. **BUG: "▶ ON PC" on the phone appears to do nothing** (reported
-   2026-10-20; the PC was confirmed on 0.2.0). Debug first next time, on
-   the S21 over adb with the CDP eval script:
-   - Call `playOnPC(...)` from the page and read the reply. Does
-     `/api/pcremote/play` give `{error}`?
-   - Is `pc_link.up` true on the phone (does the Remote icon glow)?
-   - Does the PC log a play? Check `nextup_errors.log` and whether mpv
-     starts. `play_on_pc` → `play_local` → `require_media_file`, which may
-     be slow on a sleeping E: drive past the 90 s timeout, or fail the
-     tmdb lookup.
-   - Does the button's text change to "…" / "FAILED" at all? If not, the
-     click isn't reaching `playOnPC`; the peek's buttons are layered
-     (z-order or pointer-events).
-   - Is a local film's `tmdb_id` set on its row? `mark_on_pc` added it;
-     check rows from the phone's real library.
-
-## 0.2 release: where it stands (2026-10-20, paused for usage)
-
-Done and committed on `android-shell`:
-- the phone Remote (v0.2.0), reviewed and fixed;
-- the layout review applied, one screen with no scrolling (measured at
-  360–412 portrait and in landscape);
-- the icon tab;
-- Glass on the phone;
-- the camera notch header;
-- the first-run fixes (`tests/first_run_test.py`).
-- The release agent wrote `README.md`, `build_windows.py` and
-  `docs/release-notes-0.2.0.md`, and built `dist/NextUp-0.2.0-windows.exe`
-  and `dist/NextUp-0.2.0-android.apk`. **Both builds predate the later
-  fixes, so rebuild them.**
-
-### Picky-user QA findings for 0.2 (2026-10-20; screenshots in docs/mockups/shots/qa-*.png)
-
-**Glaring**
-1. **Classic: enabled buttons look disabled.** NEXT and WATCHLIST share
-   BACK's disabled style (muted text, no edge), on PC and phone. Give
-   `.iconbtn` an edge or lighter text, and keep the faded look for
-   `:disabled` only.
-2. **At 760px the Now pick is below the fold** (y=947) in the
-   single-column layout. Put `#tonight-out` before `#nowside`. There's also
-   a 58px empty band under Continue.
-3. **Phone Settings → Library shows PC-only controls:** the mpv path, the
-   downloads folder, the sorter, TEST MPV and C:\ paths. Hide them on
-   Android.
-4. **"you're 0% through S01E04"** in the Now headline. Below 1%, say
-   "you'd just started" or give minutes.
+The four glaring ones were fixed in 0.2.0; these may be partly done.
 
 **Worth fixing**
 - "1 shows" in the phone header, and "a 8" → "an 8".
@@ -165,54 +49,9 @@ Done and committed on `android-shell`:
 - "♪ ENG" accent-coloured in Classic
 - sheet widths differ
 
-Still to do, in order:
-1. Read the picky-user QA agent's report, if it finished (screenshots in
-   `docs/mockups/shots/qa-*.png`), and fix what matters.
-2. Rebuild: `python build_windows.py` (from HEAD), and the APK
-   (`python androiduild.py`, or `--no-install` on a copy).
-3. On the S21: check the camera-notch header (it needs the real cutout)
-   and the Remote by eye.
-4. Run `python tests
-un_all.py` with nothing else running, since the
-   suites share ports 8794/8799.
-5. **Ask the user**, then create a PRIVATE releases-only repo (not public:
-   the user's choice), invite friends by GitHub username, and attach the
-   exe and APK to a 0.2.0 release.
 - Deferred: the remote's minors (see DEVELOPMENT_NOTES v0.2.0), the odd
   phone profile name, and the LG TV options (a Google TV stick running Next
   Up, or the TV's own player over DLNA).
-
-## The user's list, 2026-10-19
-
-Items 1–4 were done in v0.1.76. Item 5 (the look) is next: show mock-ups
-first.
-
-1. **"Are you still watching?" never stops a film.**
-   - By design it only asks at a hand-over (between episodes or queue
-     items), so a lone film always plays out.
-   - Ben-Hur ran to the end on 17, 18 and 19 Oct while the user slept, and
-     was marked watched twice.
-2. **Films missing from Now's "Continue" strip.**
-   - Not the sleep timer. `build_continue` sorts every half-watched episode
-     (sort 1) ahead of films (sort 2) and cuts the list at 6.
-   - With 30+ shows in progress, films never make it in. `/api/resume`
-     has 88 films and 32 shows.
-   - **Fixed:** Now's strip uses the resume row (newest first, films and
-     TV, up to 24).
-   - **Found while doing it (fixed in v0.1.76 since):** if mpv's resume folder is
-     missing, `read_resume_points` returns nothing and
-     `sync_playback_state` reads every watch point as "watched to the end".
-     It wipes them all, adds a play, and stamps them played now. A missing
-     folder should mean "don't know", not "all finished".
-3. **Settings in tabs** instead of one long scroll. There are nine sections
-   today.
-4. **The Now page:**
-   - the genre chooser moves up, and the Continue strip gets shorter to make
-     room;
-   - choosing a genre mustn't reset the scroll position;
-   - the mouse wheel over the Continue strip scrolls it sideways.
-5. **Visual customisation in Settings,** starting with a more transparent
-   grey UI.
 
 ## To check first, 2026-10-12: "Continue where you left off" with Wi-Fi streaming
 
@@ -235,42 +74,20 @@ If it's missing, fill `in_progress` and `percent` on streamable elsewhere
 rows from `elsewhere_progress`, and let Continue include them while the PC
 is up.
 
-## Streaming from the PC over Wi-Fi — built (v0.1.75, 2026-10-11)
+## Android: deferred minors from the step 3 review (2026-10-08)
 
-Built; see DEVELOPMENT_NOTES v0.1.75. Still to do: the user to restart the
-PC app, SEND MY LIBRARY once (that pairs the phone), and try it on the
-real network. Not built (out of scope): streaming away from home, and
-phone-side code pairing.
-
-## Android app: where it stands (2026-10-08)
-
-- **Done:** step 1 (PC phone link, v0.1.48), step 2 (toolchain in
-  `X:\DevTools`), step 3 (v0.1.49): Next Up runs on the test phone, a
-  Galaxy S21 Ultra (Android 15), as `app.nextup.mobile`. Data lives in the
-  app's private folder, films in `Movies/Next Up/` (video permission
-  allowed by the user). Build with `python android\build.py`. Check with
-  `android\check_device.py`, `check_page.py` and `check_storage.py`.
-- **Next, spec step 4:** pairing with the PC from the phone, the snapshot,
-  downloads, and sync. Then **step 5**, playback through mpv-android,
-  which replaces the desktop Play/mpv wording. Then **step 6**, the phone
-  layout pass: hide the docking station, sorter and remote; bottom nav;
-  the "U0_a429"/"localhost" names; scan after the permission is granted;
-  external links; Back button; `allowBackup`.
-- **Deferred minors from the step 3 review:**
-  - `check_storage` hard-codes port 8770;
-  - no Android ≤12 storage permission;
-  - `first_run_library` re-adds the folder if emptied;
-  - the APK version is duplicated from `APP_VERSION`;
-  - `check_page.js` needs Node 22+;
-  - snapshot import looks in `HERE`.
+- `check_storage` hard-codes port 8770;
+- no Android ≤12 storage permission;
+- `first_run_library` re-adds the folder if emptied;
+- the APK version is duplicated from `APP_VERSION`;
+- `check_page.js` needs Node 22+;
+- snapshot import looks in `HERE`.
 
 ## Next up (parked 2026-10-03)
 
-- **Cold Ones channel needs yt-dlp updated before it plays.** Built and
-  tested in v0.1.47; the list loads, but YouTube refuses streams to the
-  installed yt-dlp (2026.07.04, over 90 days old): `winget upgrade
-  yt-dlp.yt-dlp`. Then tune in for real and check the seek lands mid-video.
-  Al Jazeera Live is probably refused the same way.
+- **Al Jazeera Live may need yt-dlp updated before it plays** (`winget
+  upgrade yt-dlp.yt-dlp`); YouTube refused streams to the old one. (Cold
+  Ones, the other YouTube channel, was dropped in 0.2.2.)
 - **A traditional TV-guide layout for Channels?** Asked, not yet answered.
   Channels run nose to tail from a fixed epoch, so a grid of what's on next
   across every channel is computable — the open question is the design.
@@ -310,7 +127,8 @@ since exists only on the Windows copy:
 | v0.1.42 | a hidden Watch Score for every film and show |
 | v0.1.43 | a design pass on Settings |
 
-**How:** copy `nextup.py` across on its own. Not the `mac/` folder — the
+**How:** `git pull` (the repo is on GitHub now), or copy `nextup.py` across
+and run it with `run.sh`. Not the `mac/` folder — the
 copy in `Old versions and extras` had its bundled Python broken by a
 Windows unzip, and the only good one is inside the original Mac zip.
 
@@ -396,45 +214,6 @@ these back rather than build them, because they change behaviour or layout:
 
 ## Low priority — wanted eventually, no rush
 
-### A copy on GitHub
-
-The project has had a local git history since 2026-09-27: every change is
-saved as a snapshot, on this machine only. The next step is a private copy
-on GitHub, which would mean:
-
-- **the Mac fetches the latest version in one step** instead of files being
-  copied across by hand — the fix for the item at the top of this list
-- a copy that isn't on the X: drive
-
-Needs you to make a GitHub account and a **private** repository; Claude
-can't create accounts, and will ask before uploading anything. The private
-files — config, library, test scratch — are already excluded and were
-checked before the first snapshot.
-
-### Your phone as a way in
-
-**Decided 2026-10-07:** a real Android app (BeeWare APK) for the user's
-S24 Ultra, Mac-style with its own library stored on the phone, paired with
-the PC over home Wi-Fi for the snapshot, sync and downloads. Design:
-`docs/superpowers/specs/2026-10-07-android-app-design.md`. The options
-below were the fork before that decision:
-
-- **A phone-shaped page served over Wi-Fi, playing on the PC.** The cheap
-  one. `/remote` already exists and already carries a viewport meta; this
-  widens it into browsing, queueing and rating. Add-to-home-screen makes it
-  feel like an app without an APK.
-- **The same, plus video on the phone.** 80% of this library is `.mkv`,
-  which Android browsers won't play — those would hand off to VLC, and only
-  the ~460 MP4s would play in the page itself. Transcoding is a much bigger
-  job.
-- **A real APK.** Weeks: a Python build chain on Linux, a rewritten UI,
-  mpv-android, and the PC still holds the files. Advised against.
-
-**Settle first, whichever way it goes:** the server binds `127.0.0.1` only,
-and there is **no authentication anywhere** — some endpoints move files to
-the bin. A phone reaching the app means a LAN bind, a PIN, and the
-destructive routes closed to it.
-
 ### The old versions archive
 
 `Old versions and extras` is 1.45GB and nothing current depends on it.
@@ -444,15 +223,6 @@ were asked to be kept. The two safe wins when the time comes:
 - the **extracted** Mac copy, ~380MB, broken by the Windows unzip (its
   working zip stays)
 - superseded release builds and zips, ~700MB
-
----
-
-## Decisions waiting on you
-
-### ~~X-Men '97 is in the library twice~~ — done, 2026-10-10 (v0.1.65)
-
-Decided by the user ("solve it for good"). Merged with a backup first; see
-DEVELOPMENT_NOTES 2026-10-10 for how, and what stops it coming back.
 
 ---
 
