@@ -4962,7 +4962,7 @@ def appearance_settings():
     saved = CONFIG.get("appearance")
     if not isinstance(saved, dict):
         return out
-    if saved.get("theme") in ("classic", "glass"):
+    if saved.get("theme") in ("classic", "glass", "silver"):
         out["theme"] = saved["theme"]
     if saved.get("accent") in ACCENTS:
         out["accent"] = saved["accent"]
@@ -4994,6 +4994,9 @@ def appearance_look(settings=None):
     # and over a dark room that laid a white sheen across everything. The
     # frost is the blur, not the colour.
     tint = tuple(int(lo + (hi - lo) * t) for lo, hi in zip((18, 18, 22), (58, 58, 66)))
+    if st["theme"] == "silver":
+        # Silver: no blue in it at all, and a touch lighter.
+        tint = tuple(int(lo + (hi - lo) * t) for lo, hi in zip((30, 30, 30), (72, 72, 72)))
     # Dark first: mostly solid at the default, never thinner than .44 even at
     # full frost. Bright shows (The Simpsons, The White Lotus) still lit the
     # whole page through anything thinner.
@@ -5004,12 +5007,14 @@ def appearance_look(settings=None):
         "--accent-rgb": "%d,%d,%d" % (r, g, b),
         "--glass-panel": "rgba(%d,%d,%d,%.2f)" % (tint + (alpha,)),
         "--glass-panel-2": "rgba(%d,%d,%d,%.2f)" % (tint + (min(0.9, alpha + 0.08),)),
-        "--glass-line": "rgba(255,255,255,%.2f)" % (0.07 + 0.1 * t),
+        "--glass-line": "rgba(255,255,255,%.2f)" % ((0.07 if st["theme"] != "silver" else 0.13) + 0.1 * t),
         "--glass-blur": "%dpx" % round(14 + 18 * t),
         "--art-opacity": "0" if not st["art"] else "%.2f" % (st["art"] / 100.0 * 0.9),
     }}
-    if st["theme"] == "glass":
+    if st["theme"] in ("glass", "silver"):
         look["classes"].append("glass")
+    if st["theme"] == "silver":
+        look["classes"].append("silver")
     if st["round"] is not None:
         look["classes"].append("customround")
         look["vars"]["--r-user"] = "%dpx" % round(st["round"] * 22 / 100.0)
@@ -18368,6 +18373,7 @@ header.mast .libplaces.offview{visibility:hidden}
   filter:blur(56px) saturate(.8) brightness(.36);transform:scale(1.08);opacity:var(--art-opacity,0);
   transition:opacity .5s ease}
 body:not(.glass) #roomart{display:none}
+body.silver #roomart{background-color:#131313;filter:blur(56px) saturate(.3) brightness(.4)}
 /* Round the camera hole, in portrait: the header runs up to the top of the
    screen, as tall as the hole needs, with the name to the hole's left and
    the library line starting just past it (cutout_look). In landscape the
@@ -18395,7 +18401,9 @@ body.android #roomart{display:none}
 /* Without the blur, a see-through details page showed the Library through
    it: on the phone they're solid, not see-through at all (asked for). */
 body.android :is(.sheetbody,.sheetpanel){background-color:#121216!important}   /* past the glass rule's #id */
-body.android .sheet{background:#0c0c10}       /* and nothing of the Library showing round it */
+body.android .sheet{background:#0c0c10}
+body.android.silver :is(.sheetbody,.sheetpanel){background-color:#1a1a1a!important}
+body.android.silver .sheet{background:#131313}       /* and nothing of the Library showing round it */
 body.android.glass *{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
 body.glass .phonepick{position:relative;overflow:hidden;isolation:isolate}
 .phonepick .ppwash{position:absolute;inset:-60px;z-index:-1;pointer-events:none;
@@ -18404,6 +18412,14 @@ body:not(.glass) .phonepick .ppwash{display:none}
 body.glass{background:radial-gradient(1100px 520px at 50% -160px,#24242c 0%,rgba(12,12,16,0) 70%),#0c0c10;
   --ink-2:var(--glass-panel);--ink-3:var(--glass-panel-2);--surface:var(--glass-panel);
   --surface-2:var(--glass-panel-2);--line:var(--glass-line);--edge:var(--glass-line);--muted:#a7a7b2}
+/* Silver: Glass's panels over a neutral charcoal, with a brushed-metal
+   light at the top and silvery lines (Classic leans blue-purple, Glass
+   blue-grey). */
+body.silver{background:linear-gradient(180deg,rgba(255,255,255,.035) 0,rgba(255,255,255,0) 340px),
+  radial-gradient(1200px 560px at 50% -180px,#3a3a3c 0%,rgba(19,19,19,0) 70%),#131313;
+  --muted:#b3b3b3;--paper:#f2f2f2}
+body.silver #titlebar{border-bottom-color:rgba(255,255,255,.16)}
+body.silver .phonepick .ppwash{background-color:#131313;filter:blur(40px) saturate(0) brightness(.4)}
 body.glass :is(.settings,.pick,.alt,.hubcard,.card,.coll,.dirblock,.profile,.ratecard,.channelcard,.toplist,.resumecard,.reccard,.sheetbody,.sheetpanel,.simcard,.askcard,.ctxmenu,.queuerail,.syncoffer,.fitcard,.nowfits,#playingbar,.gap,.notice){
   background-color:var(--glass-panel);border-color:var(--glass-line);background-image:none;
   backdrop-filter:blur(var(--glass-blur)) saturate(1.3);-webkit-backdrop-filter:blur(var(--glass-blur)) saturate(1.3);
@@ -18413,13 +18429,6 @@ body.glass :is(.sheetbody,.sheetpanel,.settings,.pick){border-radius:var(--r-pan
    page's art is already behind it — a bright one lit the whole card. */
 body.glass .hero{opacity:.18}
 body.glass .pick .hero{opacity:.18}
-/* The header: a solid black bar, the name and the library line in the
-   accent, as on the look mock-ups. */
-body.glass #titlebar{background:#000;border-bottom:1px solid rgba(255,255,255,.08)}
-body.glass #titlebar .dragzone span{font-family:var(--mono);font-weight:700;font-size:12.5px;
-  letter-spacing:.12em;text-transform:uppercase;color:var(--marigold)}
-body.glass #titlebar .dragzone :is(#libline,#libver){font-weight:400;letter-spacing:.04em;text-transform:none;
-  color:rgba(var(--accent-rgb),.62)}
 /* Buttons that mustn't fade into the glass: a fill and a firm outline,
    and a disabled one still visible as itself. */
 body.glass :is(.iconbtn,.watchtoggle,.favtoggle){background-color:rgba(255,255,255,.1);
@@ -19243,7 +19252,7 @@ function setRoomArt(url){
    variables, worked out (and every value checked) by appearance_look. */
 function applyLook(look){
   if(!look) return;
-  ['glass', 'customround'].forEach(c => document.body.classList.toggle(c, look.classes.includes(c)));
+  ['glass', 'silver', 'customround'].forEach(c => document.body.classList.toggle(c, look.classes.includes(c)));
   if(!look.classes.includes('customround')) document.body.style.removeProperty('--r-user');
   Object.entries(look.vars).forEach(([k, v]) => document.body.style.setProperty(k, v));
 }
@@ -19260,10 +19269,12 @@ async function apSave(change){
 function apDraw(){
   const st = apState.settings;
   const themes = $('#ap_theme'); themes.innerHTML = '';
-  [['classic', 'Classic'], ['glass', 'Glass']].forEach(([key, label]) => {
+  [['classic', 'Classic'], ['glass', 'Glass'], ['silver', 'Silver']].forEach(([key, label]) => {
     const b = el('button', 'kchip' + (st.theme === key ? ' on' : ''), label);
     b.type = 'button';
-    b.onclick = () => apSave(Object.assign({}, st, {theme: key}));
+    /* Silver comes with the silver accent; another can be picked after. */
+    b.onclick = () => apSave(Object.assign({}, st, {theme: key},
+                                           key === 'silver' && st.theme !== 'silver' ? {accent: 'silver'} : {}));
     themes.append(b);
   });
   const sw = $('#ap_accent'); sw.innerHTML = '';
@@ -19276,7 +19287,7 @@ function apDraw(){
     b.onclick = () => apSave(Object.assign({}, st, {accent: key}));
     sw.append(b);
   });
-  const glassOnly = st.theme !== 'glass';
+  const glassOnly = st.theme === 'classic';
   [['glass', v => glassOnly ? 'Glass style only' : (v < 35 ? 'Smoked' : v < 70 ? 'Between' : 'Frosted')],
    ['art', v => glassOnly ? 'Glass style only' : (v ? v + '%' : 'Off')],
    ['round', v => st.round === null ? 'Style\u2019s own' : (v < 15 ? 'Sharp' : v < 60 ? 'Soft' : 'Round')]

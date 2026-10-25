@@ -121,8 +121,21 @@ _art = page[page.find("#roomart{"):][:400]
 _b = re.search(r"brightness\(([\d.]+)\)", _art)
 check("the art behind the page is dimmed hard", _b and float(_b.group(1)) <= 0.4, _art[:200])
 check("and the film's own backdrop in the pick card fades further in Glass", "body.glass .hero{" in page)
-check("the black header with gold lettering", "body.glass #titlebar{" in page
-      and "background:#000" in page[page.find("body.glass #titlebar{"):][:200])
+# 2026-10-25: the header went back to the page's own colour with a line
+# under it (as on the README's screenshot), in every style.
+check("the header is the page's colour with a line, in every style", "body.glass #titlebar{" not in page
+      and "border-bottom:1px solid var(--edge)" in page[page.find("\n#titlebar{"):][:500])
+
+# Silver (2026-10-25): Glass's panels in neutral greys.
+n.CONFIG["appearance"] = {"theme": "silver"}
+sv = n.appearance_look()
+check("Silver is a style of its own", n.appearance_settings()["theme"] == "silver"
+      and "glass" in sv["classes"] and "silver" in sv["classes"], sv["classes"])
+_t = [int(x) for x in sv["vars"]["--glass-panel"][5:].split(",")[:3]]
+check("and its panels are grey, not blue", _t[0] == _t[1] == _t[2], _t)
+check("the page knows it", "body.silver{" in page and "['silver', 'Silver']" in page
+      and "'silver', 'customround'" in page)
+n.CONFIG["appearance"] = {}
 check("BACK beside NEXT on the pick", "'iconbtn pickback'" in page
       and "pickback" in page[page.find("function paintBack("):][:400])
 check("buttons on glass have a fill and a firm outline", "body.glass :is(.iconbtn,.watchtoggle,.favtoggle){" in page)
