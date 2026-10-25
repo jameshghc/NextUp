@@ -5505,7 +5505,21 @@ def sync_playback_state():
             log_problem("mpv's resume folder couldn't be read: %s" % WATCH_LATER)
         return
     conn = db()
+    # Stops this app saw, with where they got to — read from mpv itself as it
+    # closed. mpv writes no resume file when it's closed that way (quitting
+    # Next Up does just that), so for these a missing file says nothing, and
+    # taking it as "watched to the end" wiped the place and moved Continue on
+    # an episode. Only where the last thing on record is such a stop.
+    seen_stopping = set()
+    for row in conn.execute(
+            "SELECT h.kind, h.item_id, h.event, h.position FROM history h"
+            " JOIN (SELECT kind, item_id, MAX(id) AS last FROM history"
+            "       WHERE event IN ('played','stopped','watched') AND item_id IS NOT NULL"
+            "       AND origin IS NULL GROUP BY kind, item_id) x ON x.last = h.id"):
+        if row["event"] == "stopped" and row["position"]:
+            seen_stopping.add((row["kind"], row["item_id"]))
     for table in ("movies", "episodes"):
+        kind = "movie" if table == "movies" else "episode"
         for row in conn.execute("SELECT id,path,runtime,resume_pos FROM %s" % table):
             key = os.path.normcase(row["path"] or "")
             position = points.get(key)
@@ -5513,6 +5527,8 @@ def sync_playback_state():
                 conn.execute(
                     "UPDATE %s SET resume_pos=?,resume_total=? WHERE id=?" % table,
                     (position, row["runtime"] or 0, row["id"]))
+            elif row["resume_pos"] and (kind, row["id"]) in seen_stopping:
+                continue        # its place came from mpv as it stopped: keep it
             elif row["resume_pos"]:
                 conn.execute(
                     "UPDATE %s SET resume_pos=0,resume_total=0,"

@@ -72,5 +72,31 @@ check("a real one is", shown and shown[0] == "C" or "C" in shown, shown)
 check("Recently watched ignores the history of a flick",
       "'played'" not in open(n.__file__, encoding="utf-8").read().split('if sort == "watched":')[1][:1500])
 
+# --- Quitting the app mid-episode (2026-10-25) ----------------------------------------------
+# Cyberpunk S1E4, stopped at 12:54 when the app was quit to restart it: the
+# stop was seen and recorded, mpv left no resume file of its own, and the
+# next start took "no file" as "watched to the end" — Continue said S1E5.
+conn = n.db()
+ep_a, ep_b = [r[0] for r in conn.execute("SELECT id FROM episodes ORDER BY id LIMIT 2")]
+conn.execute("UPDATE episodes SET resume_pos=774, resume_total=1532, playcount=0 WHERE id IN (?,?)", (ep_a, ep_b))
+conn.execute("DELETE FROM history WHERE kind='episode' AND item_id IN (?,?)", (ep_a, ep_b))
+ins = "INSERT INTO history (at,kind,item_id,title,event,seconds,position,total) VALUES (?,?,?,?,?,?,?,?)"
+conn.execute(ins, (at(900), "episode", ep_a, "A", "played", None, None, None))
+conn.execute(ins, (at(100), "episode", ep_a, "A", "stopped", 774, 774, 1532))     # seen to stop here
+conn.execute(ins, (at(900), "episode", ep_b, "B", "played", None, None, None))    # never seen to end
+conn.commit(); conn.close()
+_real_points = n.read_resume_points
+n.read_resume_points = lambda: {}          # mpv's folder is readable, and has nothing for either
+n.sync_playback_state()
+n.read_resume_points = _real_points
+conn = n.db()
+ra = conn.execute("SELECT resume_pos, playcount FROM episodes WHERE id=?", (ep_a,)).fetchone()
+rb = conn.execute("SELECT resume_pos, playcount FROM episodes WHERE id=?", (ep_b,)).fetchone()
+conn.close()
+check("a stop the app saw keeps its place through a restart", ra["resume_pos"] == 774 and not ra["playcount"],
+      tuple(ra))
+check("one it never saw end is still read as finished, as before", rb["resume_pos"] == 0 and rb["playcount"] == 1,
+      tuple(rb))
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
