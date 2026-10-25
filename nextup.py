@@ -6134,7 +6134,7 @@ def episode_info(episode_id):
 #   first (build_resume_row).
 
 HOME_SUGGEST = 11
-HOME_CONTINUE = 8
+HOME_CONTINUE = HOME_SUGGEST         # the same length as Quick Suggest, asked for
 HOME_EPISODE_REST_DAYS = 30     # an episode seen more recently than this isn't suggested
 HOME_FILM_REST_DAYS = 180
 # Not everything by score: this many of Quick Suggest are wildcards, drawn
@@ -6147,16 +6147,53 @@ def _days_ago_stamp(days):
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - days * 86400))
 
 
+def _home_episode_item(show, e, score=None, best=False, wild=False):
+    code = "S%02dE%02d" % (e.get("season") or 0, e.get("episode") or 0)
+    item = {"type": "episode", "id": e["episodeid"], "show_id": show["tvshowid"],
+            "tmdb_id": str((show.get("uniqueid") or {}).get("tmdb") or ""),
+            "season": e.get("season"), "episode": e.get("episode"),
+            "title": show.get("title") or "", "sub": "%s \u00B7 %s" % (code, e.get("title") or ""),
+            "art": art_url(show.get("art", {}).get("poster"))}
+    if score is not None:
+        item["score"] = score
+    if best:
+        item["best"] = True
+    if wild:
+        item["wild"] = True
+    return item
+
+
+def _home_film_item(m, wild=False):
+    item = {"type": "movie", "id": m["movieid"],
+            "tmdb_id": str((m.get("uniqueid") or {}).get("tmdb") or ""),
+            "title": m.get("title") or "", "sub": str(m.get("year") or ""),
+            "art": art_url(m.get("art", {}).get("poster")), "score": m.get("userrating") or 0}
+    if wild:
+        item["wild"] = True
+    return item
+
+
 def build_home():
+    """Home's two rows. Quick Suggest is three lists, the page taking the
+    next one each visit (asked for: not every visit leaning on the top
+    scores) — Favourites (each liked show's best episode not seen in a
+    month; the films you rated highest), Deeper cuts (episodes above the
+    show's usual but not its best; films rated 7 or 8) and Pot luck
+    (episodes of liked shows by chance, only lightly weighted; any film you
+    rated well). Each list also has HOME_WILD wildcards from the whole
+    library, and no title is in two lists. All change day by day."""
     LIB.load()
     rng = random.Random("home-%s" % date.today().isoformat())
     by_show = defaultdict(list)
     for e in LIB.episodes:
         if (e.get("season") or 0) > 0:
             by_show[e.get("tvshowid")].append(e)
+    ep_rest = _days_ago_stamp(HOME_EPISODE_REST_DAYS)
+    film_rest = _days_ago_stamp(HOME_FILM_REST_DAYS)
+    taken = set()
 
-    shows = []
-    rest = _days_ago_stamp(HOME_EPISODE_REST_DAYS)
+    # The shows you like, each with its rested, scored episodes.
+    liked = []
     for show in LIB.shows:
         if not ((show.get("userrating") or 0) >= 7 or show.get("favourited")):
             continue
@@ -6167,74 +6204,91 @@ def build_home():
             scores = {}
         if not scores:
             continue
-        best = set(sorted(scores, key=lambda i: -scores[i])[:5])
-        rested = [e for e in eps if e["episodeid"] in scores and (e.get("last_played") or "") < rest]
-        if not rested:
-            continue
-        top = max(scores[e["episodeid"]] for e in rested)
-        pick = rng.choice([e for e in rested if scores[e["episodeid"]] == top])
-        code = "S%02dE%02d" % (pick.get("season") or 0, pick.get("episode") or 0)
-        shows.append((top + rng.random() * 0.6, {
-            "type": "episode", "id": pick["episodeid"], "show_id": show["tvshowid"],
-            "tmdb_id": str((show.get("uniqueid") or {}).get("tmdb") or ""),
-            "season": pick.get("season"), "episode": pick.get("episode"),
-            "title": show.get("title") or "", "sub": "%s \u00B7 %s" % (code, pick.get("title") or ""),
-            "art": art_url(show.get("art", {}).get("poster")),
-            "score": scores[pick["episodeid"]], "best": pick["episodeid"] in best}))
-    shows.sort(key=lambda x: -x[0])
+        rested = [e for e in eps if e["episodeid"] in scores and (e.get("last_played") or "") < ep_rest]
+        if rested:
+            ranked = sorted(scores.values(), reverse=True)
+            liked.append((show, scores, rested, set(sorted(scores, key=lambda i: -scores[i])[:5]),
+                          ranked[len(ranked) // 2]))
+    films = [m for m in LIB.movies
+             if (m.get("last_played") or "") < film_rest and not (m.get("resume") or {}).get("position")]
 
-    films = []
-    rest = _days_ago_stamp(HOME_FILM_REST_DAYS)
-    for m in LIB.movies:
-        if not ((m.get("userrating") or 0) >= 8 or m.get("favourited")):
-            continue
-        if (m.get("last_played") or "") >= rest or (m.get("resume") or {}).get("position"):
-            continue        # seen lately, or part way through (that's Continue)
-        films.append(((m.get("userrating") or 8) + rng.random() * 1.5, {
-            "type": "movie", "id": m["movieid"],
-            "tmdb_id": str((m.get("uniqueid") or {}).get("tmdb") or ""),
-            "title": m.get("title") or "", "sub": str(m.get("year") or ""),
-            "art": art_url(m.get("art", {}).get("poster")),
-            "score": m.get("userrating") or 0}))
-    films.sort(key=lambda x: -x[0])
+    def free(kind, ident):
+        return (kind, ident) not in taken
 
-    wild_n = HOME_WILD
-    suggest, tv, fm = [], [x[1] for x in shows], [x[1] for x in films]
-    while len(suggest) < HOME_SUGGEST - wild_n and (tv or fm):
-        for side in (tv, fm):
-            if side and len(suggest) < HOME_SUGGEST - wild_n:
-                suggest.append(side.pop(0))
+    def favourites_tv():
+        out = []
+        for show, scores, rested, best, _median in liked:
+            pool = [e for e in rested if free("episode", e["episodeid"])]
+            if not pool:
+                continue
+            top = max(scores[e["episodeid"]] for e in pool)
+            e = rng.choice([x for x in pool if scores[x["episodeid"]] == top])
+            out.append((top + rng.random() * 0.6, _home_episode_item(show, e, top, e["episodeid"] in best)))
+        return [x[1] for x in sorted(out, key=lambda x: -x[0])]
 
-    # The wildcards: anything in the library not already here and not seen
-    # lately, films and episodes alike, no rating asked. Each goes in at a
-    # place of its own, never first.
-    taken = set((x["type"], x["id"]) for x in suggest)
-    ep_rest, film_rest = _days_ago_stamp(HOME_EPISODE_REST_DAYS), _days_ago_stamp(HOME_FILM_REST_DAYS)
-    pool = [("movie", m) for m in LIB.movies
-            if ("movie", m["movieid"]) not in taken and (m.get("last_played") or "") < film_rest
-            and not (m.get("resume") or {}).get("position")]
-    shows_by_id = {x.get("tvshowid"): x for x in LIB.shows}
-    for sid, eps in by_show.items():
-        rested = [e for e in eps if (e.get("last_played") or "") < ep_rest
-                  and ("episode", e["episodeid"]) not in taken]
-        if rested and sid in shows_by_id:
-            pool.append(("episode", rng.choice(rested)))
-    rng.shuffle(pool)
-    for kind, x in pool[:wild_n]:
-        if kind == "movie":
-            item = {"type": "movie", "id": x["movieid"],
-                    "tmdb_id": str((x.get("uniqueid") or {}).get("tmdb") or ""),
-                    "title": x.get("title") or "", "sub": str(x.get("year") or ""),
-                    "art": art_url(x.get("art", {}).get("poster")), "wild": True}
-        else:
-            show = shows_by_id[x.get("tvshowid")]
-            code = "S%02dE%02d" % (x.get("season") or 0, x.get("episode") or 0)
-            item = {"type": "episode", "id": x["episodeid"], "show_id": x.get("tvshowid"),
-                    "tmdb_id": str((show.get("uniqueid") or {}).get("tmdb") or ""),
-                    "season": x.get("season"), "episode": x.get("episode"),
-                    "title": show.get("title") or "", "sub": "%s \u00B7 %s" % (code, x.get("title") or ""),
-                    "art": art_url(show.get("art", {}).get("poster")), "wild": True}
-        suggest.insert(rng.randint(1, max(1, len(suggest))), item)
+    def deeper_tv():
+        out = []
+        for show, scores, rested, best, median in liked:
+            pool = [e for e in rested if free("episode", e["episodeid"])]
+            mid = [e for e in pool if e["episodeid"] not in best and scores[e["episodeid"]] >= median]
+            pool = mid or pool
+            if not pool:
+                continue
+            e = rng.choice(pool)
+            out.append((rng.random(), _home_episode_item(show, e, scores[e["episodeid"]])))
+        return [x[1] for x in sorted(out, key=lambda x: -x[0])]
+
+    def potluck_tv():
+        out = []
+        for show, scores, rested, best, _median in liked:
+            pool = [e for e in rested if free("episode", e["episodeid"])]
+            if not pool:
+                continue
+            low = min(scores[e["episodeid"]] for e in pool)
+            weights = [1.0 + 0.3 * (scores[e["episodeid"]] - low) for e in pool]
+            e = rng.choices(pool, weights=weights)[0]
+            out.append((rng.random(), _home_episode_item(show, e, scores[e["episodeid"]])))
+        return [x[1] for x in sorted(out, key=lambda x: -x[0])]
+
+    def films_where(test, by_rating):
+        pool = [m for m in films if test(m) and free("movie", m["movieid"])]
+        key = (lambda m: -((m.get("userrating") or 8) + rng.random() * 1.5)) if by_rating else (lambda m: rng.random())
+        return [_home_film_item(m) for m in sorted(pool, key=key)]
+
+    def wildcards(n):
+        pool = [("movie", m) for m in films if free("movie", m["movieid"])]
+        shows_by_id = {x.get("tvshowid"): x for x in LIB.shows}
+        for sid, eps in by_show.items():
+            rested = [e for e in eps if (e.get("last_played") or "") < ep_rest and free("episode", e["episodeid"])]
+            if rested and sid in shows_by_id:
+                pool.append(("episode", (shows_by_id[sid], rng.choice(rested))))
+        rng.shuffle(pool)
+        return [_home_film_item(x, wild=True) if kind == "movie" else _home_episode_item(x[0], x[1], wild=True)
+                for kind, x in pool[:n]]
+
+    def one_list(tv, fm):
+        out, tv, fm = [], list(tv), list(fm)
+        while len(out) < HOME_SUGGEST - HOME_WILD and (tv or fm):
+            for side in (tv, fm):
+                while side and not free(side[0]["type"], side[0]["id"]):
+                    side.pop(0)
+                if side and len(out) < HOME_SUGGEST - HOME_WILD:
+                    item = side.pop(0)
+                    out.append(item)
+                    taken.add((item["type"], item["id"]))
+        for item in wildcards(HOME_WILD):
+            taken.add((item["type"], item["id"]))
+            out.insert(rng.randint(1, max(1, len(out))), item)
+        return out
+
+    lists = []
+    lists.append(one_list(favourites_tv(),
+                          films_where(lambda m: (m.get("userrating") or 0) >= 8 or m.get("favourited"), True)))
+    lists.append(one_list(deeper_tv(),
+                          films_where(lambda m: 7 <= (m.get("userrating") or 0) < 8.5, False)))
+    lists.append(one_list(potluck_tv(),
+                          films_where(lambda m: (m.get("userrating") or 0) >= 7 or m.get("favourited"), False)))
+    suggest = lists[0]
 
     cont = build_resume_row(limit=HOME_CONTINUE)
     for c in cont:
@@ -6248,7 +6302,7 @@ def build_home():
         else:
             m = next((x for x in LIB.movies if x.get("movieid") == c.get("id")), None)
             c["tmdb_id"] = str(((m or {}).get("uniqueid") or {}).get("tmdb") or "")
-    return {"suggest": suggest, "continue": cont}
+    return {"suggest": suggest, "suggest_lists": lists, "continue": cont}
 
 
 def show_detail(show_id):
@@ -20292,7 +20346,16 @@ async function loadHome(){
   if(fromPc && (!d || d.error)) d = await api('/api/home');
   box.innerHTML = '';
   if(!d || d.error){ box.append(el('p', 'empty', esc((d && d.error) || 'Nothing to show yet.'))); return; }
-  /* The day's picks, in a new order each time the page comes up. */
+  /* Each visit, the next of the three lists (Favourites, Deeper cuts, Pot
+     luck — see build_home), in a new order. Which one is next is this
+     viewer's own, kept in the browser. */
+  const lists = (d.suggest_lists || []).filter(l => l && l.length);
+  if(lists.length){
+    let at = 0;
+    try{ at = (parseInt(localStorage.getItem('nextup.homeList') || '-1', 10) + 1) % lists.length; }catch(e){}
+    try{ localStorage.setItem('nextup.homeList', String(at)); }catch(e){}
+    d.suggest = lists[at];
+  }
   shuffleInPlace(d.suggest || []);
   const row = (heading, items, empty, isCont) => {
     const sec = el('section', 'homesec');

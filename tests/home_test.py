@@ -62,6 +62,21 @@ check("three wildcards, picked from the whole library, not by rating",
 check("a wildcard isn't one of the rated picks twice over", len(set((x["type"], x["id"]) for x in sug)) == len(sug))
 check("the same day, the same suggestions", [s["id"] for s in n.build_home()["suggest"]] == [s["id"] for s in sug])
 
+# Three lists, a visit at a time (2026-10-25): Favourites (as above), Deeper
+# cuts (good, not the top) and Pot luck (mostly chance) — not every visit
+# leaning on the top scores.
+lists = home.get("suggest_lists") or []
+check("three Quick Suggest lists", len(lists) == 3 and all(len(l) <= 11 for l in lists), [len(l) for l in lists])
+check("the first is the favourites", [x["id"] for x in lists[0]] == [x["id"] for x in sug] if lists else False)
+check("each has its three wildcards", all(sum(1 for x in l if x.get("wild")) == 3 for l in lists),
+      [sum(1 for x in l if x.get("wild")) for l in lists])
+_all = [(x["type"], x["id"]) for l in lists for x in l]
+check("nothing appears in two lists", len(_all) == len(set(_all)), len(_all) - len(set(_all)))
+_deep = [x["id"] for x in lists[1] if x["type"] == "episode" and x.get("show_id") == show] if len(lists) > 1 else []
+check("Deeper cuts doesn't give the liked show's top pick again", second not in _deep, _deep)
+check("the page: each visit takes the next list, and shuffles it",
+      "suggest_lists" in n.PAGE and "nextup.homeList" in n.PAGE)
+
 # Continue: TV and films mixed, newest first.
 conn = n.db()
 conn.execute("UPDATE movies SET resume_pos=1200, resume_total=6000, last_played=? WHERE id=?", (ago(3), films[0]))
@@ -73,7 +88,7 @@ order = [(c["type"], c["id"]) for c in cont]
 check("Continue mixes TV and films, the most recent first",
       ("episode", second) in order and ("movie", films[0]) in order
       and order.index(("episode", second)) < order.index(("movie", films[0])), order[:4])
-check("at most 8", len(cont) <= 8)
+check("Continue: as many as Quick Suggest, at most", len(cont) <= n.HOME_SUGGEST and n.HOME_CONTINUE == n.HOME_SUGGEST)
 
 # The page.
 pg = n.PAGE
