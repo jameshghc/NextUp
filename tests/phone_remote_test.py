@@ -301,6 +301,35 @@ _st = n.phone_remote_state()
 check("and the idle state carries it to the phone", (_st.get("last") or {}).get("note") == "Next episode", _st.get("last"))
 check("the page has both buttons", 'data-a="fullscreen"' in n.PAGE and 'id="rm_power"' in n.PAGE)
 
+# --- The PC's now-playing bar: a few controls (2026-10-25) --------------------------------
+ALIVE[0] = True
+MPV["pause"] = True; MPV["mute"] = False
+film_playing()
+with urllib.request.urlopen("http://127.0.0.1:8791/api/playing", timeout=10) as r:
+    _pl = json.loads(r.read())
+check("the bar's poll says whether it's paused and muted",
+      _pl.get("paused") is True and _pl.get("muted") is False, {k: _pl.get(k) for k in ("paused", "muted")})
+_req = urllib.request.Request("http://127.0.0.1:8791/api/remote/toggle", data=json.dumps({"what": "mute"}).encode(),
+                              method="POST", headers={"Content-Type": "application/json"})
+with urllib.request.urlopen(_req, timeout=10) as r:
+    _st = json.loads(r.read())
+check("the bar's buttons use the Remote's own actions", _st.get("muted") is True, _st.get("muted"))
+_pb = n.PAGE[n.PAGE.find("function renderPlaying("):][:6000]
+check("the bar has previous, play/pause, next, mute and close",
+      all(x in _pb for x in ("'prevep'", "'pause'", "'nextep'", "'mute'", "'stop'")) and "pbctl" in _pb, "")
+
+# The bar's title opens what's playing: a film's page, or an episode's show.
+n.NOW_PLAYING.update(type="episode", id=e2, title="Remote Test Show", sub="S01E02", art=None,
+                     started_at=time.time() - 60, channel=None, channel_id=None, position=60.0, duration=1500.0)
+n.LIB.loaded_at = 0
+with urllib.request.urlopen("http://127.0.0.1:8791/api/playing", timeout=10) as r:
+    _pl = json.loads(r.read())
+check("an episode playing: the poll says which show it's from", _pl.get("show_id") == show_id, _pl.get("show_id"))
+film_playing()
+_pb = n.PAGE[n.PAGE.find("function renderPlaying("):][:7000]
+check("the bar's title opens the film, or the episode's show",
+      "'pbtitle'" in _pb and "openFilm(p.id)" in _pb and "openShow(st.show_id)" in _pb, "")
+
 desk.shutdown()
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

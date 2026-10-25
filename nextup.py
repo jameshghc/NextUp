@@ -14846,8 +14846,21 @@ class Handler(BaseHTTPRequestHandler):
                 # page notices the queue shrinking when something hands over
                 # without having to poll a second endpoint.
                 q = queue_state()
+                playing = now_playing_snapshot()
+                # Paused and muted, for the bar's own buttons to show which
+                # way they'd go. Asked of mpv only while something plays.
+                paused = muted = None
+                if playing and mpv_alive():
+                    paused = bool(mpv_get("pause", False))
+                    muted = bool(mpv_get("mute", False))
+                # An episode's show, for the bar's title to open its page.
+                show_id = None
+                if playing and playing.get("type") == "episode":
+                    LIB.load()
+                    ep = next((e for e in LIB.episodes if e.get("episodeid") == playing.get("id")), None)
+                    show_id = ep.get("tvshowid") if ep else None
                 return self.send_json({
-                    "playing": now_playing_snapshot(),
+                    "playing": playing, "paused": paused, "muted": muted, "show_id": show_id,
                     "ask": afk_state(),
                     "queue": {"count": q["count"],
                               "next": q["items"][0] if q["items"] else None}})
@@ -17484,10 +17497,17 @@ label.f span b{color:var(--marigold);font-weight:400;font-family:var(--mono)}
 #playingbar .eyebrow{font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--marigold);margin-bottom:2px}
 #playingbar b{font-family:var(--display);font-weight:600;font-size:14.5px;color:var(--paper)}
 #playingbar span{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin-left:8px}
-#playingbar > div:last-child{flex:1;min-width:0}
+#playingbar > div:first-of-type{flex:1;min-width:0}   /* what's on; the controls sit at the right */
 .playprogress{height:2px;background:var(--ink-3);border-radius:1px;overflow:hidden;margin-top:7px}
 .playprogress i{display:block;height:100%;background:var(--marigold);transition:width 1s linear}
 #playingbar .remotebtn{flex:none;align-self:center}
+#playingbar .pbtitle{background:none;border:0;padding:0;cursor:pointer;color:var(--paper);
+  font-family:var(--display);font-weight:600;font-size:14.5px}
+#playingbar .pbtitle:hover{text-decoration:underline;text-underline-offset:3px}
+/* The bar's own few controls, between what's on and REMOTE. */
+#playingbar .pbctl{flex:none;display:flex;gap:6px;align-items:center}
+#playingbar .pbctl .iconbtn{min-width:38px;padding:6px 10px;font-size:13px}
+#playingbar .pbctl .iconbtn:disabled{opacity:.35;cursor:default}
 .chtop{display:flex;justify-content:flex-end;gap:8px;padding-top:4px}
 
 .fixform{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
@@ -24018,7 +24038,7 @@ async function openRemote(){
 $('#openremote').onclick = openRemote;
 
 /* ---------- currently playing, shared across every tab ---------- */
-function renderPlaying(p, q){
+function renderPlaying(p, q, st){
   const bar = $('#playingbar');
   if(!p){ bar.classList.add('hidden'); bar.innerHTML=''; return; }
   bar.classList.remove('hidden');
@@ -24027,7 +24047,15 @@ function renderPlaying(p, q){
   const box = el('div');
   box.append(el('div','eyebrow', p.channel || 'Now playing'));
   const line = el('div');
-  line.append(el('b',null, esc(p.title||'')));
+  /* The title opens what's playing: the film's page, or the episode's
+     show's. A channel's live stream or a video has no page, so it's text. */
+  const canOpen = (p.type === 'movie' && p.id) || (p.type === 'episode' && st && st.show_id);
+  const title = el(canOpen ? 'button' : 'b', canOpen ? 'pbtitle' : null, esc(p.title||''));
+  if(canOpen){
+    title.title = 'Open ' + (p.title || 'it');
+    title.onclick = () => p.type === 'movie' ? openFilm(p.id) : openShow(st.show_id);
+  }
+  line.append(title);
   /* Position comes from mpv itself when the control channel is up. Without
      it there's no honest progress to show, so fall back to how long ago it
      started rather than inventing a bar. */
@@ -24057,6 +24085,34 @@ function renderPlaying(p, q){
     box.append(nx);
   }
   bar.append(box);
+  /* The everyday few without opening the Remote: back an episode, play or
+     pause, on an episode, mute, and close the player. The Remote's own
+     actions; the bar redraws from the answer. */
+  const ctl = el('div', 'pbctl');
+  const press = async (action, data) => {
+    await post('/api/remote/' + action, data || {});
+    pollPlaying();
+  };
+  const btn = (label, title, action, data, on) => {
+    const b = el('button', 'iconbtn' + (on ? ' on' : ''), label);
+    b.title = title;
+    b.onclick = () => press(action, data);
+    return b;
+  };
+  const isEp = p.type === 'episode';
+  const prev = btn('\u23EE\uFE0E', 'Previous episode', 'episode', {step: -1});
+  const next = btn('\u23ED\uFE0E', 'Next episode', 'episode', {step: 1});
+  prev.disabled = next.disabled = !isEp;
+  prev.dataset.a = 'prevep'; next.dataset.a = 'nextep';
+  const pause = btn(st && st.paused ? '\u25B6\uFE0E' : '\u23F8\uFE0E', st && st.paused ? 'Play' : 'Pause',
+                    'toggle', {what: 'pause'});
+  pause.dataset.a = 'pause';
+  const mute = btn('MUTE', st && st.muted ? 'Sound back on' : 'Mute', 'toggle', {what: 'mute'}, st && st.muted);
+  mute.dataset.a = 'mute';
+  const stop = btn('\u25A0\uFE0E', 'Close the player', 'stop', {});
+  stop.dataset.a = 'stop';
+  ctl.append(prev, pause, next, mute, stop);
+  bar.append(ctl);
   const remote = el('button','iconbtn remotebtn','REMOTE');
   remote.title = 'Channel, volume and preset buttons in a window of their own';
   remote.onclick = openRemote;
@@ -24153,7 +24209,7 @@ async function pollPlaying(){
      every nine seconds kept the phone from sleeping for nothing. */
   if(document.body.classList.contains('android')) return;
   const r = await api('/api/playing');
-  renderPlaying(r.playing, r.queue);
+  renderPlaying(r.playing, r.queue, r);
   renderAsk(r.ask);
   /* The queue shrinks by itself when something hands over; the panel
      down the side follows it here. */
