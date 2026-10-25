@@ -1233,22 +1233,39 @@ def build_resume_row(limit=4):
     """
     LIB.load()
     out = []
-    # Tuned into on a channel and never sat with: History doesn't list it,
-    # so Continue doesn't either. A real stretch on a channel is followed by
-    # a "stopped" or "watched", which takes it off this list.
+    # Tuned into on a channel and only flicked past: History doesn't list
+    # it, so Continue doesn't either. A real stretch on a channel ends in a
+    # "stopped" or "watched" now; before that was written (2026-10-25) the
+    # only sign was how long it was before the next thing started, so a
+    # tune-in with a minute or more before the next counts as a sitting
+    # too — This Is the End, nine minutes, rather than the four films
+    # flicked through in the twenty seconds before it.
     flicked = set()
     try:
         conn = db()
-        for row in conn.execute(
-                "SELECT h.kind, h.item_id FROM history h"
-                " JOIN (SELECT kind, item_id, MAX(id) AS last FROM history"
-                "       WHERE kind IN ('movie','episode') AND item_id IS NOT NULL"
-                "       AND (event IN ('played','stopped','watched','next episode','previous episode')"
-                "            OR event LIKE 'tuned in via %' OR event LIKE 'next up on %')"
-                "       GROUP BY kind, item_id) x ON x.last = h.id"
-                " WHERE h.event LIKE 'tuned in via %' OR h.event LIKE 'next up on %'"):
-            flicked.add((row["kind"], row["item_id"]))
+        rows = conn.execute(
+            "SELECT id, at, kind, item_id, event FROM history"
+            " WHERE kind IN ('movie','episode','youtube') AND (event IN"
+            " ('played','stopped','watched','next episode','previous episode')"
+            " OR event LIKE 'tuned in via %' OR event LIKE 'next up on %')"
+            " ORDER BY id").fetchall()
         conn.close()
+        stamp = lambda at: time.mktime(time.strptime(at[:19], "%Y-%m-%d %H:%M:%S"))
+        last = {}
+        for i, row in enumerate(rows):
+            if row["item_id"] is not None and row["kind"] != "youtube":
+                last[(row["kind"], row["item_id"])] = i
+        for key, i in last.items():
+            row = rows[i]
+            if not (row["event"].startswith("tuned in via ") or row["event"].startswith("next up on ")):
+                continue
+            after = rows[i + 1] if i + 1 < len(rows) else None
+            try:
+                stayed = after and stamp(after["at"]) - stamp(row["at"]) >= MIN_WATCH_SECONDS
+            except (TypeError, ValueError):
+                stayed = False
+            if not stayed:
+                flicked.add(key)
     except Exception:
         pass
 
@@ -4115,12 +4132,8 @@ def _mpv_load(path, start, keep_open):
     in, but the argument list for it changed shape between mpv releases, so
     a plain load followed by a seek is kept as the fallback for older ones.
     """
-    # Save where the outgoing file got to — unless it was only on for
-    # moments (flicking channels), when there's nothing worth keeping.
-    with _PLAY_LOCK:
-        started = NOW_PLAYING.get("started_at") or 0
-    if not started or time.time() - started >= MIN_WATCH_SECONDS:
-        mpv_command("write-watch-later-config")
+    # Where the outgoing file got to was saved as its sitting was closed
+    # (_close_outgoing), and only if it was more than a flick.
     mpv_command("set_property", "idle", "yes" if keep_open else "no")
 
     seek = int(start) if start and start > 5 else 0
@@ -4205,9 +4218,11 @@ def mpv_play(path, start=0, keep_open=False):
     except OSError as exc:
         raise AppError("Couldn't create the resume folder: %s" % exc)
 
-    if mpv_alive() and _mpv_load(path, start, keep_open):
-        _KEEP_OPEN[0] = keep_open
-        return _PLAY_PROC[0]
+    if mpv_alive():
+        _close_outgoing()
+        if _mpv_load(path, start, keep_open):
+            _KEEP_OPEN[0] = keep_open
+            return _PLAY_PROC[0]
 
     # Nothing running, or it stopped answering — start one.
     stop_current_playback()
@@ -4278,6 +4293,7 @@ def mpv_play_url(url):
     # then on nothing could reach it: not the progress bar, not the remote,
     # and not tuning back off the live channel afterwards.
     if mpv_alive() and (not needs_ytdlp or _ytdl_reachable()):
+        _close_outgoing()
         if _mpv_load(url, 0, False):
             _KEEP_OPEN[0] = False
             return _PLAY_PROC[0]
@@ -5493,11 +5509,31 @@ def _hand_over(current, follow_on):
         mpv_command("quit")
 
 
+def _close_outgoing():
+    """Something new is going into the window that's already open: close the
+    books on what was in it first. Only Play from the right-click menu and
+    the queue did this, so tuning a channel, or playing anything over one,
+    left no "stopped" for what had been on — nine minutes of a film read the
+    same as nine seconds (asked about, 2026-10-25)."""
+    with _PLAY_LOCK:
+        busy = NOW_PLAYING.get("type") in ("movie", "episode")
+    if busy:
+        _finish_current("skipped")
+
+
 def _finish_current(reason):
     """Write down what happened, then put the next thing on."""
     with _PLAY_LOCK:
         current = dict(NOW_PLAYING)
         if current.get("type") is None:
+            return
+    # Swapped for something else in the same window: have mpv save where
+    # this got to, as quitting would — unless it was only on for moments.
+    if (reason == "skipped" and current.get("type") in ("movie", "episode")
+            and time.time() - (current.get("started_at") or time.time()) >= MIN_WATCH_SECONDS):
+        mpv_command("write-watch-later-config")
+    with _PLAY_LOCK:
+        if NOW_PLAYING.get("type") is None:
             return
         follow_on = current.get("channel_id") if _KEEP_OPEN[0] else None
         if reason == "closed":

@@ -128,9 +128,28 @@ n.log_event("movie", e2, "x", "stopped", seconds=1800, position=4200, total=6000
 n.LIB.loaded_at = 0
 check("but not a real stretch on a channel", any(c["type"] == "movie" and c["id"] == e2
                                                  for c in n.build_resume_row(limit=0)))
-check("and an outgoing flick isn't saved by mpv at all",
-      "if not started or time.time() - started >= MIN_WATCH_SECONDS:\n        mpv_command(\"write-watch-later-config\")"
-      in open(n.__file__, encoding="utf-8").read())
+_src = open(n.__file__, encoding="utf-8").read()
+check("an outgoing flick isn't saved by mpv at all",
+      'reason == "skipped" and current.get("type") in ("movie", "episode")' in _src
+      and "and time.time() - (current.get(\"started_at\") or time.time()) >= MIN_WATCH_SECONDS):\n        mpv_command(\"write-watch-later-config\")" in _src)
+check("anything put into an open window closes the sitting before it",
+      _src.count("_close_outgoing()") >= 3 and "if mpv_alive():\n        _close_outgoing()" in _src)
+
+# Before "stopped" was written for a channel: the gap before the next thing
+# says whether it was a flick (seconds) or a sitting (nine minutes).
+k = n.db()
+f1, f2 = [r[0] for r in k.execute("SELECT id FROM movies ORDER BY id LIMIT 2 OFFSET 8")]
+for fid in (f1, f2):
+    k.execute("UPDATE movies SET resume_pos=4200, resume_total=6000, last_played=? WHERE id=?", (n.now_stamp(), fid))
+    n._sync_watch_later(k.execute("SELECT path FROM movies WHERE id=?", (fid,)).fetchone()[0], 4200)
+k.execute("INSERT INTO history (at, kind, item_id, title, event) VALUES ('2030-01-01 03:18:10','movie',?,'a','tuned in via X #1')", (f1,))
+k.execute("INSERT INTO history (at, kind, item_id, title, event) VALUES ('2030-01-01 03:18:19','movie',?,'b','tuned in via X #2')", (f2,))
+k.execute("INSERT INTO history (at, kind, item_id, title, event) VALUES ('2030-01-01 03:27:34','episode',1,'c','played')")
+k.commit(); k.close()
+n.LIB.loaded_at = 0
+_ids = {c["id"] for c in n.build_resume_row(limit=0) if c["type"] == "movie"}
+check("nine seconds on before the next channel: a flick", f1 not in _ids)
+check("nine minutes on before the next thing: a sitting", f2 in _ids)
 
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
