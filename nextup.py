@@ -16008,6 +16008,10 @@ body{display:flex;flex-direction:column}
 #view-library:not(.showing-home) > #view-home{display:none}
 #view-library > #view-home{flex:1;min-height:0;overflow-y:auto;padding:32px 0 28px;
   display:flex;flex-direction:column;gap:40px}
+/* No bar down the right on Home, asked for: the page still scrolls with
+   the wheel if a short window needs it. */
+#view-library.showing-home,#view-library > #view-home{scrollbar-width:none}
+#view-library.showing-home::-webkit-scrollbar,#view-library > #view-home::-webkit-scrollbar{display:none}
 .homesec{display:flex;flex-direction:column;gap:12px;min-width:0;margin-top:0}   /* not the page's usual section gap */
 .homehead{margin:0;font-family:var(--display);font-weight:700;font-size:19px}
 /* A row is the library's own tile size, six across, sliding for the rest. */
