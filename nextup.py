@@ -17341,22 +17341,32 @@ body.android .chooserback{display:none}
    the top, the chooser under it in one line, then the pick with its
    alternatives in a column beside it. The three boxes and the reason cards
    go — the card carries a short why of its own. */
-body:not(.android) #view-now:not(.hidden){display:grid;grid-template-columns:minmax(0,1fr) 260px;
+body:not(.android) #view-now:not(.hidden){display:grid;scrollbar-width:none;grid-template-columns:minmax(0,1fr) 260px;
   grid-template-areas:"cont side" "pick side";grid-template-rows:auto 1fr;
   column-gap:18px;align-content:start}
-body:not(.android) #view-now > #unfinished-sec{grid-area:cont;margin:6px 0 10px}
+body:not(.android) #view-now > #unfinished-sec{grid-area:cont;margin:0 0 10px}
+/* Up a little, and no scroll bar down the right (asked for, 2026-10-25): it
+   still scrolls when the window's too short, just without the bar. */
+body:not(.android) #view-now::-webkit-scrollbar{display:none}
+body:not(.android) .wrap:has(> #view-now:not(.hidden)) > header.mast{margin-bottom:4px}
 /* The chooser and the alternatives it produced, one column down the right:
    in a wrapper, so the alternatives follow straight on from the chooser
    rather than waiting for a grid row the pick has made tall. */
 body:not(.android) #view-now > #nowside{grid-area:side;min-width:0;margin-top:2px}
 /* The tags start level with the Continue cards rather than their heading —
    while there are cards; with none, the chooser goes to the top. */
-body:not(.android) #view-now:has(#unfinished-sec:not(.hidden)) > #nowside{margin-top:48px}
+body:not(.android) #view-now:has(#unfinished-sec:not(.hidden)) > #nowside{margin-top:42px}
 body:not(.android) #nowside > .nowchooser{display:grid;grid-template-columns:auto minmax(0,1fr);
   gap:8px;margin:0 0 14px;min-width:0;align-items:start}
 body:not(.android) .nowchooser #chooser-genre{grid-column:1 / -1}
 body:not(.android) #view-now > #tonight-out{grid-area:pick;min-width:0}
 body:not(.android) #nowside > .nowfits{display:block}
+/* The alternatives straight on the page: no panel behind them and no
+   "Or instead" line over them (asked for, 2026-10-25). Past the glass
+   rule's #id. */
+body:not(.android) #nowside > .nowfits{background:none!important;border:0!important;padding:0!important;
+  backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
+body:not(.android) .nowfits h3{display:none}
 body:not(.android) #nowside > .nowfits.hidden{display:none}
 body:not(.android) #view-now > .filters,body:not(.android) #view-now > #reasons-out{display:none}
 body:not(.android) .nowchooser .chooserow{display:flex;gap:6px}
@@ -17364,7 +17374,10 @@ body:not(.android) .nowchooser .chooserow.hidden{display:none}
 body:not(.android) .nowchooser .chooserow.genres{flex-wrap:wrap}
 body:not(.android) .nowchooser .kchip{flex:1;padding:8px 0;font-size:13px}
 body:not(.android) .chooserback{padding:8px 12px!important;font-size:13px!important}
-body:not(.android) .chooserback:disabled{opacity:.35;cursor:default}
+/* It shows and hides the genres: pointing right while they're folded away,
+   down while they're out. */
+body:not(.android) .chooserback span{display:inline-block;transition:transform .15s ease;transform:rotate(180deg)}
+body:not(.android) .chooserback[aria-expanded="true"] span{transform:rotate(-90deg)}
 body:not(.android) #unfinished-sec .sechead{margin-bottom:8px}
 body:not(.android) #unfinished-sec .sechead p{display:none}
 body:not(.android) #unfinished-sec .sechead h2{font-size:16px}
@@ -18765,8 +18778,8 @@ body:not(.android) #remotetab{display:none}
   <div id="nowside">
   <div class="nowsource hidden" id="nowsource">From the PC’s library</div>
   <div class="nowchooser" id="nowchooser">
-    <button class="kchip chooserback" id="chooserback" type="button" disabled
-            title="Back to the one before">‹</button>
+    <button class="kchip chooserback" id="chooserback" type="button"
+            title="Show the genres" aria-expanded="false"><span>‹</span></button>
     <div class="chooserow" id="chooser-kind"></div>
     <div class="chooserow genres" id="chooser-genre"></div>
   </div>
@@ -19530,8 +19543,6 @@ let offTrail = false;
 
 function paintBack(){
   $('#spinback').disabled = offTrail ? trailAt < 0 : trailAt <= 0;
-  const back = document.getElementById('chooserback');
-  if(back) back.disabled = $('#spinback').disabled;
   document.querySelectorAll('.pickback').forEach(b => b.disabled = $('#spinback').disabled);
 }
 
@@ -19984,6 +19995,9 @@ const CHOOSER_KINDS = [['any', 'Anything'], ['film', 'Film'], ['tv', 'TV']];
 let chooserStep = 1;            // 1 a kind (Anything to start), 2 a kind and genres
 var chosenGenres = [];          // var: read by nowGenres before this line may run
 let genreAvail = null;          // [{name, n}] for the kind and genres chosen
+/* The genres are out with Film or TV, and folded away with Anything until
+   the button beside it brings them out (asked for, 2026-10-25). */
+let genresOpen = false;
 
 function drawChooser(){
   const kinds = $('#chooser-kind');
@@ -19996,6 +20010,12 @@ function drawChooser(){
     kinds.append(b);
   });
   const genres = $('#chooser-genre');
+  const fold = $('#chooserback');
+  if(!document.body.classList.contains('android')){
+    genres.classList.toggle('hidden', !genresOpen);
+    fold.setAttribute('aria-expanded', String(genresOpen));
+    fold.title = genresOpen ? 'Hide the genres' : 'Show the genres';
+  }
   /* Redrawn on every choice; on the phone it's a row you've scrolled along
      to find the genre, and starting it back at the beginning lost your place. */
   const keepLeft = genres.scrollLeft;
@@ -20032,6 +20052,7 @@ function chooserKind(value){
   $('#kind').value = value;
   chosenGenres = [];
   genreAvail = null;
+  genresOpen = value !== 'any';
   /* Anything is a kind like the others now: its tags stay up, and combine
      the same way — what's chosen narrows films and TV together. */
   chooserStep = 1;
@@ -20072,7 +20093,7 @@ async function keepPlace(anchor, change){
   if(Math.abs(moved) > 1) view.scrollTop += moved;
 }
 
-$('#chooserback').onclick = () => $('#spinback').click();
+$('#chooserback').onclick = () => { genresOpen = !genresOpen; drawChooser(); };
 
 /* A mouse wheel over a sideways strip moves the strip, not the page —
    while there's further for it to go. At either end the page has it back. */

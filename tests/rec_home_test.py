@@ -165,6 +165,11 @@ check("the PC's Now: Continue on top, the chooser, the pick with its alternative
       and "function shortWhy(" in page and "function pcCardOrder(" in page)
 check("the chooser: several genres, the impossible greyed, Anything folds it away, and NEXT not NOT THIS",
       "/api/genres" in page and "chosenGenres" in page and "'NEXT'" in page and "'NOT THIS'" not in page)
+# 2026-10-25: the arrow beside Anything shows and hides the genres; Film and
+# TV bring them out, Anything folds them away.
+check("the arrow by Anything shows and hides the genres",
+      "genresOpen = !genresOpen" in page and "genresOpen = value !== 'any'" in page
+      and "$('#chooserback').onclick = () => $('#spinback').click()" not in page)
 
 # Now's Continue strip: films too. It used to put every half-watched
 # episode ahead of every film and stop at six, so with thirty shows on the
@@ -206,8 +211,10 @@ check("a tab bar, drawn and remembered", 'id="settabs"' in page and "function sh
 
 # 2026-10-19, second pass: no empty chooser on opening. Anything is chosen
 # from the start with every tag showing, and tags combine under Anything too.
-check("the tags show from the start", 'class="chooserow genres" id="chooser-genre"' in page
-      and "genres.classList.toggle('hidden'" not in page)
+# 2026-10-25: on the PC they fold away under Anything behind the arrow
+# beside it; on the phone they still show from the start.
+check("the tags show from the start on the phone", 'class="chooserow genres" id="chooser-genre"' in page
+      and "if(!document.body.classList.contains('android')){\n    genres.classList.toggle('hidden', !genresOpen)" in page)
 _kind = page[page.find("function chooserKind("):][:700]
 check("Anything no longer folds the tags away", "function chooserKind(" in page
       and "chooserStep = 0" not in _kind and "chooserStep = 0" not in page)

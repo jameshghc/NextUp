@@ -13,6 +13,8 @@ What changed in Next Up, version by version, newest first. Version numbers start
 
 ### Also new
 - A third look in Settings › Appearance, Silver: Glass's panels in neutral greys over a charcoal background, with the silver accent.
+- On the PC's Now page, the small arrow beside Anything shows and hides the genres (pointing right while they're hidden, down while they're out). Anything starts with them folded away; Film and TV bring them out. It used to step back a pick, which BACK on the card still does.
+- The PC's Now page sits a little higher with no scroll bar down the right, and the alternatives beside the pick are straight on the page, without the panel or the "Or instead" line.
 - The header is back to the page's own colour with a thin line under it, in every look (Glass had a black bar with gold lettering).
 - The PC's now-playing bar has its own controls (previous and next episode, play/pause, mute, close the player), and its title opens what's playing.
 - On the phone, a second tap on a tile opens its details; with the PC connected, a show or film the phone hasn't got opens the PC's full page, playing HERE or ON PC.
