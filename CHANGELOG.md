@@ -17,6 +17,7 @@ What changed in Next Up, version by version, newest first. Version numbers start
 - The PC's Now page sits a little higher with no scroll bar down the right, and the alternatives beside the pick are straight on the page, without the panel or the "Or instead" line.
 - Settings › Appearance has a Font choice: Next Up (as it was), Sleek (Manrope) and Cinema (Fraunces headings). All three are bundled, so they work offline.
 - A title on the Now page is never cut off: a long one gets smaller and, on the PC, goes onto two lines in the same space, so the buttons stay put.
+- The line above the rating on Now says one thing worth knowing, tied to you, rather than a stack of facts: "Kubrick's war comedy. You gave 2001: A Space Odyssey a 9.5.", the one film of a series you haven't seen, a favourite you last watched years ago, one of a show's best episodes you've never seen, or when it'd finish tonight. The film's tagline when there's nothing better.
 - The header is back to the page's own colour with a thin line under it, in every look (Glass had a black bar with gold lettering).
 - The PC's now-playing bar has its own controls (previous and next episode, play/pause, mute, close the player), and its title opens what's playing.
 - On the phone, a second tap on a tile opens its details; with the PC connected, a show or film the phone hasn't got opens the PC's full page, playing HERE or ON PC.

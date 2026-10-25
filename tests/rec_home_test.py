@@ -236,5 +236,36 @@ check("the title's column can narrow, so a one-line title can't push past the ca
       "body:not(.android) .pick > div{min-width:0}" in page)
 check("Play is one width, Play or Resume", "body:not(.android) .pick .rowbtns .play{min-width:" in page)
 
+# 2026-10-25: the line above the rating is one angle tied to you, the
+# tagline when there's nothing better.
+check("genres become words", n._genre_phrase(["Comedy", "War"]) == "war comedy"
+      and n._genre_phrase(["Documentary"]) == "documentary" and n._genre_phrase([]) == "")
+check("an 8, a 9", n._a_score(8) == "an 8" and n._a_score(8.5) == "an 8.5" and n._a_score(9) == "a 9")
+n.LIB.load()
+_lines = [n.pick_line("movie", m["movieid"]) for m in n.LIB.movies[:40]]
+_lines += [n.pick_line("episode", e["episodeid"]) for e in n.LIB.episodes[:20]]
+check("every pick gets a short line", n.LIB.movies and all(isinstance(l, str) and len(l) < 260 for l in _lines)
+      and sum(1 for l in _lines if l) >= len(_lines) * 0.8, [l for l in _lines if not l][:3])
+check("no stacked keyword lists any more", not any(l.startswith("Shares ") for l in _lines))
+_m = n.LIB.movies[0]
+_saved = {k: _m.get(k) for k in ("director", "cast_list", "set", "playcount", "rating", "runtime")}
+_m.update({"director": [], "cast_list": [], "set": None, "playcount": 0, "rating": 0, "runtime": 0})
+_orig_db = n.db
+class _Conn:
+    def execute(self, *a):
+        class C:
+            def fetchone(self): return {"tagline": "In space no one can hear you scream."}
+        return C()
+    def close(self): pass
+n.db = lambda: _Conn()
+check("nothing better: the tagline", n.pick_line("movie", _m["movieid"]) == "“In space no one can hear you scream.”")
+n.db = _orig_db
+_m.update(_saved)
+_src = open(n.__file__, encoding="utf-8").read()
+check("the page is sent it, and the phone gets it from the PC",
+      '"cards": build_reasons(kind, ident), "line": line' in _src and 'p["line"] = pick_line(' in _src)
+check("and shows it", "if(r && r.line){ why.textContent = r.line; return; }" in page
+      and "p.line || p.why" in page)
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

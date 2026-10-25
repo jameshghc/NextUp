@@ -6591,6 +6591,205 @@ def build_reasons(kind, item_id):
     return chosen
 
 
+# --- the pick's one line --------------------------------------------------
+#
+# The line above the rating on Now: one angle, the strongest there is, said
+# as a hook and tied to you ("Kubrick's war comedy. You gave 2001: A Space
+# Odyssey a 9.5.") rather than a stack of facts (asked for, 2026-10-25).
+# Each angle scores itself; the best one wins, and a line that says nothing
+# about you gets the best personal tie after it. The film's own tagline when
+# nothing better can be worked out.
+
+_GENRE_NOUN = {"Comedy": "comedy", "Drama": "drama", "Thriller": "thriller", "Horror": "horror",
+               "Action": "action film", "Adventure": "adventure", "Science Fiction": "sci-fi",
+               "Fantasy": "fantasy", "Animation": "animation", "Crime": "crime story",
+               "Romance": "romance", "Mystery": "mystery", "War": "war film", "Western": "western",
+               "Documentary": "documentary", "Family": "family film", "History": "period piece",
+               "Music": "music film", "TV Movie": "TV film"}
+_GENRE_MOD = {"Comedy": "comic", "Horror": "horror", "Science Fiction": "sci-fi",
+              "Animation": "animated", "Romance": "romantic", "War": "war", "Crime": "crime",
+              "Fantasy": "fantasy", "Family": "family", "Mystery": "mystery", "Thriller": "tense",
+              "Action": "action", "History": "period", "Music": "musical", "Western": "western"}
+
+
+def _genre_phrase(genres):
+    """'war comedy', 'fantasy adventure', 'documentary': two genres made into
+    words, the first the noun."""
+    genres = [g for g in (genres or []) if g in _GENRE_NOUN]
+    if not genres:
+        return ""
+    noun = _GENRE_NOUN[genres[0]]
+    for g in genres[1:]:
+        mod = _GENRE_MOD.get(g)
+        if mod and mod not in noun:
+            return "%s %s" % (mod, noun)
+    return noun
+
+
+def _ago(stamp):
+    """'last week', '3 months ago', '2 years ago' from a last-played stamp."""
+    try:
+        days = (time.time() - time.mktime(time.strptime(stamp[:19], "%Y-%m-%d %H:%M:%S"))) / 86400
+    except (TypeError, ValueError):
+        return ""
+    if days < 2:
+        return "yesterday" if days >= 1 else "today"
+    if days < 14:
+        return "last week" if days >= 7 else "%d days ago" % days
+    if days < 60:
+        return "%d weeks ago" % (days // 7)
+    if days < 365:
+        return "%d months ago" % (days // 30)
+    years = int(days // 365)
+    return "a year ago" if years == 1 else "%d years ago" % years
+
+
+def _a_score(value):
+    """'a 9', 'an 8', 'an 8.5', 'an 11'."""
+    text = fmt_score(value)
+    return ("an " if text.startswith("8") or text in ("11", "18") else "a ") + text
+
+
+def _surname(name):
+    return (name or "").split()[-1] if name else ""
+
+
+def _top_genres(n=2):
+    counts = Counter()
+    for m in LIB.movies:
+        if m.get("playcount"):
+            counts.update((m.get("genre") or [])[:2])
+    return [g for g, _ in counts.most_common(n)]
+
+
+def _film_angles(m):
+    """[(strength, text, personal)] for a film."""
+    out = []
+    phrase = _genre_phrase(m.get("genre"))
+    people, directors = library_index()
+    mid = m.get("movieid")
+    # Who made it, and what of theirs you scored.
+    for name in (m.get("director") or [])[:2]:
+        scored = [e for e in directors.get(name, []) if e["id"] != mid and e["score"]]
+        if scored:
+            best = max(scored, key=lambda e: e["score"])
+            hook = "%s's %s." % (_surname(name), phrase) if phrase else "Another %s." % name
+            out.append((10 + best["score"] / 2.0, "%s You gave %s %s." % (hook, best["title"], _a_score(best["score"])), True))
+            break
+    # Who's in it.
+    for name in (m.get("cast_list") or [])[:4]:
+        scored = [e for e in people.get(name, []) if e["id"] != mid and e["score"]]
+        if scored:
+            best = max(scored, key=lambda e: e["score"])
+            hook = ("%s %s with %s." % ("An" if phrase[0] in "aeiou" else "A", phrase, name)
+                    if phrase else "%s again." % name)
+            out.append((8 + best["score"] / 2.0, "%s You gave %s %s." % (hook, best["title"], _a_score(best["score"])), True))
+            break
+    # The one of a series you haven't seen.
+    if m.get("set") and not m.get("playcount"):
+        sibs = [x for x in LIB.movies if x.get("set") == m.get("set") and x.get("movieid") != mid]
+        seen = [x for x in sibs if x.get("playcount")]
+        unseen = [x for x in sibs if not x.get("playcount")]
+        if seen:
+            name = re.sub(r"\s+(Collection|Trilogy|Saga)$", "", m.get("set"))
+            text = ("The one %s film you haven't seen." % name if not unseen
+                    else "%d of the %s films seen; this isn't one of them." % (len(seen), name))
+            out.append((14, text, True))
+    # A rewatch of something you loved.
+    if m.get("playcount") and (m.get("userrating") or 0) >= 8 and m.get("last_played"):
+        ago = _ago(m["last_played"])
+        if ago and ago not in ("today", "yesterday"):
+            out.append((9 + m["userrating"] / 2.0, "Last watched %s, and you gave it %s." % (ago, _a_score(m["userrating"])), True))
+    # Critics and your taste agreeing.
+    rating = m.get("rating") or 0
+    top = _top_genres()
+    shared = [g for g in (m.get("genre") or []) if g in top]
+    if rating >= 7.5 and shared:
+        out.append((7, "TMDB %.1f, in %s, one of the genres you watch most." % (rating, shared[0].lower()), False))
+    # The time of night.
+    mins = minutes(m.get("runtime"))
+    hour = time.localtime().tm_hour
+    if mins and (hour >= 17 or hour < 2):
+        done = time.strftime("%H:%M", time.localtime(time.time() + mins * 60))
+        out.append((5, "%d minutes%s, done by %s." % (mins, " of " + phrase if phrase else "", done), False))
+    return out
+
+
+def _episode_angles(show, e):
+    out = []
+    try:
+        scores = episode_scores(show["tvshowid"], rewatches=False) or {}
+    except Exception:
+        scores = {}
+    title = show.get("title") or "the show"
+    eid = e.get("episodeid")
+    if eid in scores and len(scores) >= 8:
+        ranked = sorted(scores, key=lambda i: -scores[i])
+        place = ranked.index(eid)
+        season = e.get("season")
+        if place < 5:
+            text = "One of the five best %s episodes, by your scores" % title
+        elif place < len(ranked) // 4:
+            text = "In the top quarter of %s, by your scores" % title
+        else:
+            text = ""
+        if text:
+            if not e.get("playcount"):
+                text += ", and one you've never seen."
+            elif e.get("last_played") and (e.get("last_played") or "") < _days_ago_stamp(30):
+                text += "; last seen %s." % _ago(e["last_played"])
+            else:
+                text += "."
+            out.append((12 - place / 5.0, text, True))
+    if not e.get("playcount") and (show.get("userrating") or 0) >= 7:
+        out.append((8, "An episode of %s you've never seen, and you gave the show %s." % (title, _a_score(show["userrating"])), True))
+    elif e.get("playcount") and e.get("last_played") and (e.get("last_played") or "") < _days_ago_stamp(180):
+        out.append((7, "Not seen since %s." % (_ago(e["last_played"]),), True))
+    if show.get("userrating"):
+        out.append((3, "You gave %s %s." % (title, _a_score(show["userrating"])), True))
+    mins = minutes(e.get("runtime"))
+    hour = time.localtime().tm_hour
+    if mins and (hour >= 17 or hour < 2):
+        done = time.strftime("%H:%M", time.localtime(time.time() + mins * 60))
+        out.append((4, "%d minutes, done by %s." % (mins, done), False))
+    return out
+
+
+def pick_line(kind, item_id):
+    """The pick's one or two sentences: the strongest angle, tied to you;
+    the tagline if nothing better; "" if not even that."""
+    LIB.load()
+    item_id = int(item_id)
+    tagline = ""
+    if kind == "movie":
+        m = next((x for x in LIB.movies if x.get("movieid") == item_id), None)
+        if not m:
+            return ""
+        ensure_cast_lists()
+        angles = _film_angles(m)
+        conn = db()
+        row = conn.execute("SELECT tagline FROM movies WHERE id=?", (item_id,)).fetchone()
+        conn.close()
+        tagline = (row["tagline"] if row else "") or ""
+    else:
+        e = next((x for x in LIB.episodes if x.get("episodeid") == item_id), None)
+        show = e and next((x for x in LIB.shows if x.get("tvshowid") == e.get("tvshowid")), None)
+        if not show:
+            return ""
+        angles = _episode_angles(show, e)
+    angles.sort(key=lambda a: -a[0])
+    if angles:
+        strength, text, personal = angles[0]
+        if not personal:
+            tie = next((a for a in angles[1:] if a[2]), None)
+            if tie:
+                text = tie[1] + " " + text
+            elif tagline:
+                text = "\u201c%s\u201d %s" % (tagline.strip().rstrip("."), text)
+        return text
+    return "\u201c%s\u201d" % tagline.strip() if tagline.strip() else ""
+
+
 def fallback_card(item, kind):
     """There is always something to say, even about a file we know nothing
     about — and if we know nothing, say why rather than showing a blank."""
@@ -12693,6 +12892,14 @@ def phone_now(args, exclude):
     if not picks and exclude:
         picks = build_tonight(**args)
         reset = bool(picks)
+    picks = [dict(p) for p in picks]
+    # The phone can't ask this PC /api/why by id, so the one line comes
+    # along, for the first few (the rest are the alternatives).
+    for p in picks[:4]:
+        try:
+            p["line"] = pick_line("movie" if p.get("type") == "movie" else "episode", p.get("id"))
+        except Exception:
+            pass
     return {"picks": [_for_phone(p) for p in picks], "reset": reset,
             "continue": [_for_phone(c) for c in build_continue()]}
 
@@ -15346,8 +15553,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(person_profile(one("id", ""), one("name", "")))
 
             if route == "/api/why":
-                return self.send_json({
-                    "cards": build_reasons(one("type", "movie"), one("id", "0"))})
+                kind, ident = one("type", "movie"), one("id", "0")
+                try:
+                    line = pick_line(kind, ident)
+                except Exception:
+                    line = ""
+                return self.send_json({"cards": build_reasons(kind, ident), "line": line})
 
             if route == "/api/watch-scores":
                 # Not linked from the page — the score is hidden for now.
@@ -19943,9 +20154,12 @@ function pcCardOrder(p, right, btns, problem, meta, rateSlot){
    reasons — the cards the page used to show at length. */
 function shortWhy(p){
   const why = el('p', 'ppwhy');
-  if(p._pc){ why.textContent = p.why || ''; return why; }   // reasons are asked by id: the PC's
+  if(p._pc){ why.textContent = p.line || p.why || ''; return why; }   // reasons are asked by id: the PC's
   (p._why || api('/api/why?type=' + encodeURIComponent(p.type) + '&id=' + p.id))
     .then(r => {
+      /* The one line (see pick_line); the old two first sentences only
+         if it has nothing at all to say. */
+      if(r && r.line){ why.textContent = r.line; return; }
       const cards = (r && r.cards || []).slice().sort((a, b) => (b.weight || 0) - (a.weight || 0));
       const first = t => (String(t || '').match(/^.*?[.!?](\s|$)/) || [String(t || '')])[0].trim();
       why.textContent = cards.slice(0, 2).map(c => first(c.body)).filter(Boolean).join(' ');
