@@ -3443,16 +3443,48 @@ def cache_artwork(conn, progress=None):
     return len(wanted)
 
 
+def _title_key(text):
+    text = unicodedata.normalize("NFKD", text or "").encode("ascii", "ignore").decode().lower()
+    text = re.sub(r"^(the|a|an)\s+", "", text.replace("&", "and"))
+    return re.sub(r"[^a-z0-9]+", "", text)
+
+
 def tmdb_find_movie(title, year):
+    """The film a file name means. TMDB's first answer for the year was
+    taken as it came, and a folder with the wrong year got the wrong film:
+    "Rango (2009)" became Mentes enfermas de alto rango, a 2009 film with
+    the word in it, rather than Rango (2011). So a result whose title IS the
+    name wins over one that only shares the year, a year or two out being
+    forgiven; the year still decides between remakes of the same title."""
     params = {"query": title}
     if year:
         params["year"] = year
     found = tmdb("/search/movie", params) or {}
     results = found.get("results") or []
-    if not results and year:
-        found = tmdb("/search/movie", {"query": title}) or {}
-        results = found.get("results") or []
-    return results[0] if results else None
+    want = _title_key(title)
+
+    def same(r):
+        return want and want in (_title_key(r.get("title")), _title_key(r.get("original_title")))
+
+    if results and (not year or same(results[0])):
+        return results[0]
+    if year:
+        more = (tmdb("/search/movie", {"query": title}) or {}).get("results") or []
+        seen = {r.get("id") for r in results}
+        results = results + [r for r in more if r.get("id") not in seen]
+    if not results:
+        return None
+
+    def score(pair):
+        at, r = pair
+        s = 10 if same(r) else 0
+        try:
+            gap = abs(int((r.get("release_date") or "")[:4]) - int(year))
+            s += max(0, 3 - gap)
+        except (TypeError, ValueError):
+            pass
+        return (s, -at)
+    return max(enumerate(results), key=score)[1]
 
 
 # --- the library, in the shape the rest of the app expects ----------------

@@ -264,6 +264,24 @@ _m.update(_saved)
 _src = open(n.__file__, encoding="utf-8").read()
 check("the page is sent it, and the phone gets it from the PC",
       '"cards": build_reasons(kind, ident), "line": line' in _src and 'p["line"] = pick_line(' in _src)
+# 2026-10-25: "Rango (2009)" matched a 2009 film with "rango" in its title.
+_real_tmdb = n.tmdb
+_fake = {
+    ("Rango", "2009"): [{"id": 1, "title": "Mentes enfermas de alto rango", "original_title": "Mentes enfermas de alto rango", "release_date": "2009-05-01"}],
+    ("Rango", None): [{"id": 2, "title": "Rango", "original_title": "Rango", "release_date": "2011-03-02"},
+                      {"id": 1, "title": "Mentes enfermas de alto rango", "release_date": "2009-05-01"}],
+    ("Dune", "2021"): [{"id": 3, "title": "Dune", "release_date": "2021-09-15"}],
+    ("Dune", None): [{"id": 4, "title": "Dune", "release_date": "1984-12-14"}, {"id": 3, "title": "Dune", "release_date": "2021-09-15"}],
+    ("Amelie", "2001"): [{"id": 5, "title": "Amélie", "original_title": "Le Fabuleux Destin d'Amélie Poulain", "release_date": "2001-04-25"}],
+    ("Heat", "1995"): [{"id": 6, "title": "Heat", "release_date": "1995-12-15"}],
+}
+n.tmdb = lambda path, params=None, fresh=False: {"results": _fake.get((params["query"], params.get("year")), [])}
+check("a wrong year in the folder doesn't win a wrong film", (n.tmdb_find_movie("Rango", "2009") or {}).get("id") == 2)
+check("the right year still picks the remake", (n.tmdb_find_movie("Dune", "2021") or {}).get("id") == 3)
+check("accents and the like still match", (n.tmdb_find_movie("Amelie", "2001") or {}).get("id") == 5
+      and (n.tmdb_find_movie("Heat", "1995") or {}).get("id") == 6)
+check("nothing at all is still nothing", n.tmdb_find_movie("Zzzz", "1999") is None)
+n.tmdb = _real_tmdb
 check("and shows it", "if(r && r.line){ why.textContent = r.line; return; }" in page
       and "p.line || p.why" in page)
 
