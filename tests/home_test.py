@@ -110,5 +110,10 @@ check("the Library's toolbar: Sort, then Show, then the search box",
 check("the page: two rows, Quick Suggest and Continue, a tile plays",
       "Quick Suggest" in pg and "function loadHome(" in pg and "'tile hometile'" in pg)
 
+# 2026-10-26: on the phone, Home is drawn again from the PC's library once
+# the PC is found, not left with the phone's own few films.
+check("the phone's Home follows the PC link", "homeFromPc = !!fromPc && !!d && !d.error;" in pg
+      and "if(homeFromPc !== null && homeFromPc !== !!up) loadHome();" in pg[pg.find("function pcLinkSet("):][:900])
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

@@ -20931,11 +20931,13 @@ function applyLibSection(){
    month; films you love, rested six) and Continue (TV and films, newest
    first). On the PC a tile plays; on the phone it opens the details, where
    HERE and ON PC are. With the PC on the Wi-Fi the phone shows the PC's. */
+let homeFromPc = null;      // which library Home was last drawn from
 async function loadHome(){
   const box = $('#view-home');
   if(!box.children.length) box.append(el('p', 'empty', 'Loading\u2026'));
   const fromPc = document.body.classList.contains('android') && typeof pcLinkUp !== 'undefined' && pcLinkUp;
   let d = await api(fromPc ? '/api/pchome' : '/api/home');
+  homeFromPc = !!fromPc && !!d && !d.error;
   if(fromPc && (!d || d.error)) d = await api('/api/home');
   box.innerHTML = '';
   if(!d || d.error){ box.append(el('p', 'empty', esc((d && d.error) || 'Nothing to show yet.'))); return; }
@@ -26014,6 +26016,9 @@ function pcLinkSet(up){
   pcLinkUp = up;
   if($('#shelf').value === was && defaultShelf() !== was) $('#shelf').value = defaultShelf();
   loadLibrary(true);
+  /* Home too: drawn as the app opened, from the phone's own few films,
+     before the PC had answered (asked about, 2026-10-26). */
+  if(homeFromPc !== null && homeFromPc !== !!up) loadHome();
   const showing = pickTrail[trailAt];
   if(showing && !!showing._pc !== !!up){
     pickAhead = null;
