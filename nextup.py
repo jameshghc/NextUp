@@ -3152,28 +3152,175 @@ def _store_season(conn, show_id, season, detail):
         info = by_number.get(ep["episode"])
         if not info:
             continue
-        still = info.get("still_path")
-        # The rating comes in the same reply; 0 votes is stored as 0 rather
-        # than left empty, so the season isn't asked for again.
-        # Its own facts too, "" rather than empty where TMDB has none, so
-        # the season isn't asked for again either.
-        crew = info.get("crew") or []
-        jobs = lambda job: as_text([c.get("name") for c in crew if c.get("job") == job][:4])
-        conn.execute(
-            "UPDATE episodes SET title=?,plot=?,still=?,runtime=?,tmdb_rating=?,tmdb_votes=?,"
-            "air_date=?,directors=?,writers=?,guests=? WHERE id=?",
-            (info.get("name") or ("Episode %d" % ep["episode"]),
-             (info.get("overview") or "")[:1000],
-             POSTER + still if still else None,
-             (info.get("runtime") or 0) * 60,
-             float(info.get("vote_average") or 0), int(info.get("vote_count") or 0),
-             info.get("air_date") or "", jobs("Director"),
-             as_text([w for w in [c.get("name") for c in crew
-                                  if c.get("job") in ("Writer", "Teleplay", "Story", "Screenplay")]][:4]),
-             as_text([g.get("name") for g in (info.get("guest_stars") or [])][:8]),
-             ep["id"]))
+        _write_episode(conn, ep["id"], info, ep["episode"])
         done += 1
+    if done:
+        try:
+            reconcile_episode_order(conn, show_ids=[show_id])
+        except Exception:
+            log_problem("episode order")
     return done
+
+
+def _write_episode(conn, episode_id, info, number, title=None):
+    """One TMDB episode's details onto one of ours."""
+    still = info.get("still_path")
+    # The rating comes in the same reply; 0 votes is stored as 0 rather
+    # than left empty, so the season isn't asked for again.
+    # Its own facts too, "" rather than empty where TMDB has none, so
+    # the season isn't asked for again either.
+    crew = info.get("crew") or []
+    jobs = lambda job: as_text([c.get("name") for c in crew if c.get("job") == job][:4])
+    conn.execute(
+        "UPDATE episodes SET title=?,plot=?,still=?,runtime=?,tmdb_rating=?,tmdb_votes=?,"
+        "air_date=?,directors=?,writers=?,guests=? WHERE id=?",
+        (title or info.get("name") or ("Episode %d" % number),
+         (info.get("overview") or "")[:1000],
+         POSTER + still if still else None,
+         (info.get("runtime") or 0) * 60,
+         float(info.get("vote_average") or 0), int(info.get("vote_count") or 0),
+         info.get("air_date") or "", jobs("Director"),
+         as_text([w for w in [c.get("name") for c in crew
+                              if c.get("job") in ("Writer", "Teleplay", "Story", "Screenplay")]][:4]),
+         as_text([g.get("name") for g in (info.get("guest_stars") or [])][:8]),
+         episode_id))
+
+
+# --- files numbered in another order than TMDB's -----------------------------
+#
+# Episodes are matched to TMDB by season and number, and that's only right
+# when the files and TMDB count the same way. Futurama's files are in one
+# order and TMDB's seasons 2-5 in another, so 56 episodes wore another
+# episode's name, plot and picture ("S05E01 Bender's Big Score (Part 1)" as
+# Crimes of the Hot); Star Trek: TNG, Cowboy Bebop and Arrested Development
+# the same (found 2026-10-26). Where a file's own name carries its title,
+# that title is what it is: the TMDB episode of that name lends its details,
+# wherever TMDB numbers it. The files keep their own numbering and order.
+
+def _ep_key(text):
+    text = unicodedata.normalize("NFKD", text or "").encode("ascii", "ignore").decode().lower()
+    text = re.sub(r"^(the|a|an)\s+", "", text.replace("&", "and"))
+    return re.sub(r"[^a-z0-9]+", "", text)
+
+
+def _file_episode_title(path, show_title):
+    """The title in a file's own name — "S05E01 Bender's Big Score (Part 1)
+    - Futurama.mkv" -> "Bender's Big Score (Part 1)" — or ""."""
+    stem = os.path.splitext(os.path.basename(path or ""))[0]
+    m = re.search(r"S\d{1,2}E\d{1,3}[A-Za-z]?(?:-?E\d{1,3})?\s*[-.\s]\s*(.+)$", stem, re.I)
+    if not m:
+        return ""
+    title = m.group(1).strip(" -.")
+    parts = [x.strip() for x in title.split(" - ")]
+    if len(parts) > 1 and _ep_key(parts[-1]) == _ep_key(show_title):
+        parts = parts[:-1]
+    title = " - ".join(parts).strip()
+    return "" if _ep_key(title) == _ep_key(show_title) else title
+
+
+def _same_title(a, b):
+    """a and b are keys. The same, or one inside the other when the shorter
+    is long enough not to be a coincidence ("Ripped" in "Ripped Pants")."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    short, long_ = sorted((a, b), key=len)
+    return len(short) >= 6 and short in long_
+
+
+_PART = re.compile(r"[\s(,:]*(?:part\s*\w+\)?|\(\d+\))$", re.I)
+
+
+def _ep_key_bare(text):
+    """The key without a part number: "(2)" and "Part 2" read the same."""
+    return _ep_key(_PART.sub("", text or "")) or _ep_key(text)
+
+
+def reconcile_episode_order(conn, progress=None, show_ids=None):
+    """Put right episodes whose details are another episode's. Returns how
+    many it changed. TMDB is only asked about shows where a file's title
+    disagrees with what's stored, and its answers are kept."""
+    if not CONFIG.get("tmdb_key"):
+        return 0
+    shows = conn.execute("SELECT id, title, tmdb_id FROM shows WHERE tmdb_id IS NOT NULL AND tmdb_id <> ''"
+                         + (" AND id IN (%s)" % ",".join("?" * len(show_ids)) if show_ids else ""),
+                         tuple(show_ids or ())).fetchall()
+    changed = 0
+    for index, show in enumerate(shows):
+        if progress:
+            progress(index + 1, len(shows), "checking episode order")
+        eps = conn.execute("SELECT id, season, episode, title, path FROM episodes WHERE show_id=?",
+                           (show["id"],)).fetchall()
+        files = {e["id"]: _file_episode_title(e["path"], show["title"]) for e in eps}
+        odd = [e for e in eps if len(_ep_key(files[e["id"]])) >= 4
+               and not _same_title(_ep_key(files[e["id"]]), _ep_key(e["title"]))
+               and not _same_title(_ep_key_bare(files[e["id"]]), _ep_key_bare(e["title"]))]
+        if not odd:
+            continue
+        # Every episode TMDB has of the show, specials too.
+        detail = tmdb("/tv/%s" % show["tmdb_id"]) or {}
+        every = []
+        for season in detail.get("seasons") or []:
+            got = tmdb("/tv/%s/season/%s" % (show["tmdb_id"], season.get("season_number"))) or {}
+            every.extend(got.get("episodes") or [])
+        if not every:
+            continue
+        claimed = {_ep_key(t) for t in files.values() if len(_ep_key(t)) >= 4}
+        # A file's own title isn't always right either (Shōgun's first file
+        # is called "Crimson Sky", the finale's name). So it only wins with
+        # evidence: the episode it names sits on another file that is
+        # itself out of place (a reshuffled order), or what's stored now is
+        # plainly another of these files' episode.
+        slots = {(x["season"], x["episode"]) for x in odd}
+        for e in odd:
+            displaced = _ep_key(e["title"]) in claimed
+            want = _ep_key(files[e["id"]])
+            # Exactly that title first: "Anthology of Interest II" is not I.
+            hits = ([i for i in every if _ep_key(i.get("name")) == want]
+                    or [i for i in every if _same_title(want, _ep_key(i.get("name")))])
+            title = None
+            if not hits:
+                # A film cut into parts: "Bender's Big Score (Part 1)" takes
+                # the film's details and keeps its own name.
+                bare = _ep_key(_PART.sub("", files[e["id"]]))
+                if bare != want:
+                    hits = [i for i in every if _same_title(bare, _ep_key(i.get("name")))]
+                    title = files[e["id"]]
+            part = _PART.search(files[e["id"]])
+            if len(hits) == 1 and part and not _PART.search(hits[0].get("name") or "") and not title:
+                # Its part of a film: the film's name, and which part.
+                title = "%s (%s)" % (hits[0].get("name"), part.group(0).strip(" (,:)").capitalize())
+            if len(hits) == 1 and _ep_key(title or hits[0].get("name")) != _ep_key(e["title"]) and (
+                    displaced or (hits[0].get("season_number"), hits[0].get("episode_number")) in slots):
+                _write_episode(conn, e["id"], hits[0], e["episode"], title=title)
+                changed += 1
+            elif len(hits) != 1 and displaced:
+                # Nothing of that name at TMDB, but what's stored is plainly
+                # another of these files' episode: its own name, and no
+                # borrowed plot or picture.
+                conn.execute("UPDATE episodes SET title=?,plot='',still=NULL,tmdb_rating=0,tmdb_votes=0,"
+                             "air_date='',directors='',writers='',guests='' WHERE id=?",
+                             (files[e["id"]], e["id"]))
+                changed += 1
+    conn.commit()
+    if changed:
+        LOCAL.loaded_at = 0
+    return changed
+
+
+def reconcile_once():
+    """The first start with this: put right the library as it already is."""
+    if CONFIG.get("episode_order_checked"):
+        return
+    try:
+        conn = db()
+        reconcile_episode_order(conn)
+        conn.close()
+        CONFIG["episode_order_checked"] = 1
+        save_json(CONFIG_PATH, CONFIG)
+    except Exception:
+        log_problem("episode order")
 
 
 def refresh_unsettled_seasons(conn, progress=None, days=7, recent_days=60):
@@ -27170,6 +27317,7 @@ def serve_in_thread(port=None, host="127.0.0.1", tries=20):
     if PLATFORM != "android":
         threading.Thread(target=sync_loop, daemon=True, name="sync").start()
     threading.Thread(target=refresh_watch_scores, daemon=True, name="watch scores").start()
+    threading.Thread(target=reconcile_once, daemon=True, name="episode order").start()
     if CONFIG.get("startup_check", True):
         threading.Timer(8.0, startup_check).start()
     _SERVER[0] = server

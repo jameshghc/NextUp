@@ -265,5 +265,45 @@ check("and an unsettled one at most once a week", not any("880006" in p_ for p_,
 conn.close()
 check("the scan does it", "refresh_unsettled_seasons(conn, progress)" in open(n.__file__, encoding="utf-8").read())
 
+# --- 2026-10-26: files numbered in another order than TMDB's ------------------------
+check("a file's own title is read from its name",
+      n._file_episode_title(r"E:\TV\Futurama\S05E01 Benders Big Score (Part 1) - Futurama.mkv", "Futurama") == "Benders Big Score (Part 1)"
+      and n._file_episode_title(r"E:\TV\X\S01E04 - Dexter's Laboratory.mkv", "Dexter's Laboratory") == ""
+      and n._file_episode_title(r"E:\TV\X\S02E04.mkv", "X") == "")
+check("'(2)' and 'Part 2' read the same", n._ep_key_bare("That Day: The Fall of Shiganshina (2)")
+      == n._ep_key_bare("That Day The Fall of Shiganshina, Part 2"))
+_real = n.tmdb
+_tm = {"/tv/990001": {"seasons": [{"season_number": 0}, {"season_number": 1}]},
+       "/tv/990001/season/0": {"episodes": [{"season_number": 0, "episode_number": 1, "name": "The Big Film", "overview": "film plot"}]},
+       "/tv/990001/season/1": {"episodes": [
+           {"season_number": 1, "episode_number": 1, "name": "Alpha Story", "overview": "alpha plot"},
+           {"season_number": 1, "episode_number": 2, "name": "Bravo Story", "overview": "bravo plot"},
+           {"season_number": 1, "episode_number": 3, "name": "Charlie Story", "overview": "charlie plot"},
+           {"season_number": 1, "episode_number": 4, "name": "Delta Story", "overview": "delta plot"},
+           {"season_number": 1, "episode_number": 10, "name": "Finale Night", "overview": "finale plot"}]}}
+n.tmdb = lambda path, params=None, fresh=False: _tm.get(path, {})
+n.CONFIG["tmdb_key"] = n.CONFIG.get("tmdb_key") or "test"
+k = n.db()
+os_ = k.execute("INSERT INTO shows (name,title,tmdb_id) VALUES ('order show','Order Show','990001')").lastrowid
+def _ep(num, fname, stored, plot):
+    return k.execute("INSERT INTO episodes (path,show_id,season,episode,title,plot) VALUES (?,?,1,?,?,?)",
+                     ("X:/os/S01E%02d %s - Order Show.mkv" % (num, fname), os_, num, stored, plot)).lastrowid
+# Files 1 and 2 are swapped against TMDB; 3 is right; 4 is the film's
+# first part, stored as file 2's episode; 5 is named after a finale it isn't.
+a1 = _ep(1, "Bravo Story", "Alpha Story", "alpha plot")
+a2 = _ep(2, "Alpha Story", "Bravo Story", "bravo plot")
+a3 = _ep(3, "Charlie Story", "Charlie Story", "charlie plot")
+a4 = _ep(4, "The Big Film (Part 1)", "Alpha Story", "alpha plot")
+a5 = _ep(5, "Finale Night", "Echo Story", "echo plot")
+k.commit()
+n.reconcile_episode_order(k)
+got = {r["id"]: (r["title"], r["plot"]) for r in k.execute("SELECT id,title,plot FROM episodes WHERE show_id=?", (os_,))}
+k.close()
+n.tmdb = _real
+check("a swapped pair gets its own details back", got[a1] == ("Bravo Story", "bravo plot") and got[a2] == ("Alpha Story", "alpha plot"), got)
+check("one already right is left alone", got[a3] == ("Charlie Story", "charlie plot"))
+check("a film's part takes the film's details and keeps its part", got[a4] == ("The Big Film (Part 1)", "film plot"), got[a4])
+check("a lone odd file name doesn't win on its own (Shogun's 'Crimson Sky')", got[a5] == ("Echo Story", "echo plot"), got[a5])
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

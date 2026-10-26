@@ -4,6 +4,7 @@ What changed in Next Up, version by version, newest first. Version numbers start
 
 ## 0.2.3 — 2026-10-26
 
+- Fixed: shows whose files are numbered in a different order from TMDB's no longer wear other episodes' names, plots and pictures. Futurama's seasons 2–5 (Bender's Big Score showed as Crimes of the Hot), Star Trek: TNG, Cowboy Bebop, Arrested Development, Pokémon, Primal and SpongeBob are put right on the next start; episodes keep your files' order. A file's own title only wins when the rest of the show backs it up, so an odd name alone (Shōgun's first file is called "Crimson Sky") changes nothing.
 - On the phone's Remote, what's playing on the PC opens its page when you tap it: a show at the season you're watching, so you can look along the other episodes, or the film's page.
 
 ## 0.2.2 — 2026-10-25
