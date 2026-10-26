@@ -14330,7 +14330,13 @@ class PhoneHandler(BaseHTTPRequestHandler):
             if route == "/phone/film":
                 return self.send_json(phone_film((query.get("tmdb") or [""])[0]))
             if route == "/phone/home":
-                return self.send_json(_phone_art_deep(build_home()))
+                # Each item with its identity, so the phone can play it HERE
+                # or ON PC from the tile.
+                home = build_home()
+                home = dict(home, suggest=[_for_phone(i) for i in home.get("suggest") or []],
+                            suggest_lists=[[_for_phone(i) for i in l] for l in home.get("suggest_lists") or []],
+                            **{"continue": [_for_phone(i) for i in home.get("continue") or []]})
+                return self.send_json(_phone_art_deep(home))
             if route == "/phone/episode":
                 try:
                     return self.send_json(phone_episode(int((query.get("id") or ["0"])[0])))
@@ -16605,12 +16611,27 @@ body{display:flex;flex-direction:column}
 .hometab{display:inline-flex;align-items:center;padding-top:6px;padding-bottom:6px}
 .hometab svg{display:block}
 .hometile.starting{opacity:.6}
+/* The phone's peek on a Home poster: PLAY and DETAILS over its lower half. */
+.hometile{position:relative}
+.homepeek{display:none}
+body.android .hometile.peeking .homepeek{display:flex;flex-direction:column;justify-content:flex-end;gap:6px;
+  position:absolute;left:0;right:0;top:0;bottom:0;padding:8px;border-radius:inherit;
+  background:linear-gradient(180deg,rgba(0,0,0,.2) 0%,rgba(0,0,0,.92) 55%)}
+body.android .homepeek .playchoice{display:flex;flex-direction:column;gap:6px}
+body.android .homepeek :is(.iconbtn,button){width:100%;justify-content:center;padding:7px 4px;font-size:10px}
+body.android .homepeek .rmmsg:empty{display:none}
+body.android .homepeek .rmmsg:not(:empty){font-size:10px;line-height:1.3}
 /* One line each under the poster, so a row is the same height whatever
    it holds; the full line is in the tooltip. */
 .hometile .cap b,.hometile .cap small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 @media (max-width:600px){
-  #view-library > #view-home{padding:22px 0 28px;gap:30px}
-  .homerow{grid-auto-columns:calc((100% - 14px) / 2)}
+  #view-library > #view-home{padding:14px 0 20px;gap:18px}
+  .homerow{grid-auto-columns:var(--home-tile, calc((100% - 3 * 10px) / 3.3));gap:10px}
+  .homehead{font-size:16px}
+  .homesec{gap:8px}
+  .hometile .cap{padding:6px 6px 7px}
+  .hometile .cap b{font-size:11.5px}
+  .hometile .cap small{font-size:9.5px}
 }
 #view-library > #view-history{flex:1;min-height:0;overflow-y:auto;padding:14px 0 40px}
 /* ---- watch history ---- */
@@ -16684,6 +16705,7 @@ header.mast{
    when you leave the Library. They sit at margin-left:auto regardless. */
 header.mast .subnav.offview{visibility:hidden}
 header.mast .subnav{margin:0;flex-wrap:nowrap;min-width:0}
+body.android header.mast .subnav{padding-left:10px}
 header.mast .subtab{white-space:nowrap}
 /* Two navs on one line is ~960px of words. Rather than let the line break —
    which hands back the row this was moved up to save — they tighten as the
@@ -18072,6 +18094,10 @@ body.android .tile.elsewhere .cap{padding-bottom:26px}
   body.android .searchrow label.f > span{position:absolute;width:1px;height:1px;overflow:hidden;
     clip:rect(0 0 0 0);white-space:nowrap}
   body.android .searchrow label.f select{max-width:none;width:100%;min-width:0;font-size:13px}
+  /* Past the PC's #view-library rule, which had the search box share the
+     line and squeezed Sort and Show down to their arrows. */
+  body.android #view-library .searchrow{flex-wrap:wrap;gap:8px}
+  body.android #view-library .searchrow .searchbox{flex:1 1 100%;max-width:none}
 }
 @media (orientation:landscape) and (max-height:520px){
   body.android #view-library{overflow-y:auto}
@@ -19183,6 +19209,16 @@ body:not(.android) #remotetab{display:none}
 /* The Appearance tab's own controls. */
 .apgrid{display:grid;grid-template-columns:150px minmax(0,1fr);gap:16px 18px;align-items:center;margin-top:14px}
 .apgrid > label{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+/* On the phone the label above its control, not beside it: beside, the
+   label took half the width and the style and font buttons ran off the
+   side (asked about, 2026-10-26). */
+body.android .apgrid{grid-template-columns:minmax(0,1fr);gap:8px;align-items:start}
+body.android .apgrid > label{margin-top:10px}
+body.android .apthemes{flex-wrap:wrap}
+body.android .apthemes .kchip{padding:8px 16px}
+/* And a long file path in Storage breaks rather than widening the page. */
+body.android .settings{overflow-wrap:anywhere;min-width:0}
+body.android #view-settings{overflow-x:hidden}
 .apswatches{display:flex;flex-wrap:wrap;gap:8px}
 .apswatch{width:30px;height:30px;border-radius:50%;border:2px solid transparent;cursor:pointer;padding:0;
   box-shadow:inset 0 0 0 2px rgba(0,0,0,.25)}
@@ -20982,7 +21018,7 @@ async function loadHome(){
    window 720 tall to the page, so this is measured, not assumed. The
    phone keeps its two-across tiles and scrolls. */
 function sizeHome(){
-  if(document.body.classList.contains('android')) return;
+  const phone = document.body.classList.contains('android');
   const v = $('#view-home');
   if(!v || !v.offsetParent) return;
   const rows = [...v.querySelectorAll('.homerow')];
@@ -20998,10 +21034,16 @@ function sizeHome(){
   });
   const capEl = v.querySelector('.hometile .cap');
   const cap = capEl ? capEl.getBoundingClientRect().height : 52;
-  const perRow = (v.clientHeight - fixed) / rows.length - 10;      // the row's own padding and borders
+  /* On the phone the now-playing bar sits over the bottom of the page. */
+  const strip = phone ? $('#pcstrip') : null;
+  const covered = strip && !strip.classList.contains('hidden') ? strip.getBoundingClientRect().height + 8 : 0;
+  const perRow = (v.clientHeight - covered - fixed) / rows.length - 10;   // the row's own padding and borders
   const fit = (perRow - cap) / 1.5;                                  // posters are 2:3
-  const full = (rows[0].clientWidth - 5 * 14) / 6;
-  v.style.setProperty('--home-tile', Math.max(90, Math.min(full, fit)) + 'px');
+  /* Six across on the PC; on the phone a little over three, so a row
+     plainly goes on sideways, and both rows on the screen at once (asked
+     for, 2026-10-26). */
+  const full = phone ? (rows[0].clientWidth - 3 * 10) / 3.3 : (rows[0].clientWidth - 5 * 14) / 6;
+  v.style.setProperty('--home-tile', Math.max(phone ? 78 : 90, Math.min(full, fit)) + 'px');
 }
 let homeSizing = null;
 window.addEventListener('resize', () => {
@@ -21018,7 +21060,10 @@ function shuffleInPlace(list){
 }
 
 function homeTile(it, isCont, pc){
-  const b = el('button', 'tile hometile');
+  const phone = document.body.classList.contains('android');
+  /* A div on the phone: its peek holds buttons of its own. */
+  const b = el(phone ? 'div' : 'button', 'tile hometile');
+  if(phone){ b.setAttribute('role', 'button'); b.tabIndex = 0; }
   if(it.art){ const i = el('img', 'art'); i.src = it.art; i.alt = ''; i.loading = 'lazy'; b.append(i); }
   else b.append(el('div', 'blank', esc(it.title || '')));
   const cap = el('div', 'cap');
@@ -21035,11 +21080,40 @@ function homeTile(it, isCont, pc){
     bar.append(fill); cap.prepend(bar); bar.style.top = '-3px';
   }
   b.append(cap);
+  const details = () => {
+    closePeeks();
+    if(pc) return it.type === 'movie' ? openPcFilm(it.tmdb_id) : openPcShow(it.tmdb_id);
+    return it.type === 'movie' ? openFilm(it.id) : openShow(it.show_id);
+  };
+  if(phone){
+    /* As a Library poster does (asked for, 2026-10-26): a tap shows PLAY
+       and DETAILS over it, a second tap opens the details. */
+    const peek = el('div', 'homepeek');
+    if(pc){
+      peek.append(playChoice({ident: it.ident || null, type: it.type, id: it.id}, true));
+    } else {
+      const go = el('button', 'iconbtn', isCont ? 'RESUME' : 'PLAY');
+      go.type = 'button';
+      go.onclick = async (e) => {
+        e.stopPropagation();
+        go.textContent = '\u2026';
+        const r = await post('/api/play', {type: it.type, id: it.id, resume: true});
+        go.textContent = r && r.error ? 'FAILED' : 'PLAYING';
+      };
+      peek.append(go);
+    }
+    const more = el('button', 'iconbtn', 'DETAILS');
+    more.type = 'button';
+    more.onclick = (e) => { e.stopPropagation(); details(); };
+    peek.append(more);
+    b.append(peek);
+  }
   b.onclick = async () => {
-    if(document.body.classList.contains('android')){
-      /* The phone: its details, where HERE and ON PC are. */
-      if(pc) return it.type === 'movie' ? openPcFilm(it.tmdb_id) : openPcShow(it.tmdb_id);
-      return it.type === 'movie' ? openFilm(it.id) : openShow(it.show_id);
+    if(phone){
+      if(b.classList.contains('peeking')) return details();
+      closePeeks();
+      b.classList.add('peeking');
+      return;
     }
     b.classList.add('starting');
     const r = await post('/api/play', {type: it.type, id: it.id, resume: true});
@@ -25979,6 +26053,9 @@ function stripRender(st){
   const strip = $('#pcstrip');
   if(!strip) return;
   const playing = st && !st.error && st.alive && st.title;
+  /* Home is sized to fit above the bar, so it's measured again when the
+     bar comes or goes. */
+  if(strip.dataset.playing !== (playing ? '1' : '')) setTimeout(sizeHome, 50);
   strip.dataset.playing = playing ? '1' : '';
   if(playing){
     strip.innerHTML = '';

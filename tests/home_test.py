@@ -115,5 +115,18 @@ check("the page: two rows, Quick Suggest and Continue, a tile plays",
 check("the phone's Home follows the PC link", "homeFromPc = !!fromPc && !!d && !d.error;" in pg
       and "if(homeFromPc !== null && homeFromPc !== !!up) loadHome();" in pg[pg.find("function pcLinkSet("):][:900])
 
+# 2026-10-26, the phone: Home fits the screen, its tiles peek like the
+# Library's, and the PC's items carry what's needed to play them.
+check("the phone sizes Home to the screen too", "(rows[0].clientWidth - 3 * 10) / 3.3" in pg
+      and "if(document.body.classList.contains('android')) return;\n  const v = $('#view-home');" not in pg)
+check("a tap peeks, a second opens the details", "if(b.classList.contains('peeking')) return details();" in pg
+      and "el('div', 'homepeek')" in pg)
+_src = open(n.__file__, encoding="utf-8").read()
+check("the PC's Home items carry their identity for the phone",
+      'suggest=[_for_phone(i) for i in home.get("suggest") or []]' in _src)
+check("the phone's settings and Library toolbar fit the width",
+      "body.android .apgrid{grid-template-columns:minmax(0,1fr)" in pg
+      and "body.android #view-library .searchrow .searchbox{flex:1 1 100%;max-width:none}" in pg)
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

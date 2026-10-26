@@ -5,6 +5,8 @@ What changed in Next Up, version by version, newest first. Version numbers start
 ## 0.2.3 — 2026-10-26
 
 - Fixed: shows whose files are numbered in a different order from TMDB's no longer wear other episodes' names, plots and pictures. Futurama's seasons 2–5 (Bender's Big Score showed as Crimes of the Hot), Star Trek: TNG, Cowboy Bebop, Arrested Development, Pokémon, Primal and SpongeBob are put right on the next start; episodes keep your files' order. A file's own title only wins when the rest of the show backs it up, so an odd name alone (Shōgun's first file is called "Crimson Sky") changes nothing.
+- The phone's Home fits on the screen: smaller posters, a little over three across, both rows above the now-playing bar. A tap on a poster shows PLAY (HERE / ON PC) and DETAILS over it, and a second tap opens its page, as in the Library.
+- Fixed on the phone: Settings › Appearance and Storage no longer run off the side; the Library's Sort and Show are readable again under a full-width search box; the Library's own tabs line up under the menu.
 - Fixed: the phone's Home showed only the phone's own films when the app opened before it had found the PC; it now switches to the PC's library as soon as the PC answers.
 - On the phone's Remote, what's playing on the PC opens its page when you tap it: a show at the season you're watching, so you can look along the other episodes, or the film's page.
 
