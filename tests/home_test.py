@@ -117,7 +117,7 @@ check("the phone's Home follows the PC link", "homeFromPc = !!fromPc && !!d && !
 
 # 2026-10-26, the phone: Home fits the screen, its tiles peek like the
 # Library's, and the PC's items carry what's needed to play them.
-check("the phone sizes Home to the screen too", "(rows[0].clientWidth - 3 * 10) / 3.3" in pg
+check("the phone sizes Home to the screen too", "(rows[0].clientWidth - 2 * 10) / 2.5" in pg
       and "if(document.body.classList.contains('android')) return;\n  const v = $('#view-home');" not in pg)
 check("a tap peeks, a second opens the details", "if(b.classList.contains('peeking')) return details();" in pg
       and "el('div', 'homepeek')" in pg)
@@ -127,6 +127,8 @@ check("the PC's Home items carry their identity for the phone",
 check("the phone's settings and Library toolbar fit the width",
       "body.android .apgrid{grid-template-columns:minmax(0,1fr)" in pg
       and "body.android #view-library .searchrow .searchbox{flex:1 1 100%;max-width:none}" in pg)
+check("the house sits under the word Library on the phone", "function alignLibNav()" in pg
+      and "alignLibNav();\n}" in pg)
 
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

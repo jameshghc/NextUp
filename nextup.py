@@ -16626,12 +16626,12 @@ body.android .homepeek .rmmsg:not(:empty){font-size:10px;line-height:1.3}
 .hometile .cap b,.hometile .cap small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 @media (max-width:600px){
   #view-library > #view-home{padding:14px 0 20px;gap:18px}
-  .homerow{grid-auto-columns:var(--home-tile, calc((100% - 3 * 10px) / 3.3));gap:10px}
+  .homerow{grid-auto-columns:var(--home-tile, calc((100% - 2 * 10px) / 2.5));gap:10px}
   .homehead{font-size:16px}
   .homesec{gap:8px}
   .hometile .cap{padding:6px 6px 7px}
-  .hometile .cap b{font-size:11.5px}
-  .hometile .cap small{font-size:9.5px}
+  .hometile .cap b{font-size:13px}
+  .hometile .cap small{font-size:10.5px}
 }
 #view-library > #view-history{flex:1;min-height:0;overflow-y:auto;padding:14px 0 40px}
 /* ---- watch history ---- */
@@ -16705,7 +16705,6 @@ header.mast{
    when you leave the Library. They sit at margin-left:auto regardless. */
 header.mast .subnav.offview{visibility:hidden}
 header.mast .subnav{margin:0;flex-wrap:nowrap;min-width:0}
-body.android header.mast .subnav{padding-left:10px}
 header.mast .subtab{white-space:nowrap}
 /* Two navs on one line is ~960px of words. Rather than let the line break —
    which hands back the row this was moved up to save — they tighten as the
@@ -21034,15 +21033,13 @@ function sizeHome(){
   });
   const capEl = v.querySelector('.hometile .cap');
   const cap = capEl ? capEl.getBoundingClientRect().height : 52;
-  /* On the phone the now-playing bar sits over the bottom of the page. */
-  const strip = phone ? $('#pcstrip') : null;
-  const covered = strip && !strip.classList.contains('hidden') ? strip.getBoundingClientRect().height + 8 : 0;
-  const perRow = (v.clientHeight - covered - fixed) / rows.length - 10;   // the row's own padding and borders
+  /* (On the phone Home already stops above the now-playing bar.) */
+  const perRow = (v.clientHeight - fixed) / rows.length - 10;      // the row's own padding and borders
   const fit = (perRow - cap) / 1.5;                                  // posters are 2:3
-  /* Six across on the PC; on the phone a little over three, so a row
+  /* Six across on the PC; on the phone two and a half, so a row
      plainly goes on sideways, and both rows on the screen at once (asked
      for, 2026-10-26). */
-  const full = phone ? (rows[0].clientWidth - 3 * 10) / 3.3 : (rows[0].clientWidth - 5 * 14) / 6;
+  const full = phone ? (rows[0].clientWidth - 2 * 10) / 2.5 : (rows[0].clientWidth - 5 * 14) / 6;
   v.style.setProperty('--home-tile', Math.max(phone ? 78 : 90, Math.min(full, fit)) + 'px');
 }
 let homeSizing = null;
@@ -21173,7 +21170,28 @@ function drawLibNav(){
     (place ? places : nav).append(b);
   });
   $('#libsort').querySelector('option[value="runtime"]').disabled = (libKind==='tv');
+  alignLibNav();
 }
+
+/* On the phone the Library's own tabs start with the house right under the
+   word Library in the menu above (asked for, 2026-10-26) — measured, so it
+   holds on any width, and never pushed so far that the row runs out. */
+function alignLibNav(){
+  const nav = $('#libnav');
+  if(!nav || !document.body.classList.contains('android')) return;
+  const tab = document.querySelector('.tabs .tab[data-view="library"]');
+  const house = nav.querySelector('.hometab');
+  if(!tab || !house || !tab.offsetWidth) return;
+  nav.style.paddingLeft = '0px';
+  const row = nav.parentElement.getBoundingClientRect();
+  const want = tab.getBoundingClientRect().left + tab.offsetWidth / 2
+             - (house.getBoundingClientRect().left + house.offsetWidth / 2);
+  const places = $('#libplaces');
+  const spare = (places && places.offsetWidth ? places.getBoundingClientRect().left : row.right)
+              - nav.getBoundingClientRect().right - 8;
+  nav.style.paddingLeft = Math.max(0, Math.min(want, spare)) + 'px';
+}
+window.addEventListener('resize', () => setTimeout(alignLibNav, 60));
 
 /* ---------- adding to a drive, from the library ----------
    The tick button by the search box opens the add bar under the filters:
