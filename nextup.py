@@ -115,7 +115,7 @@ ASSET_DIR = getattr(sys, "_MEIPASS", HERE)
 LOGO_PATH = os.path.join(ASSET_DIR, "nextup_logo.png")
 ICON_PATH = os.path.join(ASSET_DIR, "nextup.ico")
 
-APP_VERSION = "0.2.2"
+APP_VERSION = "0.2.3"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -12873,6 +12873,27 @@ def remote_presets():
     return [c for c in chosen if c in known][:REMOTE_PRESETS]
 
 
+def playing_ident(playing):
+    """{"kind", "tmdb", "season"} for what's playing, so the phone can open
+    its page; None for a stream, or a file TMDB never named."""
+    kind, item_id = (playing or {}).get("type"), (playing or {}).get("id")
+    if kind not in ("movie", "episode") or not item_id:
+        return None
+    try:
+        conn = db()
+        if kind == "movie":
+            row = conn.execute("SELECT tmdb_id FROM movies WHERE id=?", (item_id,)).fetchone()
+            out = {"kind": "movie", "tmdb": row and row["tmdb_id"], "season": None}
+        else:
+            row = conn.execute("SELECT s.tmdb_id, e.season FROM episodes e JOIN shows s ON s.id = e.show_id"
+                               " WHERE e.id=?", (item_id,)).fetchone()
+            out = {"kind": "tvshow", "tmdb": row and row["tmdb_id"], "season": row and row["season"]}
+        conn.close()
+    except Exception:
+        return None
+    return out if out["tmdb"] else None
+
+
 def remote_state():
     """Everything the remote draws, in one round trip.
 
@@ -12900,6 +12921,8 @@ def remote_state():
         # the sleep timer is asking.
         "title": (playing or {}).get("title"), "sub": (playing or {}).get("sub"),
         "art": (playing or {}).get("art"),
+        # What it is, so the phone can open its page (and the season it's in).
+        "open": playing_ident(playing),
         "position": (playing or {}).get("position"), "duration": (playing or {}).get("duration"),
         "afk": afk_state(),
         # SKIP works on a channel, or on anything with a queue behind it.
@@ -18813,6 +18836,8 @@ body.customround :is(.settings,.pick,.alt,.hubcard,.card,.coll,.dirblock,.profil
 .rmnow{display:flex;align-items:center;gap:14px}
 .rmnow img{width:46px;aspect-ratio:2/3;object-fit:cover;border-radius:5px;box-shadow:0 8px 20px rgba(0,0,0,.5)}
 .rmnow img.hidden{display:none}
+.rmnow.opens{cursor:pointer}
+.rmnow.opens .rmtitle::after{content:" ›";color:var(--muted)}
 .rmtitle{font-family:var(--display);font-size:20px;line-height:1.2}
 .rmsub{font-family:var(--mono);font-size:12px;color:var(--muted);margin-top:3px}
 .rmseek{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:12px;color:var(--muted)}
@@ -22716,7 +22741,7 @@ function fmtScoreShort(v){
    with every episode playing HERE (streamed) or ON PC. */
 function openPcShow(tmdb){ return openShow(null, tmdb); }
 
-async function openShow(id, pcTmdb){
+async function openShow(id, pcTmdb, atSeason){
   const body = sheet();
   body.append(el('div','blank'));
   const right = el('div');
@@ -22817,7 +22842,8 @@ function seasonBrowser(d, seasons){
      watched but "next up" inside it is still the one you want; falling back
      to the first season only matters for a show you've never touched.
      Specials are never the answer — they sit outside the run. */
-  let current = seasons.findIndex(s => s.episodes.some(ep => ep.id === d.next_up));
+  let current = atSeason != null ? seasons.findIndex(s => s.season === atSeason) : -1;
+  if(current < 0) current = seasons.findIndex(s => s.episodes.some(ep => ep.id === d.next_up));
   if(current < 0) current = Math.max(0, seasons.findIndex(s => s.season > 0));
 
   /* Each season's score, the strongest in the accent and the weakest
@@ -25612,7 +25638,7 @@ function remoteBuild(){
   v.innerHTML = `
     <div class="rmafk hidden" id="rm_afk"></div>
     <div class="rmcol rmleft">
-    <div class="rmnow">
+    <div class="rmnow" id="rm_now" role="button" tabindex="0" title="Open its page">
       <img id="rm_art" alt="">
       <div><div class="rmtitle" id="rm_title"></div><div class="rmsub" id="rm_sub"></div></div>
     </div>
@@ -25712,6 +25738,13 @@ function remoteRender(st){
   if(alive && st.art){ if(art.getAttribute('src') !== st.art) art.src = st.art; art.classList.remove('hidden'); }
   else art.classList.add('hidden');
   $('#view-remote').classList.toggle('rmidle', !alive);
+  /* What's on opens its page: the show at the season you're watching, so
+     you can look along the other episodes (asked for, 2026-10-26). */
+  const opens = alive && st.open && st.open.tmdb ? st.open : null;
+  const now = $('#rm_now');
+  now.classList.toggle('opens', !!opens);
+  now.onclick = opens ? () => (opens.kind === 'movie' ? openPcFilm(opens.tmdb)
+                                                     : openShow(null, opens.tmdb, opens.season)) : null;
   remoteIdleRender(st, away, alive);
   $('#rm_full').classList.toggle('on', !!(alive && st.fullscreen));
   $('#rm_full').setAttribute('aria-pressed', String(!!(alive && st.fullscreen)));

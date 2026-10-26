@@ -2,6 +2,10 @@
 
 What changed in Next Up, version by version, newest first. Version numbers start at 0.1.1; the work before that is grouped at the end under "Before 0.1".
 
+## 0.2.3 — 2026-10-26
+
+- On the phone's Remote, what's playing on the PC opens its page when you tap it: a show at the season you're watching, so you can look along the other episodes, or the film's page.
+
 ## 0.2.2 — 2026-10-25
 
 ### Headline

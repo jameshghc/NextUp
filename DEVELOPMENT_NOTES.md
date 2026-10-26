@@ -16,6 +16,20 @@ at the top.
 
 ---
 
+## 2026-10-26 — v0.2.3, the Remote's now-playing opens its page
+
+- `remote_state` carries `open` (`playing_ident`: `{kind, tmdb, season}`,
+  the show's TMDB id for an episode). The phone's `#rm_now` opens
+  `openPcFilm(tmdb)` or `openShow(null, tmdb, season)`; `openShow` takes a
+  season to start at ahead of the "next up" one.
+- The end of 0.2.2 (late on 25 Oct) is in the CHANGELOG: Silver and the
+  font sets (`FONT_SETS`, woff2 in nextup_fonts; the exe's runtime hook now
+  adds new files to an existing folder), `pick_line` for Now's one line,
+  `tmdb_find_movie` preferring an exact title, and `_close_outgoing` so a
+  file swapped into an open window gets its sitting closed (channel flicks
+  under `MIN_WATCH_SECONDS` leave no place behind; Continue judges old
+  tune-ins by the gap before the next event).
+
 ## 2026-10-25 — v0.2.2, Home, episode scores, the tray, a Remote to choose from
 
 A long run of the user's requests between 0.2.1 and here; CHANGELOG.md has

@@ -330,6 +330,20 @@ _pb = n.PAGE[n.PAGE.find("function renderPlaying("):][:7000]
 check("the bar's title opens the film, or the episode's show",
       "'pbtitle'" in _pb and "openFilm(p.id)" in _pb and "openShow(st.show_id)" in _pb, "")
 
+# 2026-10-26: what's on opens its page from the phone's Remote.
+_k = n.db()
+_ep = _k.execute("SELECT e.id, e.season, s.tmdb_id FROM episodes e JOIN shows s ON s.id = e.show_id"
+                 " WHERE s.tmdb_id IS NOT NULL AND s.tmdb_id != '' LIMIT 1").fetchone()
+_mv = _k.execute("SELECT id, tmdb_id FROM movies WHERE tmdb_id IS NOT NULL AND tmdb_id != '' LIMIT 1").fetchone()
+_k.close()
+_oe = n.playing_ident({"type": "episode", "id": _ep["id"]})
+check("an episode opens its show, at its season", _oe == {"kind": "tvshow", "tmdb": _ep["tmdb_id"], "season": _ep["season"]}, _oe)
+check("a film opens itself", n.playing_ident({"type": "movie", "id": _mv["id"]}) == {"kind": "movie", "tmdb": _mv["tmdb_id"], "season": None})
+check("a stream opens nothing", n.playing_ident({"type": "youtube", "id": "x"}) is None and n.playing_ident(None) is None)
+_pg = n.PAGE
+check("the phone's Remote makes it tappable", 'id="rm_now"' in _pg and "openShow(null, opens.tmdb, opens.season)" in _pg
+      and "async function openShow(id, pcTmdb, atSeason)" in _pg)
+
 desk.shutdown()
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
