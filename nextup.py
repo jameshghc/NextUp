@@ -6141,7 +6141,8 @@ def browse_library(kind, query, sort, shelf, limit, offset):
                 "identified": m.get("identified", True),
                 "sort_added": m.get("dateadded") or "",
                 "sort_watched": m.get("last_played") or "",
-                "firsts": firsts.get(m["movieid"], 0),
+                "firsts": len(firsts.get(m["movieid"], [])),
+                "first_on": firsts.get(m["movieid"], []),
                 "watchlisted": bool(m.get("watchlisted")),
                 "favourited": bool(m.get("favourited")),
             })
@@ -6693,29 +6694,77 @@ def _fame_item(kind, x, rated_at):
             "who": who, "rated_at": (rated_at or "")[:10]}
 
 
-def _fame_rank(items):
-    return sorted(items, key=lambda i: (-(i["score"] or 0), -(i["tmdb_rating"] or 0), i["title"]))
+def _fame_rank(items, fit=None):
+    """Your score first. A tie on a genre shelf goes to the film that's most
+    that genre (fit: see genre_fit), then TMDB's score."""
+    fit = fit or {}
+    return sorted(items, key=lambda i: (-(i["score"] or 0), -fit.get(i["id"], 0),
+                                        -(i["tmdb_rating"] or 0), i["title"]))
+
+
+# Each genre's own keywords on TMDB, for how much of that genre a film is.
+# They also feed the Films tags on Now (Explosions, Mind-bending).
+GENRE_KEYWORDS = {
+    "Comedy": {"parody": 1, "satire": 1, "social satire": 1, "mockumentary": 1, "spoof": 1, "slapstick": 1,
+               "slapstick comedy": 1, "sex comedy": 1, "romcom": 1, "stand-up comedy": 1, "anarchic comedy": 1,
+               "buddy comedy": 1, "musical comedy": 1, "black comedy": 0.5, "dark comedy": 0.5, "farce": 1},
+    "Horror": {"slasher": 1, "zombie": 1, "haunted house": 1, "ghost": 1, "gore": 1, "supernatural horror": 1,
+               "body horror": 1, "possession": 1, "monster": 0.5, "found footage": 0.5},
+    "Science Fiction": {"space": 1, "alien": 1, "time travel": 1, "dystopia": 1, "robot": 1,
+                        "artificial intelligence (a.i.)": 1, "spacecraft": 1, "cyberpunk": 1, "space travel": 1,
+                        "future": 0.5, "post-apocalyptic future": 1},
+    "Action": {"explosion": 1, "car chase": 1, "shootout": 1, "martial arts": 1, "fight": 0.5, "hand to hand combat": 1,
+               "one man army": 1, "gunfight": 1, "action hero": 1},
+    "Crime": {"heist": 1, "gangster": 1, "mafia": 1, "detective": 1, "organized crime": 1, "crime boss": 1,
+              "drug dealer": 1, "police": 0.5, "robbery": 1},
+    "Romance": {"romcom": 1, "love": 0.5, "wedding": 1, "love triangle": 1, "romance": 1, "first love": 1},
+    "War": {"world war ii": 1, "world war i": 1, "battlefield": 1, "soldier": 1, "vietnam war": 1, "army": 0.5,
+            "military": 0.5},
+    "Thriller": {"psychological thriller": 1, "suspense": 1, "conspiracy": 1, "twist ending": 1, "serial killer": 1,
+                 "kidnapping": 1},
+    "Fantasy": {"magic": 1, "wizard": 1, "dragon": 1, "sword and sorcery": 1, "fairy tale": 1, "mythology": 1,
+                "witch": 1},
+    "Mystery": {"whodunit": 1, "murder mystery": 1, "detective": 1, "investigation": 1, "puzzle": 1},
+    "Animation": {"anime": 1, "cartoon": 1, "stop motion": 1, "computer animation": 1},
+    "Family": {"family": 0.5, "children's adventure": 1, "talking animal": 1, "coming of age": 0.5},
+    "Adventure": {"treasure hunt": 1, "quest": 1, "expedition": 1, "jungle": 1, "swashbuckler": 1},
+    "Documentary": {"biography": 0.5, "nature": 1, "music documentary": 1},
+}
+
+
+def genre_fit(film, genre):
+    """How much of `genre` a film is, for breaking ties on that genre's
+    shelf: where the genre sits in its TMDB list (its only genre counts
+    most, listed last least) and that genre's own keywords (up to 2)."""
+    genres = film.get("genre") or []
+    if genre not in genres:
+        return 0.0
+    at, n = genres.index(genre), len(genres)
+    place = 3.0 if n == 1 else (2.0 if at == 0 and n == 2 else (1.0 if at == 0 else 0.5))
+    kws = {k.lower() for k in film.get("keywords") or []}
+    words = sum(w for k, w in GENRE_KEYWORDS.get(genre, {}).items() if k in kws)
+    return place + min(2.0, words)
 
 
 _FAME_FIRSTS = {"at": None, "map": {}}
 
 
 def fame_firsts():
-    """{film id: how many Hall of Fame shelves it tops}, for the trophy on
-    its Library tile (asked for, 2026-10-27). Only shelves that rank, best
-    first: not Recently rated, Hidden gems or Unpopular opinions, which are
-    in another order. Worked out once per library load."""
+    """{film id: [the Hall of Fame shelves it tops]}, for the trophy on its
+    Library tile (asked for, 2026-10-27), Hidden Gems and Unpopular Opinions
+    included. Not Recently Rated: its #1 is only the last thing you scored.
+    Worked out once per library load."""
     LIB.load()
     if _FAME_FIRSTS["at"] == LIB.loaded_at:
         return _FAME_FIRSTS["map"]
-    out = defaultdict(int)
+    out = defaultdict(list)
     try:
         for c in build_hall_of_fame()["categories"]:
-            if c["id"] in ("recent", "gems", "unpopular") or not c["items"]:
+            if c["id"] == "recent" or not c["items"]:
                 continue
             first = c["items"][0]
             if first["kind"] == "movie":
-                out[first["id"]] += 1
+                out[first["id"]].append(c["name"])
     except Exception:
         log_problem("hall of fame firsts")
     _FAME_FIRSTS.update(at=LIB.loaded_at, map=dict(out))
@@ -6757,9 +6806,11 @@ def build_hall_of_fame():
         for g in m.get("genre") or []:
             if g in _FAME_GENRES:
                 by_genre[g].append(fitems[m["movieid"]])
+    films_by_id = {m["movieid"]: m for m in films}
     for g in sorted(by_genre, key=lambda g: -len(by_genre[g])):
+        fit = {i["id"]: genre_fit(films_by_id[i["id"]], g) for i in by_genre[g]}
         shelf("genre:" + g, "Best " + _FAME_GENRES[g].lower(),
-              "All %d of yours, best first" % len(by_genre[g]), by_genre[g])
+              "All %d of yours, best first" % len(by_genre[g]), _fame_rank(by_genre[g], fit), ranked=False)
     # Eras.
     for start, name in ((2020, "The 2020s"), (2010, "The 2010s"), (2000, "The 2000s"), (1990, "The 1990s")):
         shelf("era:%d" % start, name, "Films from %d to %d" % (start, start + 9),
@@ -18233,8 +18284,10 @@ body.android .tile.elsewhere.streamable .cap{padding-bottom:26px}
 .linearmark{position:absolute;right:0;top:0;transform:translateY(-100%);line-height:0;
   padding:4px 6px 3px;border-top-left-radius:4px;background:#060509;color:#a78bfa;pointer-events:none}
 .linearmark svg{width:10px;height:10px}
+/* Above the hover panel too, and hoverable itself: its tooltip names the
+   shelves it tops. */
 .tile .cap .trophy{position:absolute;right:7px;bottom:7px;display:inline-flex;align-items:center;gap:2px;
-  color:#e8b84a;line-height:1}
+  color:#e8b84a;line-height:1;z-index:6;cursor:help}
 .tile .cap .trophy i{font-style:normal;font-family:var(--mono);font-size:10px;color:var(--muted)}
 .eplinear.hidden{display:none}
 .eprow .code{position:relative}
@@ -22180,7 +22233,7 @@ function tile(item){
   cap.append(sub);
   if(item.firsts){
     const tr = el('span', 'trophy', TROPHY_ICON + (item.firsts > 1 ? '<i>(\u00D7' + item.firsts + ')</i>' : ''));
-    tr.title = '#1 on ' + item.firsts + (item.firsts === 1 ? ' Hall of Fame shelf' : ' Hall of Fame shelves');
+    tr.title = '#1 in the Hall of Fame: ' + (item.first_on || []).join(', ');
     cap.append(tr);
   }
   b.append(cap);

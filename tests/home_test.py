@@ -169,12 +169,26 @@ check("a shelf opens at its first row", "fameOpen = c.id; drawFame(); $('#view-r
 check("pressing Ratings goes back to the Hall of Fame's front",
       "if(id === 'ratings'){ ratMode = 'fame'; fameOpen = null; }" in pg)
 firsts = n.fame_firsts()
-_tops = [c["items"][0]["id"] for c in cats if c["id"] not in ("recent", "gems", "unpopular") and c["items"][0]["kind"] == "movie"]
-check("a film's trophies are how many ranked shelves it tops",
-      all(firsts.get(i) == _tops.count(i) for i in set(_tops)) and sum(firsts.values()) == len(_tops), (firsts, _tops))
+_tops = [(c["items"][0]["id"], c["name"]) for c in cats if c["id"] != "recent" and c["items"][0]["kind"] == "movie"]
+check("a film's trophies are the shelves it tops, Hidden Gems included, not Recently Rated",
+      all(sorted(firsts.get(i, [])) == sorted(nm for j, nm in _tops if j == i) for i, _ in _tops)
+      and sum(len(v) for v in firsts.values()) == len(_tops), (firsts, _tops))
 _rows = n.browse_library("film", "", "mine", "all", 200, 0)["items"]
-check("and its Library tile carries the count", all(r.get("firsts", 0) == firsts.get(r["id"], 0) for r in _rows)
-      and "el('span', 'trophy', TROPHY_ICON" in pg)
+check("and its Library tile carries the count and the names", all(r.get("firsts", 0) == len(firsts.get(r["id"], []))
+      and r.get("first_on", []) == firsts.get(r["id"], []) for r in _rows)
+      and "el('span', 'trophy', TROPHY_ICON" in pg and "#1 in the Hall of Fame: " in pg)
+# Ties on a genre shelf go to the film that's most that genre.
+_borat = {"genre": ["Comedy"], "keywords": ["satire", "mockumentary"]}
+_pulp = {"genre": ["Thriller", "Crime", "Comedy"], "keywords": ["dark comedy"]}
+_para = {"genre": ["Comedy", "Thriller", "Drama"], "keywords": ["dark comedy"]}
+check("Borat is more of a comedy than Parasite, Parasite more than Pulp Fiction",
+      n.genre_fit(_borat, "Comedy") > n.genre_fit(_para, "Comedy") > n.genre_fit(_pulp, "Comedy")
+      and n.genre_fit(_borat, "Horror") == 0)
+_a = {"id": 1, "title": "A", "score": 9, "tmdb_rating": 8.5}
+_b = {"id": 2, "title": "B", "score": 9, "tmdb_rating": 6.4}
+_c = {"id": 3, "title": "C", "score": 9.5, "tmdb_rating": 5}
+check("fit breaks a tie, never a difference in your score",
+      [i["id"] for i in n._fame_rank([_a, _b, _c], {1: 1.0, 2: 5.0, 3: 0})] == [3, 2, 1])
 check("Now's card shows no TMDB score", "if(p.rating) meta.append(el('span',null,'TMDB" not in pg
       and "p.rating ? 'TMDB ' + p.rating : ''].filter" not in pg)
 check("a show's tile wears the arrow in order, the shuffle otherwise",
