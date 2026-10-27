@@ -96,6 +96,8 @@ check("Settings has the switch", 'id="c_tray"' in n.PAGE)
 # Windows 11 makes a taskbar stand-in window with the app's title, in Explorer;
 # a title search found that, and the resize edges and maximise went to it.
 _src = open(n.__file__, encoding="utf-8").read()
+check("maximised: no resize frame (the grey line) and square corners; restored, both back",
+      "style & ~WS_THICKFRAME" in _src and "DwmSetWindowAttribute(hwnd, 33" in _src and "saved[4]" in _src)
 check("resizing and maximise look among this process's own windows, not any with the title",
       "hwnd = own_window(title)" in _src and _src.count("FindWindowW(None, title)") == 0)
 if os.name == "nt":

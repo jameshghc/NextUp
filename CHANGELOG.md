@@ -17,7 +17,7 @@ What changed in Next Up, version by version, newest first. Version numbers start
 - Every Hall of Fame shelf now holds at least ten; the shorter ones (most directors' shelves among them) are gone.
 - Fixed on Windows: maximising Next Up covered the taskbar. It now fills the screen less the taskbar, and restoring puts it back where it was.
 - On a show's page, click an episode's code (S01E02) to say "I'm up to here" — for a show you started somewhere else. The episodes before it count as watched, it becomes the next one, and the purple arrow moves to it.
-- Fixed on Windows: maximised, the window left a thin gap round the edge (the invisible resize frame); it now fills the screen to the taskbar.
+- Fixed on Windows: maximised, the window left a thin gap round the edge and a grey line along the top (the resize frame), with rounded corners. It now fills the screen to the taskbar, square-cornered; restoring brings the corners and the resize edges back.
 - Fixed on Windows: the window couldn't be resized or maximised. Next Up looked for its window by title, and Windows 11 keeps a stand-in window for the taskbar with the same title, which it found first. It now looks only among its own windows.
 - The TMDB score is gone from the Now page's card, and from the line above your rating: it swayed the choice more than it should. It still counts in the picking.
 - Fixed: Library › Sort › Recently watched counted a few seconds' flick on a channel as watching; it now goes by real sittings, as Continue does.

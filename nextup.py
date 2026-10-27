@@ -28091,11 +28091,34 @@ def fill_work_area(title="Next Up", saved=None):
     user32.MonitorFromWindow.restype = ctypes.c_void_p     # a handle, not a 32-bit int
     user32.GetMonitorInfoW.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
     SWP = 0x0004 | 0x0010 | 0x0020          # no z-order change, no activate, frame changed
+    GWL_STYLE, WS_THICKFRAME = -16, 0x00040000
+
+    def corners(square):
+        # Windows 11: square corners while it fills the screen, its own
+        # rounded ones otherwise (DWMWA_WINDOW_CORNER_PREFERENCE). Nothing
+        # on Windows 10, which has none to round.
+        try:
+            pref = ctypes.c_int(1 if square else 0)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(pref), ctypes.sizeof(pref))
+        except Exception:
+            pass
+
     if saved:
-        l, t, r, b = saved
+        l, t, r, b = saved[:4]
+        if len(saved) > 4:
+            user32.SetWindowLongW(hwnd, GWL_STYLE, saved[4])      # the resize edges back
+        corners(False)
         user32.SetWindowPos(hwnd, 0, l, t, r - l, b - t, SWP)
         return None
     before = wintypes.RECT()
+    user32.GetWindowRect(hwnd, ctypes.byref(before))
+    # Maximised, there's nothing to resize, and the resize frame is what
+    # Windows draws as a thin grey line along the top of a frameless window
+    # (2026-10-27): off while it fills the screen, back on restoring.
+    style = user32.GetWindowLongW(hwnd, GWL_STYLE)
+    user32.SetWindowLongW(hwnd, GWL_STYLE, style & ~WS_THICKFRAME)
+    user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0027)
+    corners(True)
     user32.GetWindowRect(hwnd, ctypes.byref(before))
 
     class MONITORINFO(ctypes.Structure):
@@ -28122,7 +28145,7 @@ def fill_work_area(title="Next Up", saved=None):
         pass
     user32.SetWindowPos(hwnd, 0, w.left - left, w.top - top,
                         (w.right - w.left) + left + right, (w.bottom - w.top) + top + bottom, SWP)
-    return (before.left, before.top, before.right, before.bottom)
+    return (before.left, before.top, before.right, before.bottom, style)
 
 
 def release_port(server):
