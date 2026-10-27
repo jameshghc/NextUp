@@ -167,5 +167,23 @@ top = n.browse_library("film", "", "watched", "all", 3, 0)["items"]
 check("Recently watched: the forty minutes first, not the flick", top and top[0]["id"] == g2
       and all(r["id"] != g1 for r in top), [r["title"] for r in top])
 
+# 2026-10-27: History leaves out an unclosed start followed within a minute by
+# anything else — a channel tune-in too, not only another play.
+k = n.db()
+h1, h2, h3 = [r[0] for r in k.execute("SELECT id FROM movies ORDER BY id LIMIT 3 OFFSET 20")]
+_now = time.time()
+_at = lambda s: time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(_now - s))
+k.execute("INSERT INTO history (at, kind, item_id, title, event) VALUES (?,'movie',?,'flicked','played')", (_at(3600), h1))
+k.execute("INSERT INTO history (at, kind, item_id, title, event) VALUES (?,'movie',?,'next','tuned in via X #1')", (_at(3590), h2))
+k.execute("INSERT INTO history (at, kind, item_id, title, event) VALUES (?,'movie',?,'kept','played')", (_at(1800), h3))
+k.execute("INSERT INTO history (at, kind, item_id, title, event) VALUES (?,'movie',?,'after','tuned in via X #2')", (_at(1500), h2))
+k.commit(); k.close()
+_hist = n.build_history(days=2)
+_ids = {(i.get("kind"), i.get("id")) for i in _hist["items"]}
+_shown = lambda mid: any(str(mid) == str(i.get("id")) and i.get("kind") in ("movie", None) for i in _hist["items"]) \
+    or ("movie", mid) in _ids
+check("History: ten seconds then a channel tuned in isn't shown", not _shown(h1), [(i.get("title"), i.get("id")) for i in _hist["items"]][:6])
+check("five minutes then something else is", _shown(h3))
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

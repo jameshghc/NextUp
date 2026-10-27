@@ -2690,6 +2690,16 @@ def build_history(days=90, limit=400):
             " FROM history WHERE event IN (?,?,?) ORDER BY at DESC, id DESC"
             " LIMIT ?) ORDER BY at ASC, id ASC",
             SESSION_EVENTS + (limit * 3,))]
+        # When anything at all started, on each device — a channel tuned,
+        # the next episode — so an unclosed start can be told from a flick
+        # by how soon the next thing came (see below).
+        starts = defaultdict(list)
+        for r in conn.execute(
+                "SELECT at, origin FROM history WHERE at >= ? AND (event IN"
+                " ('played','watched','stopped','next episode','previous episode')"
+                " OR event LIKE 'tuned in via %' OR event LIKE 'next up on %') ORDER BY at",
+                (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(since - 86400)),)):
+            starts[r["origin"]].append(stamp_seconds(r["at"]) or 0)
     finally:
         conn.close()
 
@@ -2818,6 +2828,18 @@ def build_history(days=90, limit=400):
             sitting["flick"] = True
         sessions.append(sitting)
     sessions.extend(open_now.values())
+
+    # Under a minute isn't a sitting (asked for, 2026-10-27). A start that
+    # was never closed is judged by the gap to whatever started next on that
+    # device — of any kind, a channel or the next episode too, not only
+    # another "played" as above.
+    for sitting in sessions:
+        if sitting.get("ended") is not None or sitting.get("flick"):
+            continue
+        began = stamp_seconds(sitting["at"]) or 0
+        after = [t for t in starts.get(sitting.get("device"), []) if t > began]
+        if after and min(after) - began < MIN_WATCH_SECONDS:
+            sitting["flick"] = True
 
     # Which sitting of each thing is the most recent one. Only that one may
     # borrow the library's resume position when nobody closed it: an OPEN
