@@ -932,7 +932,7 @@ def habit_bonus(plays):
     return min(HABIT_MAX, 0.5 * math.log(1 + plays, 2))
 
 
-def available_genres(kind, chosen):
+def available_genres(kind, chosen, tags=()):
     """For the Now chooser: every genre in the library, with how many films
     or shows ("film", "tv", or "any" for both) have it AND everything already
     chosen. A count of 0 is a genre that would leave nothing — the page
@@ -940,8 +940,9 @@ def available_genres(kind, chosen):
     LIB.load()
     rows = []
     if kind != "tv":
-        rows += [m.get("genre") or [] for m in LIB.movies]
-    if kind != "film":
+        rows += [m.get("genre") or [] for m in LIB.movies
+                 if not tags or all(t in film_tags(m) for t in tags)]
+    if kind != "film" and not tags:
         rows += [sh.get("genre") or [] for sh in LIB.shows]
     every, counts = set(), Counter()
     for genres in rows:
@@ -953,6 +954,82 @@ def available_genres(kind, chosen):
     return [{"name": g, "n": counts.get(g, 0)} for g in sorted(every, key=lambda g: -counts.get(g, 0))]
 
 
+# --- the Films tags on Now -------------------------------------------------
+#
+# A second row of tags under the genres when Film is chosen (asked for,
+# 2026-10-27): what kind of film rather than what genre. Each is a rule on
+# what's stored about it — budget, takings, TMDB's votes, keywords, year,
+# length, series — and they combine with the genres and each other, a film
+# having all that's chosen.
+
+_EXPLOSIVE = {"explosion", "car chase", "shootout", "gunfight", "heist", "bomb", "battle", "martial arts",
+              "chase", "assassin", "hitman", "superhero", "one man army", "hand to hand combat", "action hero",
+              "shooting", "gun fu", "terrorist attack", "car crash"}
+_MINDBENDING = {"twist ending", "time travel", "dream", "alternate reality", "nonlinear timeline",
+                "parallel world", "simulation", "memory loss", "mind bending", "surrealism", "time loop",
+                "psychological", "unreliable narrator", "amnesia", "dream world", "virtual reality"}
+
+
+def _kws(m):
+    return {k.lower() for k in m.get("keywords") or []}
+
+
+FILM_TAGS = [
+    ("recent", "Recent", lambda m: (m.get("year") or 0) >= date.today().year - 3),
+    ("classic", "Classic", lambda m: 0 < (m.get("year") or 0) < 1980),
+    ("bigbudget", "Big budget", lambda m: (m.get("budget") or 0) >= 100e6),
+    ("lowbudget", "Low budget", lambda m: 0 < (m.get("budget") or 0) < 10e6),
+    ("smash", "Box office smash", lambda m: (m.get("revenue") or 0) >= 300e6
+        and (not m.get("budget") or m["revenue"] >= 3 * m["budget"])),
+    ("flop", "Box office flop", lambda m: (m.get("budget") or 0) >= 5e6 and 0 < (m.get("revenue") or 0) < m["budget"]),
+    ("crowd", "Crowd pleaser", lambda m: (m.get("votes") or 0) >= 10000 and (m.get("rating") or 0) >= 7.3),
+    ("radar", "Under the radar", lambda m: 50 <= (m.get("votes") or 0) < 2000 and (m.get("rating") or 0) >= 6.8),
+    ("cult", "Cult classic", lambda m: bool({"cult film", "cult classic"} & _kws(m))
+        or ((m.get("rating") or 0) >= 7 and (m.get("budget") or 0) >= 1e6 and 0 < (m.get("revenue") or 0) < m["budget"])
+        or ((m.get("rating") or 0) >= 7.2 and 0 < (m.get("year") or 0) < 2000 and 0 < (m.get("votes") or 0) < 5000)),
+    ("explosions", "Explosions", lambda m: bool(_EXPLOSIVE & _kws(m))
+        or ("Action" in (m.get("genre") or []) and (m.get("budget") or 0) >= 50e6)),
+    ("mind", "Mind-bending", lambda m: bool(_MINDBENDING & _kws(m))),
+    ("truestory", "True story", lambda m: any("true story" in k or "real events" in k or k == "biography" for k in _kws(m))),
+    ("book", "From a book", lambda m: any(k.startswith("based on novel") or k.startswith("based on book")
+                                          or k.startswith("based on short story") for k in _kws(m))),
+    ("series", "Part of a series", lambda m: bool(m.get("set"))),
+    ("foreign", "Not in English", lambda m: (m.get("language") or "en") != "en"),
+    ("short", "Short and sweet", lambda m: 0 < minutes(m.get("runtime")) < 95),
+    ("epic", "Epic", lambda m: minutes(m.get("runtime")) > 150),
+    ("unseen", "Never seen", lambda m: not m.get("playcount") and not (m.get("resume") or {}).get("position")),
+]
+_FILM_TAG_RULES = {k: f for k, _label, f in FILM_TAGS}
+
+
+def film_tags(m):
+    """The Films tags this film has, as a set of keys."""
+    out = set()
+    for key, _label, rule in FILM_TAGS:
+        try:
+            if rule(m):
+                out.add(key)
+        except Exception:
+            pass
+    return out
+
+
+def available_film_tags(chosen_genres, chosen_tags):
+    """Every Films tag with how many films have it AND everything chosen,
+    genres and tags; 0 is one that would leave nothing (greyed)."""
+    LIB.load()
+    counts = Counter()
+    for m in LIB.movies:
+        genres = m.get("genre") or []
+        if not all(genre_matches(g, genres) for g in chosen_genres):
+            continue
+        tags = film_tags(m)
+        if all(t in tags for t in chosen_tags):
+            counts.update(tags)
+    return [{"key": k, "name": label, "n": counts.get(k, 0)} for k, label, _rule in FILM_TAGS]
+
+
+
 def genre_matches(genre, genres):
     """Whether something filed under `genres` is `genre` — a show's "Action &
     Adventure" counts as Action, and as Adventure."""
@@ -960,7 +1037,7 @@ def genre_matches(genre, genres):
 
 
 def build_tonight(kind, mood, max_mins, genre, count=3, exclude=None,
-                  avoid_shows=()):
+                  avoid_shows=(), tags=""):
     LIB.load()
     now = time.time()
     bulk_days = bulk_import_days()
@@ -988,6 +1065,10 @@ def build_tonight(kind, mood, max_mins, genre, count=3, exclude=None,
             return 0.3
         return 0.0
 
+    # The Films tags: films with every one chosen, and no shows at all.
+    wanted_tags = {t for t in (tags or "").split(",") if t in _FILM_TAG_RULES}
+    if wanted_tags:
+        kind = "film"
     if kind in ("any", "film"):
         for m in LIB.movies:
             # A low score means you didn't like it — don't offer it again.
@@ -996,6 +1077,8 @@ def build_tonight(kind, mood, max_mins, genre, count=3, exclude=None,
             if 0 < (m.get("userrating") or 0) < 5:
                 continue
             if ("movie:%s" % m["movieid"]) in exclude:
+                continue
+            if wanted_tags and not wanted_tags <= film_tags(m):
                 continue
             genres = m.get("genre") or []
             if genre and not all(genre_matches(g, genres) for g in genre.split(",") if g):
@@ -3915,6 +3998,7 @@ class LocalLibrary(object):
             "watchlisted": bool(r["watchlisted_at"]),
             "country": as_list(r["country"]), "votes": r["vote_count"] or 0,
             "language": r["original_language"] or "",
+            "budget": r["budget"] or 0, "revenue": r["revenue"] or 0,
             "favourited": bool(r["favourited_at"]),
         }
 
@@ -14735,11 +14819,17 @@ class PhoneHandler(BaseHTTPRequestHandler):
                 one = lambda k, d="": (query.get(k) or [d])[0]
                 args = dict(kind=one("kind", "any"), mood=one("mood", "any"),
                             max_mins=int(one("max", "0") or 0), genre=one("genre", ""),
+                            tags=one("tags", ""),
                             count=max(3, min(int(one("count", "3") or 3), 24)))
                 return self.send_json(phone_now(args, [x for x in one("exclude").split(",") if x]))
             if route == "/phone/genres":
                 chosen = [g for g in ((query.get("with") or [""])[0]).split(",") if g]
-                return self.send_json({"genres": available_genres((query.get("kind") or ["any"])[0], chosen)})
+                tags = [t for t in ((query.get("tags") or [""])[0]).split(",") if t]
+                kind = (query.get("kind") or ["any"])[0]
+                out = {"genres": available_genres(kind, chosen, tags)}
+                if kind == "film":
+                    out["tags"] = available_film_tags(chosen, tags)
+                return self.send_json(out)
             if route == "/phone/channels":
                 return self.send_json(phone_channels())
             if route == "/phone/show":
@@ -15974,6 +16064,7 @@ class Handler(BaseHTTPRequestHandler):
                     mood=one("mood", "any"),
                     max_mins=int(one("max", "0") or 0),
                     genre=one("genre", ""),
+                    tags=one("tags", ""),
                     # The phone's chooser shows what else fits under the pick.
                     count=max(3, min(int(one("count", "3") or 3), 24)),
                 )
@@ -16224,7 +16315,11 @@ class Handler(BaseHTTPRequestHandler):
 
             if route == "/api/genres":
                 chosen = [g for g in one("with", "").split(",") if g]
-                return self.send_json({"genres": available_genres(one("kind", "any"), chosen)})
+                tags = [t for t in one("tags", "").split(",") if t]
+                out = {"genres": available_genres(one("kind", "any"), chosen, tags)}
+                if one("kind", "any") == "film":
+                    out["tags"] = available_film_tags(chosen, tags)
+                return self.send_json(out)
 
             if route == "/api/recs/home":
                 return self.send_json(recs_home())
@@ -18518,6 +18613,18 @@ body.android .chooserow.genres.hidden{display:none}
      alone didn't say clearly enough which ones are chosen. */
   text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:3px}
 .ptag.gchip.off{opacity:.28;cursor:default;filter:grayscale(1)}
+/* The Films tags: plain, so they read as a second kind of tag. */
+.ptag.gchip.metachip{color:var(--paper);background:rgba(255,255,255,.05);border-color:rgba(255,255,255,.22)}
+.ptag.gchip.metachip.on{background:rgba(var(--accent-rgb),.28);border-color:var(--marigold);color:#fff}
+.nowchooser .metarow{margin-top:4px;padding-top:10px;border-top:1px solid var(--line)}
+body:not(.android) .nowchooser #chooser-meta{grid-column:1 / -1}
+body:not(.android) .nowchooser .metarow.hidden{display:none}
+/* With them up, the alternatives sit under the pick, a row across. */
+body:not(.android) #view-now.withtags:not(.hidden){grid-template-areas:"cont side" "pick side" "fits side";
+  grid-template-rows:auto auto 1fr}
+body:not(.android) #view-now > #nowfits{grid-area:fits;display:block;margin-top:16px;min-width:0}
+body:not(.android) #view-now > #nowfits.hidden{display:none}
+body:not(.android) #view-now > #nowfits .fitgrid{grid-template-columns:repeat(6,minmax(0,1fr))}
 /* What fits, under the chooser. */
 body.android .nowfits{display:block;margin:0 0 14px}
 body.android .nowfits.hidden{display:none}
@@ -19871,6 +19978,7 @@ body.android #view-settings{overflow-x:hidden}
             title="Show the genres" aria-expanded="false"><span>‹</span></button>
     <div class="chooserow" id="chooser-kind"></div>
     <div class="chooserow genres" id="chooser-genre"></div>
+    <div class="chooserow genres metarow hidden" id="chooser-meta"></div>
   </div>
   <div class="nowfits hidden" id="nowfits"></div>
   </div>
@@ -20733,6 +20841,7 @@ function tonightParams(exclude, peek){
     mood: $('#mood').value, kind: $('#kind').value,
     genre: nowGenres(), exclude: [...exclude].join(',')
   });
+  if(typeof chosenTags !== 'undefined' && chosenTags.length) q.set('tags', chosenTags.join(','));
   if(!document.body.classList.contains('android')) q.set('count', '7');
   else if(typeof chooserStep !== 'undefined' && chooserStep >= 2) q.set('count', '13');
   if(peek) q.set('peek', '1');
@@ -20741,6 +20850,7 @@ function tonightParams(exclude, peek){
 
 function aheadKey(exclude){
   return [$('#mood').value, $('#kind').value, nowGenres(),
+          typeof chosenTags !== 'undefined' ? chosenTags.join(',') : '',
           [...exclude].sort().join(',')].join('|');
 }
 
@@ -21138,6 +21248,11 @@ const CHOOSER_KINDS = [['any', 'Anything'], ['film', 'Film'], ['tv', 'TV']];
 let chooserStep = 1;            // 1 a kind (Anything to start), 2 a kind and genres
 var chosenGenres = [];          // var: read by nowGenres before this line may run
 let genreAvail = null;          // [{name, n}] for the kind and genres chosen
+/* The Films tags (FILM_TAGS on the server): a second row under the genres
+   when Film is chosen, combining with them; and the alternatives go under
+   the pick to make room (asked for, 2026-10-27). */
+var chosenTags = [];            // var: read by tonightParams before this line may run
+let tagAvail = null;            // [{key, name, n}]
 /* The genres are out with Film or TV, and folded away with Anything until
    the button beside it brings them out (asked for, 2026-10-25). */
 let genresOpen = false;
@@ -21181,19 +21296,64 @@ function drawChooser(){
     genres.append(b);
   });
   genres.scrollLeft = keepLeft;
+  drawFilmTags();
 }
 
 /* Which genres are still possible with the kind and genres chosen. */
 async function chooserAvail(){
   const gsrc = nowSource() === '/api/pcnow' ? '/api/pcgenres' : '/api/genres';
-  const r = await api(gsrc + '?' + new URLSearchParams({kind: $('#kind').value, with: chosenGenres.join(',')}));
+  const r = await api(gsrc + '?' + new URLSearchParams({kind: $('#kind').value, with: chosenGenres.join(','),
+                                                        tags: chosenTags.join(',')}));
   genreAvail = r && r.genres || null;
+  tagAvail = r && r.tags || null;
   drawChooser();
+}
+
+function chooserTag(key){
+  if(!key) chosenTags = [];
+  else if(chosenTags.includes(key)) chosenTags = chosenTags.filter(t => t !== key);
+  else chosenTags = chosenTags.concat([key]);
+  chooserStep = 2;
+  chooserApply();
+  chooserAvail();
+}
+
+function drawFilmTags(){
+  const row = $('#chooser-meta');
+  const film = $('#kind').value === 'film';
+  row.classList.toggle('hidden', !film);
+  /* On the PC the alternatives move under the pick while these are up. */
+  if(!document.body.classList.contains('android')){
+    const view = $('#view-now'), fits = $('#nowfits');
+    view.classList.toggle('withtags', film);
+    if(film && fits.parentElement !== view) $('#tonight-out').after(fits);
+    if(!film && fits.parentElement === view) $('#nowside').append(fits);
+  }
+  row.innerHTML = '';
+  if(!film) return;
+  const keepLeft = row.scrollLeft;
+  const any = el('button', 'ptag gchip metachip' + (!chosenTags.length ? ' on' : ''), 'Any kind');
+  any.type = 'button';
+  any.onclick = () => chooserTag('');
+  row.append(any);
+  (tagAvail || []).forEach(({key, name, n}) => {
+    const on = chosenTags.includes(key);
+    const none = n === 0 && !on;
+    const b = el('button', 'ptag gchip metachip' + (on ? ' on' : '') + (none ? ' off' : ''), esc(name));
+    b.type = 'button';
+    b.disabled = none;
+    b.title = none ? 'No films with that as well' : name;
+    b.onclick = () => chooserTag(key);
+    row.append(b);
+  });
+  row.scrollLeft = keepLeft;
 }
 
 function chooserKind(value){
   $('#kind').value = value;
   chosenGenres = [];
+  chosenTags = [];
+  tagAvail = null;
   genreAvail = null;
   genresOpen = value !== 'any';
   /* Anything is a kind like the others now: its tags stay up, and combine

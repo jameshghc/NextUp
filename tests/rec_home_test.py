@@ -285,5 +285,35 @@ n.tmdb = _real_tmdb
 check("and shows it", "if(r && r.line){ why.textContent = r.line; return; }" in page
       and "p.line || p.why" in page)
 
+# --- 2026-10-27: the Films tags on Now -------------------------------------------------
+_big = {"year": 2019, "budget": 200e6, "revenue": 900e6, "votes": 25000, "rating": 7.9, "genre": ["Action"],
+        "keywords": ["explosion"], "set": "Some Saga", "language": "en", "runtime": 160 * 60, "playcount": 0}
+_small = {"year": 1975, "budget": 2e6, "revenue": 1e6, "votes": 900, "rating": 7.4, "genre": ["Drama"],
+          "keywords": ["twist ending", "based on novel or book"], "set": "", "language": "fr", "runtime": 88 * 60,
+          "playcount": 2}
+_bt, _st = n.film_tags(_big), n.film_tags(_small)
+check("a blockbuster's tags", {"bigbudget", "smash", "crowd", "explosions", "series", "epic", "unseen"} <= _bt
+      and not _bt & {"lowbudget", "flop", "classic", "foreign", "short"}, _bt)
+check("a small old foreign film's tags", {"classic", "lowbudget", "radar", "cult", "mind", "book", "foreign", "short"} <= _st
+      and not _st & {"bigbudget", "smash", "unseen"}, _st)
+n.LIB.load()
+_av = n.available_film_tags([], [])
+check("every tag is offered with a count", [a["key"] for a in _av] == [k for k, _l, _r in n.FILM_TAGS]
+      and all(a["n"] >= 0 for a in _av))
+_tagged = next((a for a in _av if a["n"] >= 3), None)
+_picks = n.build_tonight("film", "any", 0, "", count=12, tags=_tagged["key"]) if _tagged else []
+check("a tag keeps Now's picks to films that have it", _tagged and _picks
+      and all(p["type"] == "movie" and _tagged["key"] in n.film_tags(next(m for m in n.LIB.movies if m["movieid"] == p["id"]))
+              for p in _picks), (_tagged, len(_picks)))
+_both = n.available_film_tags([], [_tagged["key"]]) if _tagged else []
+check("and the counts narrow with it", _tagged and next(a for a in _both if a["key"] == _tagged["key"])["n"] == _tagged["n"]
+      and all(a["n"] <= _tagged["n"] for a in _both))
+check("the page has the row, sends the tags, and moves the alternatives under the pick",
+      'id="chooser-meta"' in page and "q.set('tags', chosenTags.join(','))" in page
+      and "function drawFilmTags()" in page and "view.classList.toggle('withtags', film)" in page)
+_src = open(n.__file__, encoding="utf-8").read()
+check("the phone's PC routes carry the tags", _src.count('tags=one("tags", "")') >= 2
+      and 'out["tags"] = available_film_tags(chosen, tags)' in _src)
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
