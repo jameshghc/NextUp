@@ -1057,6 +1057,7 @@ def build_tonight(kind, mood, max_mins, genre, count=3, exclude=None,
         for e in LIB.episodes:
             by_show[e.get("tvshowid")].append(e)
         habits = show_watch_habits()
+        linear = linear_map()
         for s in LIB.shows:
             # Offered a moment ago as some other episode. The offer memory
             # works on episodes, and the next one along is a different key.
@@ -1072,7 +1073,7 @@ def build_tonight(kind, mood, max_mins, genre, count=3, exclude=None,
             if mood_cfg["genres"] and not set(genres) & set(mood_cfg["genres"]):
                 continue
             progress = series_progress(by_show, s.get("tvshowid"))
-            if s.get("favourited"):
+            if s.get("favourited") and not linear.get(s.get("tvshowid"), (False,))[0]:
                 # A favourite is a show you know by heart, and there's no
                 # "next" in a sitcom you've seen five times: any episode is
                 # the right one. The app can't know you've seen them all —
@@ -1359,6 +1360,123 @@ def resume_position(kind, item_id):
 def art_url(poster):
     """Posters are TMDB urls now, so the browser fetches them directly."""
     return poster or None
+
+
+# --- Watch in order ----------------------------------------------------------
+#
+# Some shows you dip into anywhere (Seinfeld, Always Sunny); some are one
+# story you're part way along (Attack on Titan, Arcane), where a random
+# episode is the wrong thing to be offered (asked for, 2026-10-27). A show
+# "in order" is only ever suggested at the episode you're up to — Now, Home,
+# the wildcards — and stays out of the channels' random picks. Your switch
+# on the show's page decides; until you've used it, a guess does, from what
+# TMDB says about the show and how you've watched it. There's no TMDB field
+# for "serialised", so it's a score: comedy, sitcom, anthology and long runs
+# count against; drama, sci-fi, action, "miniseries", "based on manga" and
+# short runs for; and your own plays, if they go S1E1, E2, E3 in a line
+# (or jump about), count most.
+
+_LINEAR_GENRES = {"Comedy": -2, "Reality": -3, "Documentary": -3, "Kids": -3, "Talk": -3,
+                  "News": -3, "Soap": -1, "Drama": 2, "Sci-Fi & Fantasy": 1,
+                  "Action & Adventure": 1, "Mystery": 1, "War & Politics": 1}
+_LINEAR_KEYWORDS = {"sitcom": -3, "anthology": -1, "sketch comedy": -3, "mockumentary": -2,
+                    "parody": -1, "satire": -1, "procedural": -2, "miniseries": 4,
+                    "based on manga": 2, "based on novel or book": 2, "based on comic": 1,
+                    "based on light novel": 2}
+_LINEAR_CACHE = {"at": None, "map": {}}
+
+
+def _play_order():
+    """{show id: (pairs, in order)}: of the times you started one episode of
+    a show and the next you started was of the same show, how often it was
+    the one straight after. Only what you chose ("played"), not autoplay."""
+    out = defaultdict(lambda: [0, 0])
+    conn = db()
+    rows = conn.execute(
+        "SELECT e.show_id, e.season, e.episode FROM history h JOIN episodes e ON e.id = h.item_id"
+        " WHERE h.kind = 'episode' AND h.event = 'played' AND e.season > 0 ORDER BY h.id").fetchall()
+    conn.close()
+    last = {}
+    for r in rows:
+        here = (r["season"], r["episode"])
+        before = last.get(r["show_id"])
+        if before and before != here:
+            out[r["show_id"]][0] += 1
+            if (here[0] == before[0] and here[1] == before[1] + 1) or (here[0] == before[0] + 1 and here[1] == 1):
+                out[r["show_id"]][1] += 1
+        last[r["show_id"]] = here
+    return out
+
+
+def linear_guess(show, episodes, order=None):
+    """True when this show looks like one to watch in order (see above)."""
+    score = 0
+    for g in show.get("genre") or []:
+        score += _LINEAR_GENRES.get(g, 0)
+    kws = {k.lower() for k in show.get("keywords") or []}
+    for k, v in _LINEAR_KEYWORDS.items():
+        if k in kws:
+            score += v
+    count = len([e for e in episodes if (e.get("season") or 0) > 0])
+    if count >= 100:
+        score -= 2
+    elif 0 < count <= 40:
+        score += 1
+    runs = [minutes(e.get("runtime")) for e in episodes if e.get("runtime")]
+    if runs and sorted(runs)[len(runs) // 2] <= 30:
+        score -= 1
+    pairs, in_order = order or (0, 0)
+    if pairs >= 6:
+        share = in_order / float(pairs)
+        if share >= 0.8:
+            score += 3
+        elif share <= 0.4:
+            score -= 3
+    # A tie goes to "in order": the next episode of a sitcom does no harm,
+    # a random one from the middle of a story does.
+    return score >= 0
+
+
+def linear_map():
+    """{show id: (in order?, only guessed?)}, worked out once per library
+    load."""
+    LIB.load()
+    if _LINEAR_CACHE["at"] == LIB.loaded_at and _LINEAR_CACHE["map"]:
+        return _LINEAR_CACHE["map"]
+    by_show = defaultdict(list)
+    for e in LIB.episodes:
+        by_show[e.get("tvshowid")].append(e)
+    try:
+        order = _play_order()
+    except Exception:
+        order = {}
+    out = {}
+    for x in LIB.shows:
+        sid = x.get("tvshowid")
+        if x.get("linear_set") is not None:
+            out[sid] = (bool(x["linear_set"]), False)
+        else:
+            out[sid] = (linear_guess(x, by_show.get(sid, []), order.get(sid)), True)
+    _LINEAR_CACHE.update(at=LIB.loaded_at, map=out)
+    return out
+
+
+def is_linear(show_id):
+    return linear_map().get(show_id, (False, True))[0]
+
+
+def set_linear(show_id, on):
+    """on: True, False, or None to go back to the guess."""
+    conn = db()
+    conn.execute("UPDATE shows SET linear=? WHERE id=?",
+                 (None if on is None else (1 if on else 0), show_id))
+    conn.commit()
+    conn.close()
+    LOCAL.loaded_at = 0
+    _LINEAR_CACHE["at"] = None
+    on, guessed = linear_map().get(show_id, (False, True))
+    return {"on": on, "guessed": guessed}
+
 
 
 def show_next_episode(by_show, tvshowid):
@@ -1953,6 +2071,9 @@ LATER_COLUMNS = [
     ("movies", "watch_score", "REAL"),
     ("shows", "watch_seconds", "INTEGER"),
     ("shows", "watch_score", "REAL"),
+    # Watch in order: 1 on, 0 off, NULL not set (the guess stands). See
+    # linear_map.
+    ("shows", "linear", "INTEGER"),
 ]
 
 
@@ -3773,6 +3894,7 @@ class LocalLibrary(object):
             "country": as_list(r["country"]),
             "cast_list": as_list(r["cast_names"]), "creators": as_list(r["creators"]),
             "favourited": bool(r["favourited_at"]),
+            "linear_set": r["linear"] if "linear" in r.keys() else None,
         }
 
     def _episode(self, r):
@@ -5939,6 +6061,7 @@ def browse_library(kind, query, sort, shelf, limit, offset):
                 "tags": tile_tags(s.get("genre"), s.get("keywords"), s.get("year"), "tvshow"),
                 "plot": (s.get("plot") or "")[:300],
                 "episodes": s.get("episode") or 0,
+                "linear": is_linear(s.get("tvshowid")),
                 "in_progress": bool(progress),
                 "progress_note": ("S%02dE%02d" % (progress["episode"].get("season") or 0,
                                                   progress["episode"].get("episode") or 0))
@@ -6627,6 +6750,9 @@ def build_home():
         if not scores:
             continue
         rested = [e for e in eps if e["episodeid"] in scores and (e.get("last_played") or "") < ep_rest]
+        if is_linear(show["tvshowid"]):
+            nxt = show_next_episode(by_show, show["tvshowid"])
+            rested = [e for e in eps if nxt and e["episodeid"] == nxt.get("episodeid")]
         if rested:
             ranked = sorted(scores.values(), reverse=True)
             liked.append((show, scores, rested, set(sorted(scores, key=lambda i: -scores[i])[:5]),
@@ -6682,6 +6808,9 @@ def build_home():
         shows_by_id = {x.get("tvshowid"): x for x in LIB.shows}
         for sid, eps in by_show.items():
             rested = [e for e in eps if (e.get("last_played") or "") < ep_rest and free("episode", e["episodeid"])]
+            if is_linear(sid):
+                nxt = show_next_episode(by_show, sid)
+                rested = [e for e in rested if nxt and e["episodeid"] == nxt.get("episodeid")]
             if rested and sid in shows_by_id:
                 pool.append(("episode", (shows_by_id[sid], rng.choice(rested))))
         rng.shuffle(pool)
@@ -6824,6 +6953,8 @@ def show_detail(show_id):
         "userrating": show.get("userrating") or 0,
         "watchlisted": bool(show.get("watchlisted")),
         "favourited": bool(show.get("favourited")),
+        "linear": linear_map().get(show_id, (False, True))[0],
+        "linear_guessed": linear_map().get(show_id, (False, True))[1],
         "genres": show.get("genre") or [],
         "backdrop": local_art(row["backdrop"]) if row else None,
         "facts": show_facts(row),
@@ -12135,6 +12266,14 @@ def _episode_group_blocks(shows, block_size):
             [e for e in by_show.get(s.get("tvshowid"), [])
              if (e.get("season") or 0) > 0],
             key=episode_order)
+        if is_linear(s.get("tvshowid")):
+            # One story, in order: on a channel it's the episode you're up
+            # to (and the ones after it, for a channel of pairs or threes),
+            # never one dropped in at random. Leaving these shows out
+            # instead emptied the anime channel.
+            nxt = show_next_episode(by_show, s.get("tvshowid"))
+            at = next((i for i, e in enumerate(eps) if nxt and e["episodeid"] == nxt.get("episodeid")), None)
+            eps = eps[at:at + block_size] if at is not None else []
         for i in range(0, len(eps), block_size):
             group = eps[i:i + block_size]
             codes = ", ".join("S%02dE%02d" % (e.get("season") or 0, e.get("episode") or 0)
@@ -16379,6 +16518,15 @@ class Handler(BaseHTTPRequestHandler):
                 on = toggle_favourite(data.get("type"), data.get("id"))
                 return self.send_json({"ok": True, "on": on})
 
+            if route == "/api/show/linear":
+                # Watch in order: true, false, or null to go back to the guess.
+                try:
+                    show_id = int(data.get("id"))
+                except (TypeError, ValueError):
+                    return self.send_json({"error": "Which show?"}, 400)
+                on = data.get("on")
+                return self.send_json(set_linear(show_id, None if on is None else bool(on)))
+
             if route == "/api/dismiss":
                 key = data.get("key", "")
                 DISMISSED.add(key)
@@ -17981,6 +18129,20 @@ body.android .tile.elsewhere.streamable .cap{padding-bottom:26px}
   background:rgba(6,5,9,.86);color:var(--marigold);line-height:0;
 }
 .watchbadge .mark{width:12px;height:12px;display:block}
+/* Watch in order: a small purple arrow at the poster's bottom right, the
+   third corner after your rating (top right) and the watchlist (top left).
+   It sits on the caption's top edge, which is the poster's foot. */
+.linearmark{position:absolute;right:0;top:0;transform:translateY(-100%);line-height:0;
+  padding:4px 6px 3px;border-top-left-radius:4px;background:#060509;color:#a78bfa;pointer-events:none}
+.linearmark svg{width:10px;height:10px}
+.eplinear.hidden{display:none}
+.eprow .code{position:relative}
+.eplinear{position:absolute;left:-19px;top:50%;transform:translateY(-50%);display:flex;color:#a78bfa;line-height:0}
+.linearbtn{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:999px;cursor:pointer;vertical-align:middle;
+  font-family:var(--mono);font-size:10px;letter-spacing:.06em;background:rgba(255,255,255,.06);
+  border:1px solid rgba(255,255,255,.22);color:var(--muted)}
+.linearbtn span{opacity:.6;letter-spacing:0;text-transform:none}
+.linearbtn.on{background:rgba(167,139,250,.16);border-color:rgba(167,139,250,.7);color:#c4b5fd}
 /* The top-right corner is a stack: your rating as it always was, with the
    favourite heart directly under it. Absolutely positioned so it sits OVER
    the poster and adds no height — left in normal flow it made every rated
@@ -21934,6 +22096,11 @@ function tile(item){
       b.append(el('div','wifimark', WIFI_GLYPH + 'ON ' + esc(elsewhereWhere().toUpperCase())));
     } else b.append(el('div','elsewherebadge', elsewhereLabel()));
   }
+  if(item.kind === 'tvshow' && item.linear){
+    const m = el('div', 'linearmark', LINEAR_ARROW);
+    m.title = 'Watch in order';
+    cap.append(m);
+  }
   const corner = el('div','tilecorner');
   b.append(corner);
   const syncMarks = () => {
@@ -23272,6 +23439,7 @@ async function openShow(id, pcTmdb, atSeason){
     libraryChanged(); loadLibrary();
   };
   col.append(fav);
+  col.append(linearToggle(d));
   }
   if(d.facts && d.facts.length) col.append(factStrip(d.facts));
   body.append(col);
@@ -23287,15 +23455,41 @@ async function openShow(id, pcTmdb, atSeason){
   const seasons = d.seasons || [];
   if(seasons.length){
     const eps = el('div', 'showeps');
-    eps.append(seasonBrowser(d, seasons));
+    eps.append(seasonBrowser(d, seasons, atSeason));
     body.append(eps);
   }
+}
+
+/* Watch in order: a show that's one story is only ever suggested at the
+   episode you're up to, and stays out of the channels' random picks (see
+   linear_map). Next Up guesses until you set it; "(guessed)" says so. */
+const LINEAR_ARROW = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h13"></path><path d="M13 6l6 6-6 6"></path></svg>';
+function linearToggle(d){
+  const b = el('button', 'linearbtn' + (d.linear ? ' on' : ''));
+  b.type = 'button';
+  b.style.marginTop = '8px';
+  b.style.marginLeft = '4px';
+  const draw = () => {
+    b.classList.toggle('on', !!d.linear);
+    b.setAttribute('aria-pressed', String(!!d.linear));
+    b.innerHTML = LINEAR_ARROW + ' WATCH IN ORDER' + (d.linear_guessed ? ' <span>(guessed)</span>' : '');
+    document.querySelectorAll('.eplinear').forEach(a => a.classList.toggle('hidden', !d.linear));
+    b.title = d.linear
+      ? 'Only ever suggested at the episode you\u2019re up to. Press to let any episode come up.'
+      : 'Any episode can come up. Press to keep it to the episode you\u2019re up to.';
+  };
+  draw();
+  b.onclick = async () => {
+    const r = await post('/api/show/linear', {id: d.id, on: !d.linear});
+    if(r && !r.error){ d.linear = r.on; d.linear_guessed = r.guessed; draw(); libraryChanged(); loadLibrary(); }
+  };
+  return b;
 }
 
 /* A season at a time, opened at whichever one you're in the middle of.
    Everything stacked meant the only way to reach season five was the wheel,
    and the sheet was 5,700px tall on a show like The Simpsons. */
-function seasonBrowser(d, seasons){
+function seasonBrowser(d, seasons, atSeason){
   const wrap = el('div');
 
   const head = el('div','seasonpick');
@@ -23399,7 +23593,16 @@ async function toggleEpisodeInfo(row, ep, d){
 
 function episodeRow(ep, d){
   const row = el('div','eprow'+(ep.played?' seen':'')+(ep.id===d.next_up?' next':''));
-  row.append(el('div','code', ep.code));
+  const code = el('div','code', ep.code);
+  /* A show watched in order: its purple arrow in the margin left of the
+     code of the episode you're up to — where you are in the run, and the
+     only one it will be suggested at. Shown and hidden with the switch. */
+  if(ep.id === d.next_up){
+    const ar = el('span', 'eplinear' + (d.linear ? '' : ' hidden'), LINEAR_ARROW);
+    ar.title = 'Up next \u2014 this show is watched in order';
+    code.prepend(ar);
+  }
+  row.append(code);
   /* The name, then — for one of the show's five best — a star in the
      accent, kept beside it however short the name has to be cut. A click
      on the name opens the episode's own details under the row. */

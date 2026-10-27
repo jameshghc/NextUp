@@ -23,8 +23,8 @@ conn = n.db()
 conn.execute("UPDATE shows SET userrating=0, favourited_at=NULL")
 conn.execute("UPDATE movies SET userrating=0, favourited_at=NULL, last_played=NULL, resume_pos=0")
 conn.execute("UPDATE episodes SET userrating=0, last_played=NULL, resume_pos=0")
-show = conn.execute("INSERT INTO shows (name,title,tmdb_id,tmdb_rating,userrating) VALUES "
-                    "('liked','Liked Show','990101',8.0,9)").lastrowid
+show = conn.execute("INSERT INTO shows (name,title,tmdb_id,tmdb_rating,userrating,linear) VALUES "
+                    "('liked','Liked Show','990101',8.0,9,0)").lastrowid
 def ep(k, rating, votes, last=None):
     return conn.execute("INSERT INTO episodes (path,show_id,season,episode,title,runtime,tmdb_rating,tmdb_votes,last_played)"
                         " VALUES (?,?,1,?,?,1500,?,?,?)", ("X:/lk/%d.mkv" % k, show, k, "Ep %d" % k, rating, votes, last)).lastrowid
@@ -49,7 +49,7 @@ eps = [s for s in sug if s["type"] == "episode"]
 fms = [s for s in sug if s["type"] == "movie"]
 check("Quick Suggest: a show you like gives its best episode not seen in 30 days",
       [e["id"] for e in eps if e["show_id"] == show] == [second], [(e["title"], e["sub"]) for e in eps])
-check("not from a show you don't much like", not any(e["show_id"] == meh for e in eps))
+check("not from a show you don't much like (a wildcard can be anything)", not any(e["show_id"] == meh and not e.get("wild") for e in eps))
 check("films you rated highly and haven't seen in six months, not one just seen or only liked",
       films[0] in [f["id"] for f in fms] and films[1] not in [f["id"] for f in fms]
       and films[2] not in [f["id"] for f in fms], [f["title"] for f in fms])

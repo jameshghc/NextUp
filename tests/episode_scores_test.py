@@ -133,6 +133,10 @@ check("a show with nothing to go on looks as it did",
 setsql("UPDATE shows SET favourited_at=NULL")
 setsql("UPDATE movies SET favourited_at=NULL")
 setsql("UPDATE shows SET favourited_at='2026-10-01 20:00:00' WHERE id=?", show)
+# Any episode, not in order: this is about the weighting of a show the
+# channel may drop into anywhere (a bare test show otherwise guesses "in order").
+setsql("UPDATE shows SET linear=0 WHERE id=?", show)
+n.LIB.loaded_at = 0
 favstv = next(c for c in n.CHANNELS if c["id"] == "favstv")
 plain = dict(favstv); plain.pop("weight_by_score", None)
 weighted = n.channel_blocks(favstv)
@@ -304,6 +308,56 @@ check("a swapped pair gets its own details back", got[a1] == ("Bravo Story", "br
 check("one already right is left alone", got[a3] == ("Charlie Story", "charlie plot"))
 check("a film's part takes the film's details and keeps its part", got[a4] == ("The Big Film (Part 1)", "film plot"), got[a4])
 check("a lone odd file name doesn't win on its own (Shogun's 'Crimson Sky')", got[a5] == ("Echo Story", "echo plot"), got[a5])
+
+# --- 2026-10-27: Watch in order ------------------------------------------------------
+def _sh(genres, kws=()):
+    return {"genre": list(genres), "keywords": list(kws)}
+_short = [{"season": 1, "runtime": 24 * 60}] * 12
+_long = [{"season": 1, "runtime": 22 * 60}] * 150
+check("a sitcom is any episode", not n.linear_guess(_sh(["Comedy"], ["sitcom"]), _long))
+check("a short manga sci-fi is in order", n.linear_guess(_sh(["Animation", "Sci-Fi & Fantasy", "Action & Adventure"],
+                                                              ["based on manga"]), _short))
+check("a miniseries is in order", n.linear_guess(_sh(["Drama"], ["miniseries"]), _short))
+check("reality and documentaries are any episode", not n.linear_guess(_sh(["Reality"]), _long)
+      and not n.linear_guess(_sh(["Documentary"]), _long))
+check("a tie goes to in order", n.linear_guess(_sh([]), [{"season": 1, "runtime": 45 * 60}] * 60))
+check("watching S1E1, E2, E3 in a line tips it to in order",
+      n.linear_guess(_sh(["Comedy"]), [{"season": 1, "runtime": 45 * 60}] * 60, (10, 9)))
+check("jumping about tips it to any episode",
+      not n.linear_guess(_sh(["Drama"]), [{"season": 1, "runtime": 45 * 60}] * 60, (10, 1)))
+
+n.LIB.load(force=True)
+_show = next(x for x in n.LIB.shows if len([e for e in n.LIB.episodes if e["tvshowid"] == x["tvshowid"]]) >= 3)
+_sid = _show["tvshowid"]
+got = n.set_linear(_sid, True)
+check("the switch turns it on, not guessed", got == {"on": True, "guessed": False} and n.is_linear(_sid), got)
+check("and the show's page says so", n.show_detail(_sid).get("linear") is True
+      and n.show_detail(_sid).get("linear_guessed") is False)
+_blocks = n._episode_group_blocks([_show], 1)
+_by0 = n.defaultdict(list)
+for e in n.LIB.episodes:
+    _by0[e["tvshowid"]].append(e)
+_nx0 = n.show_next_episode(_by0, _sid)
+check("on a channel a show in order is only the episode you're up to",
+      len(_blocks) <= 1 and all(b["episode_ids"] == [_nx0["episodeid"]] for b in _blocks), _blocks)
+_home = n.build_home()
+_by = n.defaultdict(list)
+for e in n.LIB.episodes:
+    _by[e["tvshowid"]].append(e)
+_nxt = n.show_next_episode(_by, _sid)
+_offered = {i["id"] for l in _home["suggest_lists"] for i in l if i.get("type") == "episode" and i.get("show_id") == _sid}
+check("Home only offers the episode you're up to", _offered <= {_nxt["episodeid"]} if _nxt else not _offered, (_offered, _nxt and _nxt["episodeid"]))
+n.set_linear(_sid, False)
+check("and off is off", not n.is_linear(_sid) and len(n._episode_group_blocks([_show], 1)) > 1)
+got = n.set_linear(_sid, None)
+check("None goes back to the guess", got["guessed"] is True)
+_pg = n.PAGE
+check("the show's page has the switch, the tiles the arrow", "function linearToggle(d)" in _pg
+      and "col.append(linearToggle(d));" in _pg and "el('div', 'linearmark', LINEAR_ARROW)" in _pg)
+# The season the Remote opens a show at reaches the function that picks it
+# (it didn't, and every show's page broke: 2026-10-27).
+check("the show page's season browser is given the season to open at",
+      "seasonBrowser(d, seasons, atSeason)" in _pg and "function seasonBrowser(d, seasons, atSeason){" in _pg)
 
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

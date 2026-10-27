@@ -8,6 +8,7 @@ config — see devserve.isolate — and the real data files are fingerprinted
 before and after, so a suite that ever writes to them fails the whole run.
 """
 import os, re, subprocess, sys, time, hashlib
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # a failing check can print anything
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LIVE = os.path.dirname(HERE)
