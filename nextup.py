@@ -27946,6 +27946,36 @@ def port_in_use(port):
         return probe.connect_ex(("127.0.0.1", port)) == 0
 
 
+def own_window(title="Next Up"):
+    """This process's own visible window with that title, or 0.
+
+    Not FindWindowW(title): that takes the first window anywhere with the
+    name, and a browser tab showing this page is called "Next Up" too. It
+    was, on 2026-10-27, and the resize edges and the maximise both went to
+    a browser instead — this window could be neither resized nor maximised.
+    Windows only."""
+    if os.name != "nt":
+        return 0
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    me, found = os.getpid(), []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    def look(hwnd, _):
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value == me:
+            buf = ctypes.create_unicode_buffer(256)
+            user32.GetWindowTextW(hwnd, buf, 256)
+            if buf.value == title:
+                found.append((bool(user32.IsWindowVisible(hwnd)), hwnd))
+        return True
+    user32.EnumWindows(look, 0)
+    found.sort(reverse=True)            # a visible one first
+    return found[0][1] if found else 0
+
+
 def restore_resizing(title="Next Up"):
     """Give a frameless window its resize edges back.
 
@@ -27960,8 +27990,12 @@ def restore_resizing(title="Next Up"):
     try:
         import ctypes
         user32 = ctypes.windll.user32
-        time.sleep(0.8)                      # let the window actually exist
-        hwnd = user32.FindWindowW(None, title)
+        hwnd = 0
+        for _ in range(20):                  # let the window actually exist
+            time.sleep(0.4)
+            hwnd = own_window(title)
+            if hwnd:
+                break
         if not hwnd:
             return
         GWL_STYLE, WS_THICKFRAME, WS_MAXIMIZEBOX = -16, 0x00040000, 0x00010000
@@ -27989,9 +28023,11 @@ def fill_work_area(title="Next Up", saved=None):
     import ctypes
     from ctypes import wintypes
     user32 = ctypes.windll.user32
-    hwnd = user32.FindWindowW(None, title)
+    hwnd = own_window(title)
     if not hwnd:
         return None
+    user32.MonitorFromWindow.restype = ctypes.c_void_p     # a handle, not a 32-bit int
+    user32.GetMonitorInfoW.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
     SWP = 0x0004 | 0x0010 | 0x0020          # no z-order change, no activate, frame changed
     if saved:
         l, t, r, b = saved

@@ -16,6 +16,7 @@ What changed in Next Up, version by version, newest first. Version numbers start
 - Hall of Fame shelf names in title case (Best Sci-Fi, Short and Sweet).
 - Every Hall of Fame shelf now holds at least ten; the shorter ones (most directors' shelves among them) are gone.
 - Fixed on Windows: maximising Next Up covered the taskbar. It now fills the screen less the taskbar, and restoring puts it back where it was.
+- Fixed on Windows: the window couldn't be resized or maximised. Next Up looked for its window by title, and Windows 11 keeps a stand-in window for the taskbar with the same title, which it found first. It now looks only among its own windows.
 - The TMDB score is gone from the Now page's card, and from the line above your rating: it swayed the choice more than it should. It still counts in the picking.
 - Fixed: Library › Sort › Recently watched counted a few seconds' flick on a channel as watching; it now goes by real sittings, as Continue does.
 - Fixed: a show's page stopped drawing its seasons in 0.2.3 (the season the Remote opens it at never reached the part that picks it).

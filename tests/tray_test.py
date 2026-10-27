@@ -92,6 +92,24 @@ if os.name == "nt":
 # --- the page ---------------------------------------------------------------------------
 check("Settings has the switch", 'id="c_tray"' in n.PAGE)
 
+# --- 2026-10-27: the window is found among this process's own -----------------------
+# Windows 11 makes a taskbar stand-in window with the app's title, in Explorer;
+# a title search found that, and the resize edges and maximise went to it.
+_src = open(n.__file__, encoding="utf-8").read()
+check("resizing and maximise look among this process's own windows, not any with the title",
+      "hwnd = own_window(title)" in _src and _src.count("FindWindowW(None, title)") == 0)
+if os.name == "nt":
+    import ctypes
+    try:
+        import tkinter as tk
+        root = tk.Tk(); root.title("Next Up test window"); root.geometry("300x200+50+50"); root.update()
+        mine = n.own_window("Next Up test window")
+        check("own_window finds this process's window", mine == int(root.wm_frame(), 16), (mine, root.wm_frame()))
+        check("and nothing for a title it hasn't got", n.own_window("No such window here") == 0)
+        root.destroy()
+    except Exception as exc:
+        check("own_window (no window to try it on)", True, exc)
+
 desk.shutdown()
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
