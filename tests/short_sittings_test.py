@@ -201,6 +201,21 @@ n.LIB.loaded_at = 0
 _hist = n.build_history(days=2)
 _ids = {(i.get("kind"), i.get("id")) for i in _hist["items"]}
 check("History: 81 seconds isn't shown (under two minutes)", ("movie", j1) not in _ids)
+
+# Continue: an episode stopped under five minutes in is still where you are —
+# offered from the start, not dropped (Always Sunny S05E02 at 78 seconds).
+k = n.db()
+_e = k.execute("SELECT id, show_id FROM episodes WHERE season > 0 ORDER BY id LIMIT 1 OFFSET 3").fetchone()
+k.execute("UPDATE episodes SET resume_pos=0, resume_total=0, last_played=NULL, playcount=0 WHERE show_id=?", (_e[1],))
+k.execute("UPDATE episodes SET resume_pos=78, resume_total=1273, playcount=0, last_played=? WHERE id=?", (_at(30), _e[0]))
+k.execute("INSERT INTO history (at, kind, item_id, title, event) VALUES (?,'episode',?,'rolled on','next episode')", (_at(1000), _e[0]))
+_ep_path = k.execute("SELECT path FROM episodes WHERE id=?", (_e[0],)).fetchone()[0]
+k.commit(); k.close()
+n._sync_watch_later(_ep_path, 78)
+n.LIB.loaded_at = 0
+_cont = [c for c in n.build_resume_row(limit=0) if c["type"] == "episode" and c["id"] == _e[0]]
+check("Continue: 78 seconds into an episode offers it up next, not nothing",
+      len(_cont) == 1 and _cont[0]["note"] == "up next", (_e, [(c["title"], c["sub"], c["id"]) for c in n.build_resume_row(limit=0) if c["type"] == "episode"][:4]))
 check("nor sixteen minutes open but only 78 seconds into it", ("movie", j2) not in _ids)
 check("nor a start whose 'last played' was put back (closed within moments)", ("movie", j3) not in _ids)
 

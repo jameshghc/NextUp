@@ -21,6 +21,7 @@ What changed in Next Up, version by version, newest first. Version numbers start
 - Fixed on Windows: maximised, the window left a thin gap round the edge and a grey line along the top (the resize frame), with rounded corners. It now fills the screen to the taskbar, square-cornered; restoring brings the corners and the resize edges back.
 - Fixed on Windows: the window couldn't be resized or maximised. Next Up looked for its window by title, and Windows 11 keeps a stand-in window for the taskbar with the same title, which it found first. It now looks only among its own windows.
 - The TMDB score is gone from the Now page's card, and from the line above your rating: it swayed the choice more than it should. It still counts in the picking.
+- Fixed: a show whose episode stopped under five minutes in (Always Sunny rolling into S05E02 and stopping at 78 seconds) vanished from Continue; it's now offered there as up next, from the start.
 - History leaves out anything under two minutes: a start followed within two minutes by anything else (a channel tuned, the next episode), a stop under two minutes in, one that never got two minutes into the programme (dozed off at 78 seconds), and one closed within moments.
 - Fixed: Library › Sort › Recently watched counted a few seconds' flick on a channel as watching; it now goes by real sittings, as Continue does.
 - Fixed: a show's page stopped drawing its seasons in 0.2.3 (the season the Remote opens it at never reached the part that picks it).

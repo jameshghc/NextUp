@@ -1495,6 +1495,16 @@ def build_resume_row(limit=4):
         poster = art_url(show.get("art", {}).get("poster"))
         if progress["state"] == "resume":
             card = entry(ep, "episode", ep["episodeid"], show.get("title"), code, poster)
+            # Under five minutes into it (Always Sunny rolled into S05E02 and
+            # stopped at 78 seconds, 2026-10-27): not a place to resume, but
+            # still where you are — offered from the start, not dropped,
+            # which took the show out of Continue altogether. Not for a
+            # flick on a channel, which stays out as before.
+            if card is None and ("episode", ep["episodeid"]) not in flicked:
+                card = {"type": "episode", "id": ep["episodeid"],
+                        "title": show.get("title") or "", "sub": code, "percent": 0,
+                        "left": minutes(ep.get("runtime")) or 0, "note": "up next",
+                        "art": poster, "at": progress.get("at") or ""}
         else:
             card = {"type": "episode", "id": ep["episodeid"],
                     "title": show.get("title") or "", "sub": code, "percent": 0,
