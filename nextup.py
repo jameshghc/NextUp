@@ -6475,6 +6475,7 @@ def _home_film_item(m, wild=False):
 # from the library each time; nothing stored.
 
 FAME_MIN = 5                 # a shelf with fewer than this isn't shown
+FAME_SHOWN = 12              # a shelf's posters before SHOW ALL: two rows of six
 _FAME_GENRES = {
     "Comedy": "Comedies", "Drama": "Dramas", "Action": "Action films", "Adventure": "Adventures",
     "Science Fiction": "Sci-fi", "Thriller": "Thrillers", "Crime": "Crime films", "Fantasy": "Fantasy",
@@ -6528,7 +6529,7 @@ def build_hall_of_fame():
                     "avg": round(sum(scores) / len(scores), 1) if scores else 0, "items": items})
 
     every = list(fitems.values())
-    shelf("top", "Your top 10", "The films you've scored highest", every, cap=10)
+    shelf("top", "Your top 12", "The films you've scored highest", every, cap=FAME_SHOWN)
     shelf("toptv", "Your top TV", "The shows you rate best",
           [_fame_item("tvshow", x, rated.get(("tvshow", x["tvshowid"]))) for x in shows])
     # Genres, the biggest first.
@@ -16751,7 +16752,12 @@ body{display:flex;flex-direction:column}
 .famenote{color:var(--muted);font-size:13px}
 .famestats{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--marigold)}
 .famefirst{font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.fameback{margin:0 0 14px}
+.fameback{margin:0 0 10px}
+.fametop{position:sticky;top:-16px;z-index:5;margin:-16px 0 16px;padding:16px 0 10px;
+  background:var(--ink);box-shadow:0 12px 14px -12px rgba(0,0,0,.7)}
+body.glass .fametop{background:#0c0c10}
+body.silver .fametop{background:#131313}
+.fametop .famehead{margin:0}
 .fameshelf{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:18px}
 .fametile{display:flex;flex-direction:column;gap:8px;background:none;border:0;padding:0;text-align:left;
   color:var(--paper);cursor:pointer}
@@ -21350,6 +21356,7 @@ function drawLibNav(){
     } else b.append(document.createTextNode(label));
     if(id==='fav' && favCount!=null) b.append(el('span','count', String(favCount)));
     b.onclick = () => {
+      if(id === 'ratings'){ ratMode = 'fame'; fameOpen = null; }
       libSection = id; libOffset = 0;
       /* Recommendations and History have no shelf, kind or sort of their own
          — leaving those alone means going back to Films finds them as you
@@ -24326,16 +24333,20 @@ function drawFame(){
 }
 
 function drawFameShelf(box, c, all){
+  /* ALL SHELVES and the shelf's name stay put at the top while its posters
+     scroll under them (asked for, 2026-10-27). */
+  const top = el('div', 'fametop');
   const back = el('button', 'iconbtn fameback', '\u2039 ALL SHELVES');
   back.type = 'button';
-  back.onclick = () => { fameOpen = null; drawFame(); };
-  box.append(back);
+  back.onclick = () => { fameOpen = null; drawFame(); $('#view-ratings').scrollTop = 0; };
+  top.append(back);
   const head = el('div', 'famehead');
   head.append(el('h2', null, esc(c.name)));
   head.append(el('p', null, esc(c.note + '  \u00B7  ' + c.count + ' titles, average ' + c.avg)));
-  box.append(head);
+  top.append(head);
+  box.append(top);
   const grid = el('div', 'fameshelf');
-  const shown = all ? c.items : c.items.slice(0, 10);
+  const shown = all ? c.items : c.items.slice(0, 12);
   const ranked = !['recent', 'gems', 'unpopular'].includes(c.id);
   shown.forEach((it, i) => {
     const t = el('button', 'fametile');
@@ -24359,7 +24370,7 @@ function drawFameShelf(box, c, all){
     grid.append(t);
   });
   box.append(grid);
-  if(!all && c.items.length > 10){
+  if(!all && c.items.length > 12){
     const more = el('button', 'iconbtn famemore', 'SHOW ALL ' + c.items.length);
     more.type = 'button';
     more.onclick = () => { box.innerHTML = ''; drawFameShelf(box, c, true); };

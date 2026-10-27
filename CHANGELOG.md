@@ -5,7 +5,7 @@ What changed in Next Up, version by version, newest first. Version numbers start
 ## 0.2.4 — 2026-10-27
 
 - Ratings, a new place in the Library (the ★ between History and Recommendations), with two halves:
-  - **Hall of Fame**: what you've rated, as shelves like the channels. Your top 10, your top TV, the best of each genre, the 2020s back to the classics, world cinema, short and sweet, epics, hidden gems (rated well above TMDB), recently rated, the directors you keep coming back to (the Kubrick shelf) and the actors. Each card shows its first posters, how many and your average; open one for its posters in your order, ranked, with the year, who made it and when you scored it. A poster opens its page, where it plays. On the phone, with the PC connected, the PC's ratings.
+  - **Hall of Fame**: what you've rated, as shelves like the channels. Your top 12, your top TV, the best of each genre, the 2020s back to the classics, world cinema, short and sweet, epics, hidden gems (rated well above TMDB), recently rated, the directors you keep coming back to (the Kubrick shelf) and the actors. Each card shows its first posters, how many and your average; open one for its posters in your order, ranked, twelve at a time, with the year, who made it and when you scored it. ALL SHELVES and the shelf's name stay at the top as you scroll, and the Ratings button takes you back to the front. A poster opens its page, where it plays. On the phone, with the PC connected, the PC's ratings.
   - **Rate**: the rating queue, as it was, with how many are left on the switch.
 - Rate has left the top menu, which is now Now · Library · Channels.
 

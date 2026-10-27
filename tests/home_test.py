@@ -144,7 +144,7 @@ ids = [c["id"] for c in cats]
 check("the Hall of Fame has shelves", len(cats) >= 3 and ids[0] == "top", ids[:5])
 check("no shelf is thin", all(c["count"] >= 3 for c in cats) and all(c["count"] == len(c["items"]) for c in cats))
 top = next(c for c in cats if c["id"] == "top")
-check("your top ten is ten, best first", len(top["items"]) <= 10
+check("your top twelve is twelve, best first", len(top["items"]) <= 12
       and [i["score"] for i in top["items"]] == sorted((i["score"] for i in top["items"]), reverse=True))
 check("each item has what a poster and its page need",
       all({"kind", "id", "tmdb", "title", "score", "art"} <= set(i) for c in cats for i in c["items"]))
@@ -159,6 +159,10 @@ check("it sits between History and Recommendations",
       "[['history','History'],['ratings','Ratings'],['recs','Recommendations']]" in pg)
 check("Hall of Fame and Rate, one switch", 'data-mode="fame"' in pg and 'data-mode="rate"' in pg
       and 'id="view-rate"' in pg and "function drawFameShelf(" in pg)
+check("a shelf shows twelve before SHOW ALL, under a header that stays put",
+      "c.items.slice(0, 12)" in pg and "el('div', 'fametop')" in pg and ".fametop{position:sticky" in pg)
+check("pressing Ratings goes back to the Hall of Fame's front",
+      "if(id === 'ratings'){ ratMode = 'fame'; fameOpen = null; }" in pg)
 check("the phone asks the PC for its shelves", "/api/pcfame" in pg
       and '"/api/pcfame": "/phone/fame"' in open(n.__file__, encoding="utf-8").read())
 
