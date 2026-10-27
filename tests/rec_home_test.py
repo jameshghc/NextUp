@@ -316,6 +316,9 @@ _g0 = [g["name"] for g in n.available_genres("film", [], [])]
 _g1 = n.available_genres("film", [_g0[1]], [_tagged["key"]] if _tagged else [])
 check("the genre tags keep their places as you choose; the impossible ones grey, never leave",
       _g0 == [g["name"] for g in _g1] and any(g["n"] == 0 for g in _g1))
+check("Now's tags are grey until pressed, then solid in their own colour; the Films tags have colours",
+      ".nowchooser .ptag.gchip{color:var(--paper)" in page and "background:hsl(var(--h) 58% 42%);\n  border-color:hsl(var(--h) 58% 42%)" in page
+      and "const FILM_TAG_HUES = {" in page and all(k in page[page.find("const FILM_TAG_HUES"):][:400] for k, _l, _r in n.FILM_TAGS))
 check("a rated film counts as seen, played here or not",
       n.film_seen({"userrating": 7}) and n.film_seen({"playcount": 1}) and not n.film_seen({})
       and "unseen" not in n.film_tags({"userrating": 8, "playcount": 0}))

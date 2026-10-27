@@ -18622,9 +18622,13 @@ body.android .chooserow.genres.hidden{display:none}
      alone didn't say clearly enough which ones are chosen. */
   text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:3px}
 .ptag.gchip.off{opacity:.28;cursor:default;filter:grayscale(1)}
-/* The Films tags: plain, so they read as a second kind of tag. */
-.ptag.gchip.metachip{color:var(--paper);background:rgba(255,255,255,.05);border-color:rgba(255,255,255,.22)}
-.ptag.gchip.metachip.on{background:rgba(var(--accent-rgb),.28);border-color:var(--marigold);color:#fff}
+/* Now's tags, genres and Films tags alike: grey until pressed, then a
+   solid fill in the tag's own colour, border and all (asked for,
+   2026-10-27). The underline still marks what's chosen. */
+.nowchooser .ptag.gchip{color:var(--paper);background:rgba(255,255,255,.05);border-color:rgba(255,255,255,.18)}
+.nowchooser .ptag.gchip:hover:not(:disabled){background:rgba(255,255,255,.1)}
+.nowchooser .ptag.gchip.on,.nowchooser .ptag.gchip.on:hover{background:hsl(var(--h) 58% 42%);
+  border-color:hsl(var(--h) 58% 42%);color:#fff}
 .nowchooser .metarow{margin-top:4px;padding-top:10px;border-top:1px solid var(--line)}
 body:not(.android) .nowchooser #chooser-meta{grid-column:1 / -1}
 body:not(.android) .nowchooser .metarow.hidden{display:none}
@@ -21327,6 +21331,10 @@ function chooserTag(key){
   chooserAvail();
 }
 
+/* Each Films tag's colour when it's lit. */
+const FILM_TAG_HUES = {recent: 200, classic: 32, bigbudget: 48, lowbudget: 85, smash: 135, flop: 355,
+  crowd: 330, radar: 228, cult: 285, explosions: 14, mind: 172, truestory: 212, book: 68, series: 248,
+  foreign: 308, short: 105, epic: 268, unseen: 188};
 function drawFilmTags(){
   const row = $('#chooser-meta');
   const film = $('#kind').value === 'film';
@@ -21343,6 +21351,7 @@ function drawFilmTags(){
   const keepLeft = row.scrollLeft;
   const any = el('button', 'ptag gchip metachip' + (!chosenTags.length ? ' on' : ''), 'Any kind');
   any.type = 'button';
+  any.style.setProperty('--h', 40);
   any.onclick = () => chooserTag('');
   row.append(any);
   (tagAvail || []).forEach(({key, name, n}) => {
@@ -21352,6 +21361,7 @@ function drawFilmTags(){
     b.type = 'button';
     b.disabled = none;
     b.title = none ? 'No films with that as well' : name;
+    b.style.setProperty('--h', FILM_TAG_HUES[key] == null ? 40 : FILM_TAG_HUES[key]);
     b.onclick = () => chooserTag(key);
     row.append(b);
   });
