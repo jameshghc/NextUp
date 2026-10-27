@@ -177,13 +177,32 @@ k.execute("INSERT INTO history (at, kind, item_id, title, event) VALUES (?,'movi
 k.execute("INSERT INTO history (at, kind, item_id, title, event) VALUES (?,'movie',?,'next','tuned in via X #1')", (_at(3590), h2))
 k.execute("INSERT INTO history (at, kind, item_id, title, event) VALUES (?,'movie',?,'kept','played')", (_at(1800), h3))
 k.execute("INSERT INTO history (at, kind, item_id, title, event) VALUES (?,'movie',?,'after','tuned in via X #2')", (_at(1500), h2))
+k.execute("UPDATE movies SET last_played=? WHERE id=?", (_at(1800), h3))     # as a real start stamps it
 k.commit(); k.close()
+n.LIB.loaded_at = 0
 _hist = n.build_history(days=2)
 _ids = {(i.get("kind"), i.get("id")) for i in _hist["items"]}
 _shown = lambda mid: any(str(mid) == str(i.get("id")) and i.get("kind") in ("movie", None) for i in _hist["items"]) \
     or ("movie", mid) in _ids
 check("History: ten seconds then a channel tuned in isn't shown", not _shown(h1), [(i.get("title"), i.get("id")) for i in _hist["items"]][:6])
 check("five minutes then something else is", _shown(h3))
+
+# History's bar is two minutes, and three more ways to tell a short one.
+k = n.db()
+j1, j2, j3 = [r[0] for r in k.execute("SELECT id FROM movies ORDER BY id LIMIT 3 OFFSET 30")]
+k.execute("INSERT INTO history (at, kind, item_id, title, event, seconds, position, total)"
+          " VALUES (?,'movie',?,'81 seconds','stopped',81,2382,8353)", (_at(900), j1))
+k.execute("INSERT INTO history (at, kind, item_id, title, event, seconds, position, total)"
+          " VALUES (?,'movie',?,'asleep','stopped',980,78,1273)", (_at(800), j2))
+k.execute("INSERT INTO history (at, kind, item_id, title, event) VALUES (?,'movie',?,'closed fast','played')", (_at(60), j3))
+k.execute("UPDATE movies SET last_played='2026-09-18 03:24:36' WHERE id=?", (j3,))      # put back, as unstamp does
+k.commit(); k.close()
+n.LIB.loaded_at = 0
+_hist = n.build_history(days=2)
+_ids = {(i.get("kind"), i.get("id")) for i in _hist["items"]}
+check("History: 81 seconds isn't shown (under two minutes)", ("movie", j1) not in _ids)
+check("nor sixteen minutes open but only 78 seconds into it", ("movie", j2) not in _ids)
+check("nor a start whose 'last played' was put back (closed within moments)", ("movie", j3) not in _ids)
 
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

@@ -2646,6 +2646,12 @@ def refresh_watch_scores():
 SESSION_EVENTS = ("played",) + WATCH_EVENTS
 
 
+# History's bar for a sitting: under two minutes isn't one (asked for,
+# 2026-10-27 — "1m" entries were still showing). Higher than
+# MIN_WATCH_SECONDS, which decides what's kept at all.
+HISTORY_MIN_SECONDS = 120
+
+
 def build_history(days=90, limit=400):
     """What you watched, newest first, one row per THING, holding its sittings.
 
@@ -2804,7 +2810,7 @@ def build_history(days=90, limit=400):
             prev = last_start.get(r["origin"])
             if prev is not None and prev.get("ended") is None:
                 gap = (stamp_seconds(r["at"]) or 0) - (stamp_seconds(prev["at"]) or 0)
-                if 0 <= gap < MIN_WATCH_SECONDS:
+                if 0 <= gap < HISTORY_MIN_SECONDS:
                     prev["flick"] = True
             # Two "played" in a row means the first was never closed. Keep it:
             # it happened, it just has no ending on record.
@@ -2824,7 +2830,13 @@ def build_history(days=90, limit=400):
         # Ended within moments of starting: opened and closed, not watched.
         # (Written that way until v0.2.1; nothing is written for them now.)
         if (not sitting["finished"] and r.get("seconds") is not None
-                and r["seconds"] < MIN_WATCH_SECONDS):
+                and r["seconds"] < HISTORY_MIN_SECONDS):
+            sitting["flick"] = True
+        # Or stopped under two minutes into the programme: the window may
+        # have been open a while (asleep, Always Sunny at 78 seconds after
+        # sixteen minutes), but that's all of it there can have been.
+        if (not sitting["finished"] and r.get("position") is not None
+                and r["position"] < HISTORY_MIN_SECONDS):
             sitting["flick"] = True
         sessions.append(sitting)
     sessions.extend(open_now.values())
@@ -2833,12 +2845,21 @@ def build_history(days=90, limit=400):
     # was never closed is judged by the gap to whatever started next on that
     # device — of any kind, a channel or the next episode too, not only
     # another "played" as above.
+    last_played = {("movie", m["movieid"]): m.get("last_played") or "" for m in LIB.movies}
+    last_played.update({("episode", e["episodeid"]): e.get("last_played") or "" for e in LIB.episodes})
     for sitting in sessions:
         if sitting.get("ended") is not None or sitting.get("flick"):
             continue
         began = stamp_seconds(sitting["at"]) or 0
         after = [t for t in starts.get(sitting.get("device"), []) if t > began]
-        if after and min(after) - began < MIN_WATCH_SECONDS:
+        if after and min(after) - began < HISTORY_MIN_SECONDS:
+            sitting["flick"] = True
+            continue
+        # Closed within moments here: nothing is written for that, but its
+        # "last played" was put back to what it was before (unstamp_played),
+        # so it's older than this start. Not for another device's rows.
+        lp = last_played.get(sitting["key"])
+        if not sitting.get("device") and lp is not None and lp < sitting["at"][:19]:
             sitting["flick"] = True
 
     # Which sitting of each thing is the most recent one. Only that one may
