@@ -938,20 +938,23 @@ def available_genres(kind, chosen, tags=()):
     chosen. A count of 0 is a genre that would leave nothing — the page
     greys it out."""
     LIB.load()
+    # (genres, still possible with the chosen tags?)
     rows = []
     if kind != "tv":
-        rows += [m.get("genre") or [] for m in LIB.movies
-                 if not tags or all(t in film_tags(m) for t in tags)]
-    if kind != "film" and not tags:
-        rows += [sh.get("genre") or [] for sh in LIB.shows]
-    every, counts = set(), Counter()
-    for genres in rows:
+        rows += [(m.get("genre") or [], not tags or all(t in film_tags(m) for t in tags)) for m in LIB.movies]
+    if kind != "film":
+        rows += [(sh.get("genre") or [], not tags) for sh in LIB.shows]
+    # Every genre of the kind, in one order that doesn't move as you choose
+    # (how many there are of each, overall): a genre that would leave
+    # nothing stays where it was, greyed, rather than leaving or jumping
+    # (asked for, 2026-10-27).
+    overall, counts = Counter(), Counter()
+    for genres, ok in rows:
         halves = set(part for g in genres for part in GENRE_SPLIT.get(g, [g]))
-        every |= halves
-        if all(c in halves for c in chosen):
-            for g in halves:
-                counts[g] += 1
-    return [{"name": g, "n": counts.get(g, 0)} for g in sorted(every, key=lambda g: -counts.get(g, 0))]
+        overall.update(halves)
+        if ok and all(c in halves for c in chosen):
+            counts.update(halves)
+    return [{"name": g, "n": counts.get(g, 0)} for g in sorted(overall, key=lambda g: (-overall[g], g))]
 
 
 # --- the Films tags on Now -------------------------------------------------

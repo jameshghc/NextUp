@@ -312,6 +312,10 @@ check("the page has the row, sends the tags, and moves the alternatives under th
       'id="chooser-meta"' in page and "q.set('tags', chosenTags.join(','))" in page
       and "function drawFilmTags()" in page and "view.classList.toggle('withtags', film)" in page)
 _src = open(n.__file__, encoding="utf-8").read()
+_g0 = [g["name"] for g in n.available_genres("film", [], [])]
+_g1 = n.available_genres("film", [_g0[1]], [_tagged["key"]] if _tagged else [])
+check("the genre tags keep their places as you choose; the impossible ones grey, never leave",
+      _g0 == [g["name"] for g in _g1] and any(g["n"] == 0 for g in _g1))
 check("the phone's PC routes carry the tags", _src.count('tags=one("tags", "")') >= 2
       and 'out["tags"] = available_film_tags(chosen, tags)' in _src)
 
