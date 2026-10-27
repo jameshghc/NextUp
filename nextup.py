@@ -512,6 +512,44 @@ def episode_order(e):
     return (e.get("season") or 0, e.get("episode") or 0)
 
 
+def set_up_to(episode_id):
+    """Say "this is where I'm up to" in a show watched somewhere else (asked
+    for, 2026-10-27: Andor started elsewhere, up to episode 2). The episodes
+    before it count as watched — what's played stays played — and the one
+    just before is the latest, so series_progress makes this one next. The
+    first episode of the run: it's simply the latest touched, unplayed."""
+    LIB.load()
+    ep = next((e for e in LIB.episodes if e.get("episodeid") == episode_id), None)
+    if not ep:
+        raise AppError("No such episode.")
+    eps = sorted([e for e in LIB.episodes if e.get("tvshowid") == ep.get("tvshowid")
+                  and (e.get("season") or 0) > 0], key=episode_order)
+    before = [e for e in eps if episode_order(e) < episode_order(ep)]
+    stamp = now_stamp()
+    conn = db()
+    if before:
+        for e in before:
+            conn.execute("UPDATE episodes SET playcount=MAX(COALESCE(playcount,0),1),"
+                         " resume_pos=0, resume_total=0,"
+                         " last_played=COALESCE(NULLIF(last_played,''), ?) WHERE id=?",
+                         (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 60)), e["episodeid"]))
+        conn.execute("UPDATE episodes SET last_played=? WHERE id=?", (stamp, before[-1]["episodeid"]))
+    else:
+        conn.execute("UPDATE episodes SET playcount=0, resume_pos=0, resume_total=0, last_played=? WHERE id=?",
+                     (stamp, episode_id))
+    # Anything later you'd touched mustn't look more recent than this.
+    later = [e["episodeid"] for e in eps if episode_order(e) > episode_order(ep)]
+    for i in later:
+        conn.execute("UPDATE episodes SET last_played=MIN(COALESCE(NULLIF(last_played,''), ?), ?) WHERE id=?",
+                     (stamp, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 120)), i))
+    conn.commit()
+    conn.close()
+    LOCAL.loaded_at = 0
+    LIB.loaded_at = 0
+    log_event("episode", episode_id, ep.get("title") or "", "marked as where you're up to")
+    return {"ok": True}
+
+
 def series_progress(episodes_by_show, tvshowid):
     """Where you are in a series, based only on what this app watched you do.
 
@@ -16771,6 +16809,12 @@ class Handler(BaseHTTPRequestHandler):
                 on = toggle_favourite(data.get("type"), data.get("id"))
                 return self.send_json({"ok": True, "on": on})
 
+            if route == "/api/show/upto":
+                try:
+                    return self.send_json(set_up_to(int(data.get("episode_id"))))
+                except (TypeError, ValueError):
+                    return self.send_json({"error": "Which episode?"}, 400)
+
             if route == "/api/show/linear":
                 # Watch in order: true, false, or null to go back to the guess.
                 try:
@@ -18395,6 +18439,8 @@ body.android .tile.elsewhere.streamable .cap{padding-bottom:26px}
 .tile .cap .trophy i{font-style:normal;font-family:var(--mono);font-size:10px;color:var(--muted)}
 .eplinear.hidden{display:none}
 .eprow .code{position:relative}
+.eprow .code.setupto{cursor:pointer}
+.eprow .code.setupto:hover{color:#c4b5fd;text-decoration:underline;text-underline-offset:3px}
 .eplinear{position:absolute;left:-19px;top:50%;transform:translateY(-50%);display:flex;color:#a78bfa;line-height:0}
 .linearbtn{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:999px;cursor:pointer;vertical-align:middle;
   font-family:var(--mono);font-size:10px;letter-spacing:.06em;background:rgba(255,255,255,.06);
@@ -23939,6 +23985,22 @@ async function toggleEpisodeInfo(row, ep, d){
 function episodeRow(ep, d){
   const row = el('div','eprow'+(ep.played?' seen':'')+(ep.id===d.next_up?' next':''));
   const code = el('div','code', ep.code);
+  /* Click the code: "this is where I'm up to" — for a show started
+     somewhere else. The ones before count as watched, this one is next,
+     and the in-order arrow moves here. Your own library only. */
+  if(!d.pc){
+    code.classList.add('setupto');
+    code.title = 'I\u2019m up to here \u2014 count the ones before as watched';
+    code.onclick = async (e) => {
+      e.stopPropagation();
+      const r = await post('/api/show/upto', {episode_id: ep.id});
+      if(!r || r.error) return;
+      libraryChanged(); loadLibrary();
+      const sheet = row.closest('.sheet');
+      if(sheet) sheet.remove();
+      openShow(d.id, null, ep.season);
+    };
+  }
   /* A show watched in order: its purple arrow in the margin left of the
      code of the episode you're up to — where you are in the run, and the
      only one it will be suggested at. Shown and hidden with the switch. */
@@ -28045,7 +28107,21 @@ def fill_work_area(title="Next Up", saved=None):
     if not monitor or not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
         return None
     w = info.rcWork
-    user32.SetWindowPos(hwnd, 0, w.left, w.top, w.right - w.left, w.bottom - w.top, SWP)
+    # The resize edges are an invisible frame round the window, a few pixels
+    # each side: sized to the work area as it is, the window you see sat
+    # inside it with a gap all round (2026-10-27). The frame is the
+    # difference between the window's rectangle and what Windows draws of
+    # it (DWMWA_EXTENDED_FRAME_BOUNDS), and the window grows by that much.
+    left = top = right = bottom = 0
+    try:
+        seen = wintypes.RECT()
+        if ctypes.windll.dwmapi.DwmGetWindowAttribute(hwnd, 9, ctypes.byref(seen), ctypes.sizeof(seen)) == 0:
+            left, top = seen.left - before.left, seen.top - before.top
+            right, bottom = before.right - seen.right, before.bottom - seen.bottom
+    except Exception:
+        pass
+    user32.SetWindowPos(hwnd, 0, w.left - left, w.top - top,
+                        (w.right - w.left) + left + right, (w.bottom - w.top) + top + bottom, SWP)
     return (before.left, before.top, before.right, before.bottom)
 
 

@@ -359,5 +359,31 @@ check("the show's page has the switch, the tiles the arrow", "function linearTog
 check("the show page's season browser is given the season to open at",
       "seasonBrowser(d, seasons, atSeason)" in _pg and "function seasonBrowser(d, seasons, atSeason){" in _pg)
 
+# --- 2026-10-27: "I'm up to here" ---------------------------------------------------
+n.LIB.load(force=True)
+_by = n.defaultdict(list)
+for e in n.LIB.episodes:
+    _by[e["tvshowid"]].append(e)
+_sid2 = next(k for k, v in _by.items() if len([e for e in v if (e.get("season") or 0) > 0]) >= 4)
+_run = sorted([e for e in _by[_sid2] if (e.get("season") or 0) > 0], key=n.episode_order)
+n.set_up_to(_run[2]["episodeid"])
+n.LIB.load(force=True)
+_by = n.defaultdict(list)
+for e in n.LIB.episodes:
+    _by[e["tvshowid"]].append(e)
+_pr = n.series_progress(_by, _sid2)
+_eps = {e["episodeid"]: e for e in _by[_sid2]}
+check("up to the third: it's next", _pr and _pr["episode"]["episodeid"] == _run[2]["episodeid"], _pr and _pr["episode"].get("episode"))
+check("and the two before count as watched", all(_eps[e["episodeid"]].get("playcount") for e in _run[:2]))
+n.set_up_to(_run[0]["episodeid"])
+n.LIB.load(force=True)
+_by = n.defaultdict(list)
+for e in n.LIB.episodes:
+    _by[e["tvshowid"]].append(e)
+_pr = n.series_progress(_by, _sid2)
+check("up to the first: back to the start", _pr and _pr["episode"]["episodeid"] == _run[0]["episodeid"])
+check("and what was played stays played", all(e.get("playcount") for e in _by[_sid2] if e["episodeid"] == _run[1]["episodeid"]))
+check("the code on the show page is the button", "code.classList.add('setupto');" in n.PAGE and "'/api/show/upto'" in n.PAGE)
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
