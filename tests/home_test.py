@@ -165,6 +165,7 @@ check("a shelf shows twelve before SHOW ALL, under a header that stays put",
 check("Ratings has no scroll bar, and its header wears the page's own background",
       "#view-library > #view-ratings::-webkit-scrollbar{display:none}" in pg
       and "body.glass .rattop{background:" in pg)
+check("a shelf opens at its first row", "fameOpen = c.id; drawFame(); $('#view-ratings').scrollTop = 0;" in pg)
 check("pressing Ratings goes back to the Hall of Fame's front",
       "if(id === 'ratings'){ ratMode = 'fame'; fameOpen = null; }" in pg)
 check("the phone asks the PC for its shelves", "/api/pcfame" in pg

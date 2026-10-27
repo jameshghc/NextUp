@@ -24360,7 +24360,9 @@ function drawFame(){
     txt.append(el('span', 'famestats', esc(c.count + (c.count === 1 ? ' title' : ' titles') + '  \u00B7  avg ' + c.avg)));
     txt.append(el('span', 'famefirst', '#1 ' + esc(c.items[0].title)));
     card.append(txt);
-    card.onclick = () => { fameOpen = c.id; drawFame(); box.scrollTop = 0; };
+    /* A shelf opens at its first row: the place scrolls, not the shelf's
+       box, and it was left wherever you'd got to among the cards. */
+    card.onclick = () => { fameOpen = c.id; drawFame(); $('#view-ratings').scrollTop = 0; };
     grid.append(card);
   });
   box.append(grid);
