@@ -151,5 +151,21 @@ _ids = {c["id"] for c in n.build_resume_row(limit=0) if c["type"] == "movie"}
 check("nine seconds on before the next channel: a flick", f1 not in _ids)
 check("nine minutes on before the next thing: a sitting", f2 in _ids)
 
+# 2026-10-27: the Library's Recently watched goes by real sittings too.
+k = n.db()
+g1, g2 = [r[0] for r in k.execute("SELECT id FROM movies ORDER BY id LIMIT 2 OFFSET 12")]
+k.execute("INSERT INTO history (at, kind, item_id, title, event) VALUES ('2031-01-01 20:00:00','movie',?,'flick','tuned in via X #1')", (g1,))
+k.execute("INSERT INTO history (at, kind, item_id, title, event) VALUES ('2031-01-01 20:00:05','movie',?,'sat','played')", (g2,))
+k.execute("INSERT INTO history (at, kind, item_id, title, event, seconds, position, total)"
+          " VALUES ('2031-01-01 20:40:00','movie',?,'sat','stopped',2395,2400,6000)", (g2,))
+k.execute("UPDATE movies SET last_played='2031-01-01 20:00:00' WHERE id=?", (g1,))
+k.commit(); k.close()
+n.LIB.loaded_at = 0
+sat = n.real_sittings()
+check("a flick isn't a sitting, forty minutes is", ("movie", g1) not in sat and sat.get(("movie", g2)) == "2031-01-01 20:40:00")
+top = n.browse_library("film", "", "watched", "all", 3, 0)["items"]
+check("Recently watched: the forty minutes first, not the flick", top and top[0]["id"] == g2
+      and all(r["id"] != g1 for r in top), [r["title"] for r in top])
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

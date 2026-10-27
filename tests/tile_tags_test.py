@@ -65,8 +65,9 @@ check("every poster with a genre has three tags", items and
       not [x for x in short if x[0] not in set(b["title"] for b in blank)], short[:5])
 
 # --- Sort: Recently watched ------------------------------------------------------------
-# Films by when they were last played; a show by its latest episode played;
-# anything never watched after, alphabetically.
+# Films by when they were last really watched (a sitting in the history, not
+# the "last played" stamp a few seconds' flick leaves: 2026-10-27); a show by
+# its latest episode; anything never watched after, alphabetically.
 conn = n.db()
 films = conn.execute("SELECT id FROM movies ORDER BY id LIMIT 2").fetchall()
 show = conn.execute("SELECT show_id FROM episodes WHERE show_id IS NOT NULL LIMIT 1").fetchone()
@@ -76,6 +77,10 @@ conn.execute("UPDATE movies SET last_played='2026-10-01 20:00:00' WHERE id=?", (
 conn.execute("UPDATE movies SET last_played='2026-10-21 20:00:00' WHERE id=?", (films[1][0],))
 conn.execute("UPDATE episodes SET last_played='2026-10-10 20:00:00' WHERE id=(SELECT MIN(id) FROM episodes WHERE show_id=?)",
              (show[0],))
+_ep = conn.execute("SELECT MIN(id) FROM episodes WHERE show_id=?", (show[0],)).fetchone()[0]
+for _kind, _id, _at in (("movie", films[0][0], "2026-10-01 20:00:00"), ("movie", films[1][0], "2026-10-21 20:00:00"),
+                        ("episode", _ep, "2026-10-10 20:00:00")):
+    conn.execute("INSERT INTO history (at, kind, item_id, title, event) VALUES (?,?,?,'x','watched')", (_at, _kind, _id))
 conn.commit(); conn.close()
 n.LOCAL.loaded_at = 0; n.LIB.loaded_at = 0
 got = n.browse_library("all", "", "watched", "all", 2000, 0)["items"]

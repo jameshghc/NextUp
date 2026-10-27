@@ -353,7 +353,7 @@ got = n.set_linear(_sid, None)
 check("None goes back to the guess", got["guessed"] is True)
 _pg = n.PAGE
 check("the show's page has the switch, the tiles the arrow", "function linearToggle(d)" in _pg
-      and "col.append(linearToggle(d));" in _pg and "el('div', 'linearmark', LINEAR_ARROW)" in _pg)
+      and "col.append(linearToggle(d));" in _pg and "el('div', 'linearmark', item.linear ? LINEAR_ARROW : SHUFFLE_ICON)" in _pg)
 # The season the Remote opens a show at reaches the function that picks it
 # (it didn't, and every show's page broke: 2026-10-27).
 check("the show page's season browser is given the season to open at",

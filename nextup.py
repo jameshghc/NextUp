@@ -1216,6 +1216,45 @@ def resume_phrase(percent, code):
     return "you're %s%% through %s — pick it back up" % (percent, code)
 
 
+def real_sittings():
+    """{(kind, id): when you last really watched it}: a finish, a stop a
+    minute or more in, or — from before channel visits were written down
+    as stops — a start with a minute or more before the next thing began.
+    The few seconds of a flick through the channels don't count. Shared by
+    Continue's rule (see build_resume_row) and the Library's Recently watched."""
+    conn = db()
+    rows = conn.execute(
+        "SELECT id, at, kind, item_id, event, seconds FROM history"
+        " WHERE kind IN ('movie','episode','youtube') AND (event IN"
+        " ('played','stopped','watched','next episode','previous episode')"
+        " OR event LIKE 'tuned in via %' OR event LIKE 'next up on %')"
+        " ORDER BY id").fetchall()
+    conn.close()
+    def stamp(at):
+        try:
+            return time.mktime(time.strptime(at[:19], "%Y-%m-%d %H:%M:%S"))
+        except (TypeError, ValueError):
+            return None
+    out = {}
+    for i, r in enumerate(rows):
+        if r["item_id"] is None or r["kind"] == "youtube":
+            continue
+        ev = r["event"]
+        if ev == "watched" or (ev == "stopped" and (r["seconds"] is None or r["seconds"] >= MIN_WATCH_SECONDS)):
+            real = True
+        elif ev == "stopped":
+            real = False
+        else:
+            after = rows[i + 1] if i + 1 < len(rows) else None
+            a, b = stamp(r["at"]), stamp(after["at"]) if after else None
+            real = bool(a and b and b - a >= MIN_WATCH_SECONDS)
+        if real:
+            key = (r["kind"], r["item_id"])
+            if r["at"] > out.get(key, ""):
+                out[key] = r["at"]
+    return out
+
+
 def build_resume_row(limit=4):
     """The few things you are genuinely part way through, newest first.
 
@@ -6074,6 +6113,7 @@ def browse_library(kind, query, sort, shelf, limit, offset):
                 "favourited": bool(s.get("favourited")),
             })
     if kind != "tv":
+        firsts = fame_firsts()
         for m in LIB.movies:
             cast, directors = extra.get(m.get("movieid"), ([], []))
             score = search_score(query, m, cast + directors, m.get("genre") or [])
@@ -6101,6 +6141,7 @@ def browse_library(kind, query, sort, shelf, limit, offset):
                 "identified": m.get("identified", True),
                 "sort_added": m.get("dateadded") or "",
                 "sort_watched": m.get("last_played") or "",
+                "firsts": firsts.get(m["movieid"], 0),
                 "watchlisted": bool(m.get("watchlisted")),
                 "favourited": bool(m.get("favourited")),
             })
@@ -6156,10 +6197,25 @@ def browse_library(kind, query, sort, shelf, limit, offset):
             "runtime": lambda r: r.get("runtime") or 0,
         }
         if sort == "watched":
-            # Last played first, a show by its latest episode; never played
-            # after, A to Z (an empty time sorts last when reversed). The
-            # history counts too, by TMDB id: on the phone a film streamed
-            # from the PC is no file here, and that's its only record.
+            # Last WATCHED first — a real sitting, as Continue counts one
+            # (real_sittings), not the "last played" stamp that any start
+            # leaves, a few seconds' flick on a channel included (asked
+            # about, 2026-10-27). A show by its latest episode; never
+            # watched after, A to Z (an empty time sorts last when reversed).
+            sat = real_sittings()
+            show_of = {e["episodeid"]: e.get("tvshowid") for e in LIB.episodes}
+            shows_sat = {}
+            for (kind, ident), at in sat.items():
+                if kind == "episode" and show_of.get(ident) is not None:
+                    sid = show_of[ident]
+                    shows_sat[sid] = max(shows_sat.get(sid, ""), at)
+            for r in rows:
+                if r["kind"] == "movie":
+                    r["sort_watched"] = sat.get(("movie", r["id"]), "")
+                elif r["kind"] == "tvshow":
+                    r["sort_watched"] = shows_sat.get(r["id"], "")
+            # The history counts too, by TMDB id: on the phone a film
+            # streamed from the PC is no file here, and that's its only record.
             conn = db()
             try:
                 seen = {(r[0], r[1]): r[2] or "" for r in conn.execute(
@@ -6597,7 +6653,7 @@ def _home_film_item(m, wild=False):
 # card like a channel's, opening to its posters in your order. Worked out
 # from the library each time; nothing stored.
 
-FAME_MIN = 5                 # a shelf with fewer than this isn't shown
+FAME_MIN = 10                # a shelf with fewer than this isn't shown (a "top ten" of four said little)
 FAME_SHOWN = 12              # a shelf's posters before SHOW ALL: two rows of six
 _FAME_GENRES = {
     "Comedy": "Comedies", "Drama": "Dramas", "Action": "Action films", "Adventure": "Adventures",
@@ -6624,6 +6680,31 @@ def _fame_item(kind, x, rated_at):
 
 def _fame_rank(items):
     return sorted(items, key=lambda i: (-(i["score"] or 0), -(i["tmdb_rating"] or 0), i["title"]))
+
+
+_FAME_FIRSTS = {"at": None, "map": {}}
+
+
+def fame_firsts():
+    """{film id: how many Hall of Fame shelves it tops}, for the trophy on
+    its Library tile (asked for, 2026-10-27). Only shelves that rank, best
+    first: not Recently rated, Hidden gems or Unpopular opinions, which are
+    in another order. Worked out once per library load."""
+    LIB.load()
+    if _FAME_FIRSTS["at"] == LIB.loaded_at:
+        return _FAME_FIRSTS["map"]
+    out = defaultdict(int)
+    try:
+        for c in build_hall_of_fame()["categories"]:
+            if c["id"] in ("recent", "gems", "unpopular") or not c["items"]:
+                continue
+            first = c["items"][0]
+            if first["kind"] == "movie":
+                out[first["id"]] += 1
+    except Exception:
+        log_problem("hall of fame firsts")
+    _FAME_FIRSTS.update(at=LIB.loaded_at, map=dict(out))
+    return _FAME_FIRSTS["map"]
 
 
 def build_hall_of_fame():
@@ -6696,7 +6777,7 @@ def build_hall_of_fame():
     def avg(xs):
         return sum(i["score"] for i in xs) / len(xs)
     seen = set()
-    for d in sorted((d for d in by_dir if len(by_dir[d]) >= 4), key=lambda d: (-avg(by_dir[d]), -len(by_dir[d]))):
+    for d in sorted((d for d in by_dir if len(by_dir[d]) >= FAME_MIN), key=lambda d: (-avg(by_dir[d]), -len(by_dir[d]))):
         items = by_dir[d]
         same = frozenset(i["id"] for i in items)
         if same in seen or len(seen) >= 8:
@@ -6708,7 +6789,7 @@ def build_hall_of_fame():
             out.append({"id": "dir:" + d, "name": "The %s shelf" % d.split()[-1],
                         "note": "%d films by %s" % (len(ranked), d), "count": len(ranked),
                         "avg": round(sum(scores) / len(scores), 1), "items": ranked})
-    for a in sorted((a for a in by_actor if len(by_actor[a]) >= 4), key=lambda a: -len(by_actor[a]))[:6]:
+    for a in sorted((a for a in by_actor if len(by_actor[a]) >= FAME_MIN), key=lambda a: -len(by_actor[a]))[:6]:
         ranked = _fame_rank(by_actor[a])
         scores = [i["score"] for i in ranked]
         out.append({"id": "actor:" + a, "name": "With %s" % a,
@@ -7235,7 +7316,7 @@ def _film_angles(m):
     top = _top_genres()
     shared = [g for g in (m.get("genre") or []) if g in top]
     if rating >= 7.5 and shared:
-        out.append((7, "TMDB %.1f, in %s, one of the genres you watch most." % (rating, shared[0].lower()), False))
+        out.append((7, "Well reviewed, and %s is one of the genres you watch most." % shared[0].lower(), False))
     # The time of night.
     mins = minutes(m.get("runtime"))
     hour = time.localtime().tm_hour
@@ -18135,6 +18216,9 @@ body.android .tile.elsewhere.streamable .cap{padding-bottom:26px}
 .linearmark{position:absolute;right:0;top:0;transform:translateY(-100%);line-height:0;
   padding:4px 6px 3px;border-top-left-radius:4px;background:#060509;color:#a78bfa;pointer-events:none}
 .linearmark svg{width:10px;height:10px}
+.tile .cap .trophy{position:absolute;right:7px;bottom:7px;display:inline-flex;align-items:center;gap:2px;
+  color:#e8b84a;line-height:1}
+.tile .cap .trophy i{font-style:normal;font-family:var(--mono);font-size:10px;color:var(--muted)}
 .eplinear.hidden{display:none}
 .eprow .code{position:relative}
 .eplinear{position:absolute;left:-19px;top:50%;transform:translateY(-50%);display:flex;color:#a78bfa;line-height:0}
@@ -20757,7 +20841,8 @@ function pickCard(p){
   if(p.plot) right.append(el('p','plot', esc(p.plot)+'…'));
   const meta = el('div','meta');
   if(p.runtime) meta.append(el('span',null,'Runtime <b>'+p.runtime+' min</b>'));
-  if(p.rating) meta.append(el('span',null,'TMDB <b>'+p.rating+'</b>'));
+  /* No TMDB score on Now (asked for, 2026-10-27): it swayed the choice
+     more than it should. It still counts in the picking. */
   if(p.year) meta.append(el('span',null,'Year <b>'+p.year+'</b>'));
   right.append(meta);
 
@@ -20918,8 +21003,7 @@ function phonePick(p, poster, right, btns, problem, meta, rateSlot){
     const sub = right.querySelector('.subline');
     if(sub) side.append(sub);                    // the show and which episode
   }
-  facts.textContent = [p.year, p.runtime ? p.runtime + ' min' : '',
-                       p.rating ? 'TMDB ' + p.rating : ''].filter(Boolean).join(' \u00B7 ');
+  facts.textContent = [p.year, p.runtime ? p.runtime + ' min' : ''].filter(Boolean).join(' \u00B7 ');
   if(facts.textContent) side.append(facts);
   const genres = (p.genres || []).slice(0, 2);
   if(genres.length){
@@ -22055,6 +22139,7 @@ async function refreshSnapshotState(){
   return snapState;
 }
 
+const TROPHY_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true"><path d="M7 3h10v2h3v3a4 4 0 0 1-4 4h-.3A5 5 0 0 1 13 14.9V18h3v3H8v-3h3v-3.1A5 5 0 0 1 8.3 12H8a4 4 0 0 1-4-4V5h3V3zm0 4H6v1a2 2 0 0 0 1 1.7V7zm10 0v2.7A2 2 0 0 0 18 8V7h-1z"></path></svg>';
 function tile(item){
   const b = el('button','tile');
   b.dataset.key = item.kind + ':' + item.id;
@@ -22074,7 +22159,13 @@ function tile(item){
   sub.textContent = [item.year, item.kind==='tvshow'
     ? (item.episodes+' eps') : (item.runtime ? item.runtime+' min' : '')]
     .filter(Boolean).join('  ·  ');
+  /* A gold trophy for a film that tops a Hall of Fame shelf, and how many. */
   cap.append(sub);
+  if(item.firsts){
+    const tr = el('span', 'trophy', TROPHY_ICON + (item.firsts > 1 ? '<i>(\u00D7' + item.firsts + ')</i>' : ''));
+    tr.title = '#1 on ' + item.firsts + (item.firsts === 1 ? ' Hall of Fame shelf' : ' Hall of Fame shelves');
+    cap.append(tr);
+  }
   b.append(cap);
 
   // The only state shown is where you actually got to, because it's the only
@@ -22096,9 +22187,11 @@ function tile(item){
       b.append(el('div','wifimark', WIFI_GLYPH + 'ON ' + esc(elsewhereWhere().toUpperCase())));
     } else b.append(el('div','elsewherebadge', elsewhereLabel()));
   }
-  if(item.kind === 'tvshow' && item.linear){
-    const m = el('div', 'linearmark', LINEAR_ARROW);
-    m.title = 'Watch in order';
+  if(item.kind === 'tvshow'){
+    /* Bottom right of the poster: the arrow for a show watched in order,
+       the shuffle for one any episode of which will do. */
+    const m = el('div', 'linearmark', item.linear ? LINEAR_ARROW : SHUFFLE_ICON);
+    m.title = item.linear ? 'Watch in order' : 'Any episode';
     cap.append(m);
   }
   const corner = el('div','tilecorner');
@@ -23464,6 +23557,8 @@ async function openShow(id, pcTmdb, atSeason){
    episode you're up to, and stays out of the channels' random picks (see
    linear_map). Next Up guesses until you set it; "(guessed)" says so. */
 const LINEAR_ARROW = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h13"></path><path d="M13 6l6 6-6 6"></path></svg>';
+/* And its opposite: a show you dip into anywhere. */
+const SHUFFLE_ICON = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="16 3 21 3 21 8"></polyline><line x1="4" y1="20" x2="21" y2="3"></line><polyline points="21 16 21 21 16 21"></polyline><line x1="15" y1="15" x2="21" y2="21"></line><line x1="4" y1="4" x2="9" y2="9"></line></svg>';
 function linearToggle(d){
   const b = el('button', 'linearbtn' + (d.linear ? ' on' : ''));
   b.type = 'button';
@@ -23472,7 +23567,8 @@ function linearToggle(d){
   const draw = () => {
     b.classList.toggle('on', !!d.linear);
     b.setAttribute('aria-pressed', String(!!d.linear));
-    b.innerHTML = LINEAR_ARROW + ' WATCH IN ORDER' + (d.linear_guessed ? ' <span>(guessed)</span>' : '');
+    b.innerHTML = (d.linear ? LINEAR_ARROW : SHUFFLE_ICON) + ' WATCH IN ORDER'
+      + (d.linear_guessed ? ' <span>(guessed)</span>' : '');
     document.querySelectorAll('.eplinear').forEach(a => a.classList.toggle('hidden', !d.linear));
     b.title = d.linear
       ? 'Only ever suggested at the episode you\u2019re up to. Press to let any episode come up.'
@@ -27629,6 +27725,45 @@ def restore_resizing(title="Next Up"):
         pass        # a window that can't be resized still works
 
 
+def fill_work_area(title="Next Up", saved=None):
+    """Maximise the window to the screen it's on less the taskbar, or with
+    `saved` put it back. Returns the rectangle it had before, to restore.
+
+    A frameless window maximised the Windows way covers the whole screen,
+    taskbar and all (asked about, 2026-10-27): with no caption, Windows
+    treats it like a full-screen game. The monitor's work area is the
+    screen without the taskbar, wherever the taskbar is and on whichever
+    screen the window is on. Windows only; None elsewhere, and the caller
+    does what it did before."""
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    hwnd = user32.FindWindowW(None, title)
+    if not hwnd:
+        return None
+    SWP = 0x0004 | 0x0010 | 0x0020          # no z-order change, no activate, frame changed
+    if saved:
+        l, t, r, b = saved
+        user32.SetWindowPos(hwnd, 0, l, t, r - l, b - t, SWP)
+        return None
+    before = wintypes.RECT()
+    user32.GetWindowRect(hwnd, ctypes.byref(before))
+
+    class MONITORINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                    ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+    info = MONITORINFO()
+    info.cbSize = ctypes.sizeof(MONITORINFO)
+    monitor = user32.MonitorFromWindow(hwnd, 2)      # MONITOR_DEFAULTTONEAREST
+    if not monitor or not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+        return None
+    w = info.rcWork
+    user32.SetWindowPos(hwnd, 0, w.left, w.top, w.right - w.left, w.bottom - w.top, SWP)
+    return (before.left, before.top, before.right, before.bottom)
+
+
 def release_port(server):
     """Stop listening, now.
 
@@ -28317,6 +28452,19 @@ def main():
                     # harmless to walk, but the rule is easier to keep than to
                     # remember the exception to.
                     self._big = not getattr(self, "_big", False)
+                    # On Windows, to the screen less the taskbar, and back to
+                    # where it was (fill_work_area); elsewhere as before.
+                    try:
+                        if self._big:
+                            self._was = fill_work_area()
+                            if self._was:
+                                return
+                        elif getattr(self, "_was", None):
+                            fill_work_area(saved=self._was)
+                            self._was = None
+                            return
+                    except Exception:
+                        pass
                     win.maximize() if self._big else win.restore()
 
                 def shut(self):

@@ -9,6 +9,12 @@ What changed in Next Up, version by version, newest first. Version numbers start
   - **Rate**: the rating queue, as it was, with how many are left on the switch.
 - Rate has left the top menu, which is now Now · Library · Channels.
 - **Watch in order**, a switch on each show's page. A show that's one story (Attack on Titan, Arcane) is only ever suggested at the episode you're up to — on Now, Home, the wildcards and the channels — while one you dip into (Seinfeld, Always Sunny) can come up anywhere, as before. Next Up guesses until you set it, from the show's genres and TMDB keywords (sitcom, anthology, miniseries, based on manga), how long it runs, and whether you've watched it in a line or jumped about; the switch says "(guessed)" until you've used it. In-order shows wear a small purple arrow in the corner of their Library poster, and beside the episode you're up to in their season list.
+- Shows any episode of which will do wear a small purple shuffle in that corner instead, so every show says which it is.
+- Trophies: a film that tops Hall of Fame shelves has a small gold trophy at the bottom right of its Library tile, with how many: 2001: A Space Odyssey (×5).
+- Every Hall of Fame shelf now holds at least ten; the shorter ones (most directors' shelves among them) are gone.
+- Fixed on Windows: maximising Next Up covered the taskbar. It now fills the screen less the taskbar, and restoring puts it back where it was.
+- The TMDB score is gone from the Now page's card, and from the line above your rating: it swayed the choice more than it should. It still counts in the picking.
+- Fixed: Library › Sort › Recently watched counted a few seconds' flick on a channel as watching; it now goes by real sittings, as Continue does.
 - Fixed: a show's page stopped drawing its seasons in 0.2.3 (the season the Remote opens it at never reached the part that picks it).
 
 ## 0.2.3 — 2026-10-26

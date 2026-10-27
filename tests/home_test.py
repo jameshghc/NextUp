@@ -168,6 +168,17 @@ check("Ratings has no scroll bar, and its header wears the page's own background
 check("a shelf opens at its first row", "fameOpen = c.id; drawFame(); $('#view-ratings').scrollTop = 0;" in pg)
 check("pressing Ratings goes back to the Hall of Fame's front",
       "if(id === 'ratings'){ ratMode = 'fame'; fameOpen = null; }" in pg)
+firsts = n.fame_firsts()
+_tops = [c["items"][0]["id"] for c in cats if c["id"] not in ("recent", "gems", "unpopular") and c["items"][0]["kind"] == "movie"]
+check("a film's trophies are how many ranked shelves it tops",
+      all(firsts.get(i) == _tops.count(i) for i in set(_tops)) and sum(firsts.values()) == len(_tops), (firsts, _tops))
+_rows = n.browse_library("film", "", "mine", "all", 200, 0)["items"]
+check("and its Library tile carries the count", all(r.get("firsts", 0) == firsts.get(r["id"], 0) for r in _rows)
+      and "el('span', 'trophy', TROPHY_ICON" in pg)
+check("Now's card shows no TMDB score", "if(p.rating) meta.append(el('span',null,'TMDB" not in pg
+      and "p.rating ? 'TMDB ' + p.rating : ''].filter" not in pg)
+check("a show's tile wears the arrow in order, the shuffle otherwise",
+      "item.linear ? LINEAR_ARROW : SHUFFLE_ICON" in pg)
 check("the phone asks the PC for its shelves", "/api/pcfame" in pg
       and '"/api/pcfame": "/phone/fame"' in open(n.__file__, encoding="utf-8").read())
 
