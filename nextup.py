@@ -28038,6 +28038,72 @@ def own_window(title="Next Up"):
     return found[0][1] if found else 0
 
 
+_TOP_FRAME = {}          # hwnd -> (our window procedure, the one it replaced): kept alive
+
+
+def hide_top_frame(hwnd):
+    """No grey strip along the top of the window (asked for, 2026-10-27).
+
+    With its resize edges back (restore_resizing) a frameless window has a
+    frame again, and where the sides and bottom of it are invisible, Windows
+    paints the top of it: a 7px grey strip, with a 1px line on Windows 11.
+    So the window's own procedure is wrapped: when Windows asks how big the
+    frame is (WM_NCCALCSIZE) the top is given back to the page, keeping the
+    sides and bottom; and the top few pixels of the page answer "top edge"
+    when the pointer asks (WM_NCHITTEST), so dragging there still resizes.
+    The 1px border line is switched off (DWMWA_BORDER_COLOR, none).
+    Windows only; harmless to call twice."""
+    if os.name != "nt" or not hwnd or hwnd in _TOP_FRAME:
+        return
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    LRESULT = ctypes.c_ssize_t
+    WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, ctypes.c_uint, wintypes.WPARAM, wintypes.LPARAM)
+    user32.CallWindowProcW.restype = LRESULT
+    user32.CallWindowProcW.argtypes = (ctypes.c_void_p, wintypes.HWND, ctypes.c_uint, wintypes.WPARAM, wintypes.LPARAM)
+    user32.SetWindowLongPtrW.restype = ctypes.c_void_p
+    user32.SetWindowLongPtrW.argtypes = (wintypes.HWND, ctypes.c_int, ctypes.c_void_p)
+    WM_NCCALCSIZE, WM_NCHITTEST = 0x0083, 0x0084
+    HTCLIENT, HTTOP, HTTOPLEFT, HTTOPRIGHT = 1, 12, 13, 14
+    EDGE = 6
+
+    def proc(h, msg, wp, lp):
+        if msg == WM_NCCALCSIZE and wp and not user32.IsZoomed(h):
+            rect = ctypes.cast(lp, ctypes.POINTER(wintypes.RECT))
+            top = rect[0].top
+            result = user32.CallWindowProcW(old, h, msg, wp, lp)
+            rect[0].top = top                   # the frame's top is the page's
+            return result
+        result = user32.CallWindowProcW(old, h, msg, wp, lp)
+        # Only while it can be resized: maximised (fill_work_area takes the
+        # frame off), the top of the page is the page.
+        if (msg == WM_NCHITTEST and result == HTCLIENT and not user32.IsZoomed(h)
+                and user32.GetWindowLongW(h, -16) & 0x00040000):
+            x, y = ctypes.c_short(lp & 0xFFFF).value, ctypes.c_short((lp >> 16) & 0xFFFF).value
+            r = wintypes.RECT()
+            user32.GetWindowRect(h, ctypes.byref(r))
+            if y - r.top < EDGE:
+                if x - r.left < EDGE * 2:
+                    return HTTOPLEFT
+                if r.right - x < EDGE * 2:
+                    return HTTOPRIGHT
+                return HTTOP
+        return result
+
+    new = WNDPROC(proc)
+    old = user32.SetWindowLongPtrW(hwnd, -4, ctypes.cast(new, ctypes.c_void_p))      # GWLP_WNDPROC
+    if not old:
+        return
+    _TOP_FRAME[hwnd] = (new, old)
+    try:
+        none = ctypes.c_uint(0xFFFFFFFE)                                              # DWMWA_COLOR_NONE
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 34, ctypes.byref(none), ctypes.sizeof(none))
+    except Exception:
+        pass
+    user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0027)      # frame changed: worked out again
+
+
 def restore_resizing(title="Next Up"):
     """Give a frameless window its resize edges back.
 
@@ -28066,6 +28132,10 @@ def restore_resizing(title="Next Up"):
                               style | WS_THICKFRAME | WS_MAXIMIZEBOX)
         # SWP_FRAMECHANGED, and no move or resize while we're at it.
         user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0027)
+        try:
+            hide_top_frame(hwnd)
+        except Exception:
+            pass            # a grey strip at the top, not a broken window
     except Exception:
         pass        # a window that can't be resized still works
 

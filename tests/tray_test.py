@@ -98,6 +98,9 @@ check("Settings has the switch", 'id="c_tray"' in n.PAGE)
 _src = open(n.__file__, encoding="utf-8").read()
 check("maximised: no resize frame (the grey line) and square corners; restored, both back",
       "style & ~WS_THICKFRAME" in _src and "DwmSetWindowAttribute(hwnd, 33" in _src and "saved[4]" in _src)
+check("no grey strip along the top at any size: the frame's top goes to the page, which resizes there",
+      "def hide_top_frame(hwnd):" in _src and "hide_top_frame(hwnd)" in _src[_src.find("def restore_resizing"):]
+      and "rect[0].top = top" in _src and "return HTTOP" in _src)
 check("resizing and maximise look among this process's own windows, not any with the title",
       "hwnd = own_window(title)" in _src and _src.count("FindWindowW(None, title)") == 0)
 if os.name == "nt":
