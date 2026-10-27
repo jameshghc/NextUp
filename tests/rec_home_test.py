@@ -316,6 +316,9 @@ _g0 = [g["name"] for g in n.available_genres("film", [], [])]
 _g1 = n.available_genres("film", [_g0[1]], [_tagged["key"]] if _tagged else [])
 check("the genre tags keep their places as you choose; the impossible ones grey, never leave",
       _g0 == [g["name"] for g in _g1] and any(g["n"] == 0 for g in _g1))
+check("a rated film counts as seen, played here or not",
+      n.film_seen({"userrating": 7}) and n.film_seen({"playcount": 1}) and not n.film_seen({})
+      and "unseen" not in n.film_tags({"userrating": 8, "playcount": 0}))
 check("the phone's PC routes carry the tags", _src.count('tags=one("tags", "")') >= 2
       and 'out["tags"] = available_film_tags(chosen, tags)' in _src)
 

@@ -973,6 +973,12 @@ _MINDBENDING = {"twist ending", "time travel", "dream", "alternate reality", "no
                 "psychological", "unreliable narrator", "amnesia", "dream world", "virtual reality"}
 
 
+def film_seen(m):
+    """Whether you've seen a film: played here, part way through, or rated —
+    a score means you've seen it, wherever that was (asked for, 2026-10-27)."""
+    return bool(m.get("playcount") or (m.get("resume") or {}).get("position") or (m.get("userrating") or 0) > 0)
+
+
 def _kws(m):
     return {k.lower() for k in m.get("keywords") or []}
 
@@ -1000,7 +1006,7 @@ FILM_TAGS = [
     ("foreign", "Not in English", lambda m: (m.get("language") or "en") != "en"),
     ("short", "Short and sweet", lambda m: 0 < minutes(m.get("runtime")) < 95),
     ("epic", "Epic", lambda m: minutes(m.get("runtime")) > 150),
-    ("unseen", "Never seen", lambda m: not m.get("playcount") and not (m.get("resume") or {}).get("position")),
+    ("unseen", "Never seen", lambda m: not film_seen(m)),
 ]
 _FILM_TAG_RULES = {k: f for k, _label, f in FILM_TAGS}
 
@@ -7452,10 +7458,10 @@ def _film_angles(m):
             out.append((8 + best["score"] / 2.0, "%s You gave %s %s." % (hook, best["title"], _a_score(best["score"])), True))
             break
     # The one of a series you haven't seen.
-    if m.get("set") and not m.get("playcount"):
+    if m.get("set") and not film_seen(m):
         sibs = [x for x in LIB.movies if x.get("set") == m.get("set") and x.get("movieid") != mid]
-        seen = [x for x in sibs if x.get("playcount")]
-        unseen = [x for x in sibs if not x.get("playcount")]
+        seen = [x for x in sibs if film_seen(x)]
+        unseen = [x for x in sibs if not film_seen(x)]
         if seen:
             name = re.sub(r"\s+(Collection|Trilogy|Saga)$", "", m.get("set"))
             text = ("The one %s film you haven't seen." % name if not unseen
