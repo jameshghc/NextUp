@@ -6664,6 +6664,21 @@ _FAME_GENRES = {
 }
 
 
+_SMALL_WORDS = {"a", "an", "and", "as", "at", "but", "by", "for", "in", "of", "on", "or",
+                "the", "to", "with", "vs"}
+
+
+def title_case(text):
+    """"best sci-fi" -> "Best Sci-Fi", "short and sweet" -> "Short and
+    Sweet": every word capitalised but the small ones, which are only when
+    first. Capitals already there stay (DiCaprio)."""
+    def word(w, first):
+        if not first and w.lower() in _SMALL_WORDS:
+            return w.lower()
+        return "-".join(p[:1].upper() + p[1:] for p in w.split("-"))
+    return " ".join(word(w, i == 0) for i, w in enumerate(text.split(" ")))
+
+
 def _fame_item(kind, x, rated_at):
     if kind == "movie":
         who = ", ".join((x.get("director") or [])[:2])
@@ -6795,6 +6810,8 @@ def build_hall_of_fame():
         out.append({"id": "actor:" + a, "name": "With %s" % a,
                     "note": "%d films with %s in them" % (len(ranked), a), "count": len(ranked),
                     "avg": round(sum(scores) / len(scores), 1), "items": ranked})
+    for c in out:
+        c["name"] = title_case(c["name"])       # Hall of Fame names in title case (asked for, 2026-10-27)
     return {"categories": out, "films": len(films), "shows": len(shows)}
 
 

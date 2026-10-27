@@ -179,6 +179,9 @@ check("Now's card shows no TMDB score", "if(p.rating) meta.append(el('span',null
       and "p.rating ? 'TMDB ' + p.rating : ''].filter" not in pg)
 check("a show's tile wears the arrow in order, the shuffle otherwise",
       "item.linear ? LINEAR_ARROW : SHUFFLE_ICON" in pg)
+check("shelf names in title case", n.title_case("best sci-fi") == "Best Sci-Fi"
+      and n.title_case("short and sweet") == "Short and Sweet" and n.title_case("with Leonardo DiCaprio") == "With Leonardo DiCaprio"
+      and all(c["name"][0].isupper() or c["name"][0].isdigit() for c in cats))
 check("the phone asks the PC for its shelves", "/api/pcfame" in pg
       and '"/api/pcfame": "/phone/fame"' in open(n.__file__, encoding="utf-8").read())
 
