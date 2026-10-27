@@ -160,7 +160,11 @@ check("it sits between History and Recommendations",
 check("Hall of Fame and Rate, one switch", 'data-mode="fame"' in pg and 'data-mode="rate"' in pg
       and 'id="view-rate"' in pg and "function drawFameShelf(" in pg)
 check("a shelf shows twelve before SHOW ALL, under a header that stays put",
-      "c.items.slice(0, 12)" in pg and "el('div', 'fametop')" in pg and ".fametop{position:sticky" in pg)
+      "c.items.slice(0, 12)" in pg and 'class="rattop"' in pg and ".rattop{position:sticky" in pg
+      and 'id="fameback"' in pg[pg.find('class="rattop"'):][:700])
+check("Ratings has no scroll bar, and its header wears the page's own background",
+      "#view-library > #view-ratings::-webkit-scrollbar{display:none}" in pg
+      and "body.glass .rattop{background:" in pg)
 check("pressing Ratings goes back to the Hall of Fame's front",
       "if(id === 'ratings'){ ratMode = 'fame'; fameOpen = null; }" in pg)
 check("the phone asks the PC for its shelves", "/api/pcfame" in pg

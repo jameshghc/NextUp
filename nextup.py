@@ -16726,7 +16726,29 @@ body{display:flex;flex-direction:column}
 #view-library.showing-ratings > .resumehead,
 #view-library.showing-ratings > .seltray{display:none}
 #view-library:not(.showing-ratings) > #view-ratings{display:none}
-#view-library > #view-ratings{flex:1;min-height:0;overflow-y:auto;padding:16px 0 40px}
+#view-library > #view-ratings{flex:1;min-height:0;overflow-y:auto;padding:0 0 40px;scrollbar-width:none}
+#view-library > #view-ratings::-webkit-scrollbar{display:none}
+/* Pinned, and invisible as a block: it wears the page's own background,
+   fixed to the window as the page's is, so it's the same colour as what's
+   round it and the posters simply go out of sight under it (asked for,
+   2026-10-27). A short fade at the foot so they don't end in a hard line. */
+.rattop{position:sticky;top:0;z-index:5;padding:16px 0 18px;
+  background:radial-gradient(1100px 520px at 50% -160px,#1e1729 0%,rgba(6,5,9,0) 70%) fixed,
+    radial-gradient(900px 640px at 104% 108%,#0d1717 0%,rgba(6,5,9,0) 64%) fixed,var(--ink);
+  -webkit-mask-image:linear-gradient(180deg,#000 calc(100% - 12px),transparent 100%);
+  mask-image:linear-gradient(180deg,#000 calc(100% - 12px),transparent 100%)}
+body.glass .rattop{background:radial-gradient(1100px 520px at 50% -160px,#24242c 0%,rgba(12,12,16,0) 70%) fixed,#0c0c10}
+body.silver .rattop{background:linear-gradient(180deg,rgba(255,255,255,.035) 0,rgba(255,255,255,0) 340px) fixed,
+  radial-gradient(1200px 560px at 50% -180px,#3a3a3c 0%,rgba(19,19,19,0) 70%) fixed,#131313}
+.ratrow{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+.ratrow .ratswitch{margin:0}
+.ratpill{background:none;border:0;border-radius:999px;padding:8px 16px;color:var(--paper);
+  font-family:var(--display);font-weight:700;font-size:14px;cursor:pointer}
+.ratpill:hover{background:rgba(255,255,255,.08)}
+/* The page's name with its line beside it, not under it. */
+.rattop .famehead{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin:0}
+.rattop .famehead.hidden{display:none}
+.rattop .famehead h2{margin:0}
 #view-ratings > #view-rate{padding:0}
 /* The old "top tens" under the queue: the Hall of Fame does that now. */
 #view-rate > section:has(#toplists){display:none}
@@ -16752,12 +16774,7 @@ body{display:flex;flex-direction:column}
 .famenote{color:var(--muted);font-size:13px}
 .famestats{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--marigold)}
 .famefirst{font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.fameback{margin:0 0 10px}
-.fametop{position:sticky;top:-16px;z-index:5;margin:-16px 0 16px;padding:16px 0 10px;
-  background:var(--ink);box-shadow:0 12px 14px -12px rgba(0,0,0,.7)}
-body.glass .fametop{background:#0c0c10}
-body.silver .fametop{background:#131313}
-.fametop .famehead{margin:0}
+
 .fameshelf{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:18px}
 .fametile{display:flex;flex-direction:column;gap:8px;background:none;border:0;padding:0;text-align:left;
   color:var(--paper);cursor:pointer}
@@ -19733,9 +19750,17 @@ body.android #view-settings{overflow-x:hidden}
        Kubrick shelf...) and Rate, the queue of what you haven't, which was
        a tab of its own in the menu. -->
   <div id="view-ratings">
-    <div class="ratswitch" role="tablist">
-      <button type="button" class="ratmode" data-mode="fame" role="tab">Hall of Fame</button>
-      <button type="button" class="ratmode" data-mode="rate" role="tab">Rate <span id="ratleft"></span></button>
+    <div class="rattop">
+      <div class="ratrow">
+        <div class="ratswitch" role="tablist">
+          <button type="button" class="ratmode" data-mode="fame" role="tab">Hall of Fame</button>
+          <button type="button" class="ratmode" data-mode="rate" role="tab">Rate <span id="ratleft"></span></button>
+        </div>
+        <div class="ratswitch hidden" id="fameback">
+          <button type="button" class="ratpill">‹ All shelves</button>
+        </div>
+      </div>
+      <div class="famehead" id="fametitle"></div>
     </div>
     <div id="view-fame"></div>
     <div id="view-rate">
@@ -24259,13 +24284,24 @@ async function pollScan(){
 let ratMode = 'fame';
 let FAME = null, fameFromPc = null, fameOpen = null;
 
+function fameTitle(name, line){
+  const t = $('#fametitle');
+  t.innerHTML = '';
+  t.classList.toggle('hidden', !name);
+  if(!name) return;
+  t.append(el('h2', null, esc(name)));
+  if(line) t.append(el('p', null, esc(line)));
+}
+
 function drawRatingsPlace(){
   document.querySelectorAll('.ratmode').forEach(b => b.setAttribute('aria-selected', String(b.dataset.mode === ratMode)));
+  if(ratMode === 'rate'){ fameTitle(null); $('#fameback').classList.add('hidden'); }
   $('#view-fame').classList.toggle('hidden', ratMode !== 'fame');
   $('#view-rate').classList.toggle('hidden', ratMode !== 'rate');
   if(ratMode === 'rate'){ staleRatings = false; loadRatings(); }
   else loadFame();
 }
+$('#fameback').onclick = () => { fameOpen = null; drawFame(); $('#view-ratings').scrollTop = 0; };
 document.querySelectorAll('.ratmode').forEach(b => b.onclick = () => {
   ratMode = b.dataset.mode;
   if(ratMode === 'fame') fameOpen = null;
@@ -24304,10 +24340,8 @@ function drawFame(){
   }
   const open = fameOpen && cats.find(c => c.id === fameOpen);
   if(open) return drawFameShelf(box, open);
-  const head = el('div', 'famehead');
-  head.append(el('h2', null, 'Hall of Fame'));
-  head.append(el('p', null, esc(d.films + ' films and ' + d.shows + ' shows you\u2019ve rated, in shelves.')));
-  box.append(head);
+  $('#fameback').classList.add('hidden');
+  fameTitle('Hall of Fame', d.films + ' films and ' + d.shows + ' shows you\u2019ve rated, in shelves');
   const grid = el('div', 'famegrid');
   cats.forEach(c => {
     const card = el('button', 'famecard');
@@ -24333,18 +24367,10 @@ function drawFame(){
 }
 
 function drawFameShelf(box, c, all){
-  /* ALL SHELVES and the shelf's name stay put at the top while its posters
-     scroll under them (asked for, 2026-10-27). */
-  const top = el('div', 'fametop');
-  const back = el('button', 'iconbtn fameback', '\u2039 ALL SHELVES');
-  back.type = 'button';
-  back.onclick = () => { fameOpen = null; drawFame(); $('#view-ratings').scrollTop = 0; };
-  top.append(back);
-  const head = el('div', 'famehead');
-  head.append(el('h2', null, esc(c.name)));
-  head.append(el('p', null, esc(c.note + '  \u00B7  ' + c.count + ' titles, average ' + c.avg)));
-  top.append(head);
-  box.append(top);
+  /* All shelves and the shelf's name are in the place's own header, which
+     stays put at the top while the posters scroll under it. */
+  $('#fameback').classList.remove('hidden');
+  fameTitle(c.name, c.note + '  \u00B7  ' + c.count + ' titles, average ' + c.avg);
   const grid = el('div', 'fameshelf');
   const shown = all ? c.items : c.items.slice(0, 12);
   const ranked = !['recent', 'gems', 'unpopular'].includes(c.id);
