@@ -4,6 +4,7 @@ the newest DEVELOPMENT_NOTES.md entry. A bump that only half happened, or a
 day of changes with no changelog, shows up here rather than months later.
 Reads files only."""
 import os, re, sys
+sys.stdout.reconfigure(encoding="utf-8")   # the CHANGELOG has a ★ in it
 
 ROOT = r"X:\NextUp"
 results = []

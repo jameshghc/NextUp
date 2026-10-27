@@ -16,6 +16,19 @@ at the top.
 
 ---
 
+## 2026-10-27 — v0.2.4, Ratings in the Library: the Hall of Fame
+
+- `build_hall_of_fame()` (`/api/fame`; the phone's `/api/pcfame` -> the
+  PC's `/phone/fame`) works out the shelves from the library each time:
+  `{categories: [{id, name, note, count, avg, items}]}`, a shelf only with
+  `FAME_MIN` (5) or more, except directors (4+, best eight, the same set of
+  films once) and actors (4+, the six most).
+- The page: `#view-ratings` is a Library panel (`LIB_PANELS.ratings`,
+  `showing-ratings`) holding `#view-fame` and the old `#view-rate`, moved
+  in unchanged; `ratMode` picks which. `switchTo('rate')` still works and
+  lands there. The old "top tens" under the queue are hidden, not removed
+  (drawTopLists still fills them).
+
 ## 2026-10-26 — v0.2.3, the Remote's now-playing opens its page
 
 - `remote_state` carries `open` (`playing_ident`: `{kind, tmdb, season}`,

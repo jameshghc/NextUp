@@ -251,7 +251,7 @@ check("SELECT is gone from the Library toolbar", 'id="libselect"' not in page)
 check("the Settings docking station is gone", "<h3>Docking station</h3>" not in page
       and 'id="dock_drive"' not in page)
 check("the Drives tab is gone", "['drives','Drives']" not in page and 'id="view-drives"' not in page)
-lib_html = page[page.index('<div class="searchrow">'):page.index('<!-- ================= RATE')]
+lib_html = page[page.index('<div class="searchrow">'):page.index('<!-- ================= CHANNELS')]
 check("the library has the tick button, and the add bar under the filters",
       all(x in lib_html for x in ('id="libadd"', 'id="addbar"', 'id="drv_pick"', 'id="drv_browse"',
                                   'id="drv_refresh"', 'id="tray_list"', 'id="tray_status"',

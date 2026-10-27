@@ -115,7 +115,7 @@ ASSET_DIR = getattr(sys, "_MEIPASS", HERE)
 LOGO_PATH = os.path.join(ASSET_DIR, "nextup_logo.png")
 ICON_PATH = os.path.join(ASSET_DIR, "nextup.ico")
 
-APP_VERSION = "0.2.3"
+APP_VERSION = "0.2.4"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -6464,6 +6464,134 @@ def _home_film_item(m, wild=False):
     if wild:
         item["wild"] = True
     return item
+
+
+# --- the Hall of Fame ------------------------------------------------------
+#
+# The Library's Ratings page (asked for, 2026-10-27): what you've rated, as
+# shelves you'd want to look along — your top ten, your best comedies, the
+# 2000s, the Kubrick shelf, the films you rate far above the world — each a
+# card like a channel's, opening to its posters in your order. Worked out
+# from the library each time; nothing stored.
+
+FAME_MIN = 5                 # a shelf with fewer than this isn't shown
+_FAME_GENRES = {
+    "Comedy": "Comedies", "Drama": "Dramas", "Action": "Action films", "Adventure": "Adventures",
+    "Science Fiction": "Sci-fi", "Thriller": "Thrillers", "Crime": "Crime films", "Fantasy": "Fantasy",
+    "Family": "Family films", "Romance": "Romances", "Animation": "Animated films",
+    "Mystery": "Mysteries", "War": "War films", "History": "Period pieces", "Horror": "Horror",
+    "Documentary": "Documentaries", "Music": "Music films", "Western": "Westerns",
+}
+
+
+def _fame_item(kind, x, rated_at):
+    if kind == "movie":
+        who = ", ".join((x.get("director") or [])[:2])
+        ident = x["movieid"]
+    else:
+        who = ", ".join((x.get("creators") or [])[:2])
+        ident = x["tvshowid"]
+    return {"kind": kind, "id": ident, "tmdb": str((x.get("uniqueid") or {}).get("tmdb") or ""),
+            "title": x.get("title") or "", "year": x.get("year") or "",
+            "art": art_url((x.get("art") or {}).get("poster")),
+            "score": x.get("userrating") or 0, "tmdb_rating": round(float(x.get("rating") or 0), 1),
+            "who": who, "rated_at": (rated_at or "")[:10]}
+
+
+def _fame_rank(items):
+    return sorted(items, key=lambda i: (-(i["score"] or 0), -(i["tmdb_rating"] or 0), i["title"]))
+
+
+def build_hall_of_fame():
+    """{"categories": [{id, name, note, count, avg, items}]}, best shelves
+    first; items in your order, each enough to draw a poster and open it."""
+    LIB.load()
+    ensure_cast_lists()
+    conn = db()
+    rated = {("movie", r["id"]): r["rated_at"] for r in conn.execute(
+        "SELECT id, rated_at FROM movies WHERE userrating > 0")}
+    rated.update({("tvshow", r["id"]): r["rated_at"] for r in conn.execute(
+        "SELECT id, rated_at FROM shows WHERE userrating > 0")})
+    conn.close()
+    films = [m for m in LIB.movies if (m.get("userrating") or 0) > 0]
+    shows = [x for x in LIB.shows if (x.get("userrating") or 0) > 0]
+    fitems = {m["movieid"]: _fame_item("movie", m, rated.get(("movie", m["movieid"]))) for m in films}
+    out = []
+
+    def shelf(key, name, note, items, ranked=True, cap=None):
+        items = _fame_rank(items) if ranked else list(items)
+        if len(items) < FAME_MIN:
+            return
+        items = items[:cap] if cap else items
+        scores = [i["score"] for i in items if i["score"]]
+        out.append({"id": key, "name": name, "note": note, "count": len(items),
+                    "avg": round(sum(scores) / len(scores), 1) if scores else 0, "items": items})
+
+    every = list(fitems.values())
+    shelf("top", "Your top 10", "The films you've scored highest", every, cap=10)
+    shelf("toptv", "Your top TV", "The shows you rate best",
+          [_fame_item("tvshow", x, rated.get(("tvshow", x["tvshowid"]))) for x in shows])
+    # Genres, the biggest first.
+    by_genre = defaultdict(list)
+    for m in films:
+        for g in m.get("genre") or []:
+            if g in _FAME_GENRES:
+                by_genre[g].append(fitems[m["movieid"]])
+    for g in sorted(by_genre, key=lambda g: -len(by_genre[g])):
+        shelf("genre:" + g, "Best " + _FAME_GENRES[g].lower(),
+              "All %d of yours, best first" % len(by_genre[g]), by_genre[g])
+    # Eras.
+    for start, name in ((2020, "The 2020s"), (2010, "The 2010s"), (2000, "The 2000s"), (1990, "The 1990s")):
+        shelf("era:%d" % start, name, "Films from %d to %d" % (start, start + 9),
+              [fitems[m["movieid"]] for m in films if start <= (m.get("year") or 0) <= start + 9])
+    shelf("era:classic", "Classics", "Before 1990",
+          [fitems[m["movieid"]] for m in films if 0 < (m.get("year") or 0) < 1990])
+    # And the fun ones.
+    shelf("world", "World cinema", "Not in English",
+          [fitems[m["movieid"]] for m in films if (m.get("language") or "en") != "en"])
+    shelf("short", "Short and sweet", "Under 95 minutes",
+          [fitems[m["movieid"]] for m in films if 0 < minutes(m.get("runtime")) < 95])
+    shelf("epic", "Epics", "Over two and a half hours",
+          [fitems[m["movieid"]] for m in films if minutes(m.get("runtime")) > 150])
+    gems = [i for i in every if i["tmdb_rating"] and i["score"] - i["tmdb_rating"] >= 1.5]
+    shelf("gems", "Hidden gems", "You rate these well above TMDB",
+          sorted(gems, key=lambda i: -(i["score"] - i["tmdb_rating"])), ranked=False)
+    odd = [i for i in every if i["tmdb_rating"] and i["tmdb_rating"] - i["score"] >= 1.5]
+    shelf("unpopular", "Unpopular opinions", "Well below what TMDB thinks of them",
+          sorted(odd, key=lambda i: -(i["tmdb_rating"] - i["score"])), ranked=False)
+    recent = sorted((i for i in every if i["rated_at"]), key=lambda i: i["rated_at"], reverse=True)
+    shelf("recent", "Recently rated", "The last films you scored", recent, ranked=False, cap=20)
+    # People: the directors you've rated four of (the best eight; the Coens
+    # once, not twice), and the actors you've rated four of (the six most).
+    by_dir, by_actor = defaultdict(list), defaultdict(list)
+    for m in films:
+        for d in m.get("director") or []:
+            by_dir[d].append(fitems[m["movieid"]])
+        for a in (m.get("cast_list") or [])[:6]:
+            by_actor[a].append(fitems[m["movieid"]])
+    def avg(xs):
+        return sum(i["score"] for i in xs) / len(xs)
+    seen = set()
+    for d in sorted((d for d in by_dir if len(by_dir[d]) >= 4), key=lambda d: (-avg(by_dir[d]), -len(by_dir[d]))):
+        items = by_dir[d]
+        same = frozenset(i["id"] for i in items)
+        if same in seen or len(seen) >= 8:
+            continue
+        seen.add(same)
+        if True:
+            ranked = _fame_rank(items)
+            scores = [i["score"] for i in ranked]
+            out.append({"id": "dir:" + d, "name": "The %s shelf" % d.split()[-1],
+                        "note": "%d films by %s" % (len(ranked), d), "count": len(ranked),
+                        "avg": round(sum(scores) / len(scores), 1), "items": ranked})
+    for a in sorted((a for a in by_actor if len(by_actor[a]) >= 4), key=lambda a: -len(by_actor[a]))[:6]:
+        ranked = _fame_rank(by_actor[a])
+        scores = [i["score"] for i in ranked]
+        out.append({"id": "actor:" + a, "name": "With %s" % a,
+                    "note": "%d films with %s in them" % (len(ranked), a), "count": len(ranked),
+                    "avg": round(sum(scores) / len(scores), 1), "items": ranked})
+    return {"categories": out, "films": len(films), "shows": len(shows)}
+
 
 
 def build_home():
@@ -14329,6 +14457,8 @@ class PhoneHandler(BaseHTTPRequestHandler):
                 return self.send_json(phone_show((query.get("tmdb") or [""])[0]))
             if route == "/phone/film":
                 return self.send_json(phone_film((query.get("tmdb") or [""])[0]))
+            if route == "/phone/fame":
+                return self.send_json(_phone_art_deep(build_hall_of_fame()))
             if route == "/phone/home":
                 # Each item with its identity, so the phone can play it HERE
                 # or ON PC from the tile.
@@ -15494,13 +15624,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(remote_state())
 
             if route in ("/api/pcnow", "/api/pcgenres", "/api/pcchannels", "/api/pcshow", "/api/pcepisode",
-                         "/api/pcfilm", "/api/pchome"):
+                         "/api/pcfilm", "/api/pchome", "/api/pcfame"):
                 if PLATFORM != "android":
                     return self.send_json({"error": "only on the phone"}, 404)
                 target = {"/api/pcnow": "/phone/now", "/api/pcgenres": "/phone/genres",
                           "/api/pcchannels": "/phone/channels", "/api/pcshow": "/phone/show",
                           "/api/pcepisode": "/phone/episode", "/api/pcfilm": "/phone/film",
-                          "/api/pchome": "/phone/home"}[route]
+                          "/api/pchome": "/phone/home", "/api/pcfame": "/phone/fame"}[route]
                 qs = urllib.parse.urlparse(self.path).query
                 return self.send_json(pc_library_call(target + ("?" + qs if qs else "")))
 
@@ -15533,6 +15663,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(cutout_look())
             if route == "/api/home":
                 return self.send_json(build_home())
+            if route == "/api/fame":
+                return self.send_json(build_hall_of_fame())
             if route == "/api/episode":
                 try:
                     got = episode_info(int(one("id", "0")))
@@ -16585,6 +16717,64 @@ body{display:flex;flex-direction:column}
 #view-library.showing-history > .seltray{display:none}
 #view-library:not(.showing-recs) > #view-upnext{display:none}
 #view-library:not(.showing-history) > #view-history{display:none}
+/* Ratings, as History: the shelf's furniture goes. */
+#view-library.showing-ratings > .libtop,
+#view-library.showing-ratings > #tiles-out,
+#view-library.showing-ratings > .pager,
+#view-library.showing-ratings > .resumestrip,
+#view-library.showing-ratings > .resumehead,
+#view-library.showing-ratings > .seltray{display:none}
+#view-library:not(.showing-ratings) > #view-ratings{display:none}
+#view-library > #view-ratings{flex:1;min-height:0;overflow-y:auto;padding:16px 0 40px}
+#view-ratings > #view-rate{padding:0}
+/* The old "top tens" under the queue: the Hall of Fame does that now. */
+#view-rate > section:has(#toplists){display:none}
+.ratswitch{display:inline-flex;gap:4px;padding:4px;border-radius:999px;background:var(--ink-2);
+  border:1px solid var(--line);margin:0 0 18px}
+.ratmode{background:none;border:0;border-radius:999px;padding:8px 16px;color:var(--muted);
+  font-family:var(--display);font-weight:700;font-size:14px;cursor:pointer}
+.ratmode[aria-selected="true"]{background:var(--paper);color:#111}
+.ratmode #ratleft{font-family:var(--mono);font-weight:400;font-size:11px;opacity:.75}
+.famehead{margin:0 0 16px}
+.famehead h2{margin:0 0 4px;font-size:24px}
+.famehead p{margin:0;color:var(--muted)}
+.famegrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
+.famecard{display:flex;gap:16px;align-items:center;text-align:left;padding:14px 16px;cursor:pointer;
+  background:var(--ink-2);border:1px solid var(--line);border-radius:var(--r-card,12px);color:var(--paper)}
+.famecard:hover{border-color:rgba(var(--accent-rgb),.6)}
+.famefan{position:relative;flex:none;width:104px;height:96px}
+.famefan > *{position:absolute;bottom:0;width:62px;aspect-ratio:2/3;object-fit:cover;border-radius:5px;
+  left:calc(var(--i) * 21px);z-index:calc(3 - var(--i));transform:scale(calc(1 - var(--i) * .08));
+  transform-origin:bottom left;box-shadow:0 6px 16px rgba(0,0,0,.5);background:var(--ink-3)}
+.famecardtxt{display:flex;flex-direction:column;gap:3px;min-width:0}
+.famecardtxt b{font-family:var(--display);font-size:17px}
+.famenote{color:var(--muted);font-size:13px}
+.famestats{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--marigold)}
+.famefirst{font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fameback{margin:0 0 14px}
+.fameshelf{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:18px}
+.fametile{display:flex;flex-direction:column;gap:8px;background:none;border:0;padding:0;text-align:left;
+  color:var(--paper);cursor:pointer}
+.famepic{position:relative;border-radius:var(--r-card,10px);overflow:hidden;aspect-ratio:2/3;background:var(--ink-3)}
+.famepic img,.famepic .blank{width:100%;height:100%;object-fit:cover;display:block}
+.fametile:hover .famepic{outline:2px solid rgba(var(--accent-rgb),.7)}
+.famerank{position:absolute;left:8px;top:8px;font-family:var(--display);font-weight:800;font-size:16px;
+  color:#fff;padding:2px 8px;border-radius:6px;background:rgba(0,0,0,.72)}
+.famescore{position:absolute;right:8px;top:8px;font-family:var(--mono);font-weight:700;font-size:12px;
+  padding:3px 7px;border-radius:5px;background:var(--marigold);color:#111}
+.famecap{display:flex;flex-direction:column;gap:2px;min-width:0}
+.famecap b{font-family:var(--display);font-size:14.5px;line-height:1.2;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.famecap span{font-size:12px;color:var(--muted)}
+.famecap small{font-family:var(--mono);font-size:10px;letter-spacing:.04em;color:var(--muted)}
+.famemore{margin:20px 0 0}
+/* The phone: cards one above another, the shelf two and a half across. */
+body.android .famegrid{grid-template-columns:minmax(0,1fr);gap:10px}
+body.android .famecard{padding:12px}
+body.android .famefan{width:88px;height:80px}
+body.android .famefan > *{width:52px;left:calc(var(--i) * 18px)}
+body.android .fameshelf{grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+body.android .famehead h2{font-size:20px}
 /* Home hides the shelf's own furniture, as History does. */
 #view-library.showing-home > .libtop,
 #view-library.showing-home > #tiles-out,
@@ -19301,7 +19491,6 @@ body.android #view-settings{overflow-x:hidden}
   <nav class="tabs" role="tablist">
     <button class="tab" role="tab" aria-selected="false" data-view="now" title="Find something to watch">Now</button>
     <button class="tab" role="tab" aria-selected="true" data-view="library" title="view your collection">Library</button>
-    <button class="tab" role="tab" aria-selected="false" data-view="rate" title="Rate your collection">Rate</button>
     <button class="tab" role="tab" aria-selected="false" data-view="channels" title="What's on right now.">Channels</button>
     <!-- The phone only. Always there; lit while the PC answers on the Wi-Fi
          (lookForPC), dim while it doesn't. -->
@@ -19532,6 +19721,39 @@ body.android #view-settings{overflow-x:hidden}
        The third state of the Library view, on the same footing as
        Recommendations: still your collection, this time by the evenings you
        spent on it. -->
+  <!-- ================= RATINGS =================
+       The Library's place for what you've rated: the Hall of Fame (shelves
+       of it, like the channels: your top ten, your best comedies, the
+       Kubrick shelf...) and Rate, the queue of what you haven't, which was
+       a tab of its own in the menu. -->
+  <div id="view-ratings">
+    <div class="ratswitch" role="tablist">
+      <button type="button" class="ratmode" data-mode="fame" role="tab">Hall of Fame</button>
+      <button type="button" class="ratmode" data-mode="rate" role="tab">Rate <span id="ratleft"></span></button>
+    </div>
+    <div id="view-fame"></div>
+    <div id="view-rate">
+  <div class="filters">
+    <label class="f"><span>Queue</span>
+      <select id="rate_kind">
+        <option value="film">Films</option>
+        <option value="tv">TV shows</option>
+      </select>
+    </label>
+    <button class="spin" id="rate_refresh">Refresh queue</button>
+  </div>
+  <div id="rate-out"><p class="empty">Loading…</p></div>
+  <section>
+    <div class="sechead">
+      <h2>Your top tens</h2>
+      <span class="count" id="rated-count"></span>
+      <p>Your own scores, not TMDB's. This is what For you learns from.</p>
+    </div>
+    <div class="toplists" id="toplists"></div>
+  </section>
+</div>
+  </div>
+
   <div id="view-history">
     <div class="filters">
       <label class="f"><span>Going back</span>
@@ -19557,27 +19779,7 @@ body.android #view-settings{overflow-x:hidden}
        this same job in two other places; this is the one place now. -->
 </div>
 
-<!-- ================= RATE ================= -->
-<div id="view-rate" class="hidden">
-  <div class="filters">
-    <label class="f"><span>Queue</span>
-      <select id="rate_kind">
-        <option value="film">Films</option>
-        <option value="tv">TV shows</option>
-      </select>
-    </label>
-    <button class="spin" id="rate_refresh">Refresh queue</button>
-  </div>
-  <div id="rate-out"><p class="empty">Loading…</p></div>
-  <section>
-    <div class="sechead">
-      <h2>Your top tens</h2>
-      <span class="count" id="rated-count"></span>
-      <p>Your own scores, not TMDB's. This is what For you learns from.</p>
-    </div>
-    <div class="toplists" id="toplists"></div>
-  </section>
-</div>
+
 
 <!-- ================= CHANNELS ================= -->
 <div id="view-remote" class="hidden"></div>
@@ -19788,8 +19990,6 @@ function resetView(view){
     if(grid) grid.scrollTop = 0;
   } else if(view === 'channels'){
     loadChannels();
-  } else if(view === 'rate'){
-    loadRatings();
   }
   /* Everything else is one scrolling panel: the top of it is its start.
      The Now tab deliberately keeps the pick that's on screen — throwing
@@ -19920,12 +20120,13 @@ function showSettingsTab(id){
 }
 
 function switchTo(view){
+  if(view === 'rate'){ libSection = 'ratings'; ratMode = 'rate'; view = 'library'; }
   currentView = view;
   /* The pick's art behind the page belongs to Now; everywhere else is a
      neutral grey glass (see #roomart). */
   document.body.classList.toggle('onnow', view === 'now');
   document.querySelectorAll('.tab').forEach(x => x.setAttribute('aria-selected', x.dataset.view===view));
-  ['now','library','rate','channels','settings','remote'].forEach(v => $('#view-'+v).classList.toggle('hidden', v!==view));
+  ['now','library','channels','settings','remote'].forEach(v => $('#view-'+v).classList.toggle('hidden', v!==view));
   remotePoll(view === 'remote' && pcLinkUp);
   if(view === 'remote' && pcLinkUp) remoteContinue();
   if(view === 'remote' && !pcLinkUp){
@@ -19945,7 +20146,6 @@ function switchTo(view){
        browse query behind a hidden panel is work nobody asked for. */
     if(!LIB_PANELS[libSection]){ loadLibrary(); loadResumeRow(); }
   }
-  if(view==='rate'){ staleRatings = false; loadRatings(); }
   if(view==='channels') loadChannels();
   if(view==='settings'){ showSettingsTab(); apLoad(); loadData(); syncLoad(); sorterLoad(); phoneLoad(); usbPhoneLoad(); }
 }
@@ -20919,16 +21119,17 @@ let searchTimer = null;
    top of the page, the same spot whichever section is up, so flicking
    between them never moves it. Six on one line read as one list of equals. */
 const LIB_SHELVES = [['home','Home'],['film','Films'],['tv','TV shows'],['fav','Favourites']];
-const LIB_PLACES = [['history','History'],['recs','Recommendations']];
+const LIB_PLACES = [['history','History'],['ratings','Ratings'],['recs','Recommendations']];
 const LIB_PLACE_ICONS = {
   history: '<circle cx="12" cy="12" r="9"></circle><polyline points="12 7 12 12 15.5 14"></polyline>',
+  ratings: '<polygon points="12 2.8 14.8 8.7 21.2 9.5 16.5 13.9 17.7 20.3 12 17.2 6.3 20.3 7.5 13.9 2.8 9.5 9.2 8.7"></polygon>',
   recs: '<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"></path><path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z"></path>',
 };
 /* The sections that aren't the shelf. They have no kind, no sort and no
    pager of their own, and listing them once here means the three or four
    places that have to know can ask rather than each keeping their own list
    of exceptions — which is how one of them ends up out of date. */
-const LIB_PANELS = {recs:'#view-upnext', history:'#view-history', home:'#view-home'};
+const LIB_PANELS = {recs:'#view-upnext', history:'#view-history', home:'#view-home', ratings:'#view-ratings'};
 
 let libSection = 'home';       // the Library, and so the app, opens on Home
 let favCount = null;
@@ -20941,6 +21142,9 @@ function applyLibSection(){
   const recs = libSection === 'recs';
   const hist = libSection === 'history';
   const home = libSection === 'home';
+  const rated = libSection === 'ratings';
+  $('#view-library').classList.toggle('showing-ratings', rated);
+  if(rated) drawRatingsPlace();
   $('#view-library').classList.toggle('showing-recs', recs);
   $('#view-library').classList.toggle('showing-history', hist);
   $('#view-library').classList.toggle('showing-home', home);
@@ -24038,6 +24242,136 @@ async function pollScan(){
    own page; playing one means an episode, and which episode is a question
    the server has already answered and sent as play_id. Both lists here go
    through these two, so the queue and the top tens behave identically. */
+/* ---- Ratings: the Hall of Fame, and Rate ----
+   A place in the Library (asked for, 2026-10-27). The Hall of Fame is
+   build_hall_of_fame's shelves as cards, like the channels: the name, a
+   line, how many and your average, and the first three posters. A card
+   opens its shelf: your order, ranked, with the year, who made it and
+   when you scored it; the first ten, then the rest on asking. A poster
+   opens its page, where it plays. On the phone with the PC up, the PC's. */
+let ratMode = 'fame';
+let FAME = null, fameFromPc = null, fameOpen = null;
+
+function drawRatingsPlace(){
+  document.querySelectorAll('.ratmode').forEach(b => b.setAttribute('aria-selected', String(b.dataset.mode === ratMode)));
+  $('#view-fame').classList.toggle('hidden', ratMode !== 'fame');
+  $('#view-rate').classList.toggle('hidden', ratMode !== 'rate');
+  if(ratMode === 'rate'){ staleRatings = false; loadRatings(); }
+  else loadFame();
+}
+document.querySelectorAll('.ratmode').forEach(b => b.onclick = () => {
+  ratMode = b.dataset.mode;
+  if(ratMode === 'fame') fameOpen = null;
+  drawRatingsPlace();
+});
+
+async function loadFame(){
+  const box = $('#view-fame');
+  const fromPc = document.body.classList.contains('android') && typeof pcLinkUp !== 'undefined' && pcLinkUp;
+  /* Asked again each visit (it's quick): a score given in Rate a moment
+     ago is on its shelves when you come back. */
+  if(FAME && fameFromPc === !!fromPc) drawFame();
+  else if(!box.children.length) box.append(el('p', 'empty', 'Loading\u2026'));
+  let d = await api(fromPc ? '/api/pcfame' : '/api/fame');
+  fameFromPc = !!fromPc && !!d && !d.error;
+  if(fromPc && (!d || d.error)) d = await api('/api/fame');
+  FAME = d;
+  drawFame();
+}
+
+function fameOpenItem(it){
+  if(fameFromPc) return it.kind === 'movie' ? openPcFilm(it.tmdb) : openPcShow(it.tmdb);
+  return it.kind === 'movie' ? openFilm(it.id) : openShow(it.id);
+}
+
+function drawFame(){
+  const box = $('#view-fame');
+  box.innerHTML = '';
+  const d = FAME;
+  if(!d || d.error){ box.append(el('p', 'empty', esc((d && d.error) || 'Nothing to show yet.'))); return; }
+  const cats = d.categories || [];
+  if(!cats.length){
+    box.append(el('div', 'notice', '<h3>Nothing here yet</h3><p>Rate a few films and they line up here: '
+      + 'your top ten, your best of each genre, the directors you keep coming back to.</p>'));
+    return;
+  }
+  const open = fameOpen && cats.find(c => c.id === fameOpen);
+  if(open) return drawFameShelf(box, open);
+  const head = el('div', 'famehead');
+  head.append(el('h2', null, 'Hall of Fame'));
+  head.append(el('p', null, esc(d.films + ' films and ' + d.shows + ' shows you\u2019ve rated, in shelves.')));
+  box.append(head);
+  const grid = el('div', 'famegrid');
+  cats.forEach(c => {
+    const card = el('button', 'famecard');
+    card.type = 'button';
+    const fan = el('div', 'famefan');
+    c.items.slice(0, 3).forEach((it, i) => {
+      const p = it.art ? el('img') : el('div', 'blank');
+      if(it.art){ p.src = it.art; p.alt = ''; p.loading = 'lazy'; }
+      p.style.setProperty('--i', i);
+      fan.append(p);
+    });
+    card.append(fan);
+    const txt = el('div', 'famecardtxt');
+    txt.append(el('b', null, esc(c.name)));
+    txt.append(el('span', 'famenote', esc(c.note)));
+    txt.append(el('span', 'famestats', esc(c.count + (c.count === 1 ? ' title' : ' titles') + '  \u00B7  avg ' + c.avg)));
+    txt.append(el('span', 'famefirst', '#1 ' + esc(c.items[0].title)));
+    card.append(txt);
+    card.onclick = () => { fameOpen = c.id; drawFame(); box.scrollTop = 0; };
+    grid.append(card);
+  });
+  box.append(grid);
+}
+
+function drawFameShelf(box, c, all){
+  const back = el('button', 'iconbtn fameback', '\u2039 ALL SHELVES');
+  back.type = 'button';
+  back.onclick = () => { fameOpen = null; drawFame(); };
+  box.append(back);
+  const head = el('div', 'famehead');
+  head.append(el('h2', null, esc(c.name)));
+  head.append(el('p', null, esc(c.note + '  \u00B7  ' + c.count + ' titles, average ' + c.avg)));
+  box.append(head);
+  const grid = el('div', 'fameshelf');
+  const shown = all ? c.items : c.items.slice(0, 10);
+  const ranked = !['recent', 'gems', 'unpopular'].includes(c.id);
+  shown.forEach((it, i) => {
+    const t = el('button', 'fametile');
+    t.type = 'button';
+    const pic = el('div', 'famepic');
+    if(it.art){ const img = el('img'); img.src = it.art; img.alt = ''; img.loading = 'lazy'; pic.append(img); }
+    else pic.append(el('div', 'blank', esc(it.title)));
+    if(ranked) pic.append(el('span', 'famerank', '#' + (i + 1)));
+    pic.append(el('span', 'famescore', esc(String(it.score))));
+    t.append(pic);
+    const cap = el('div', 'famecap');
+    cap.append(el('b', null, esc(it.title)));
+    cap.append(el('span', null, esc([it.year, it.who].filter(Boolean).join('  \u00B7  '))));
+    const extra = [];
+    if(it.tmdb_rating) extra.push('TMDB ' + it.tmdb_rating);
+    if(it.rated_at) extra.push('rated ' + fameDate(it.rated_at));
+    if(extra.length) cap.append(el('small', null, esc(extra.join('  \u00B7  '))));
+    t.append(cap);
+    t.title = it.title;
+    t.onclick = () => fameOpenItem(it);
+    grid.append(t);
+  });
+  box.append(grid);
+  if(!all && c.items.length > 10){
+    const more = el('button', 'iconbtn famemore', 'SHOW ALL ' + c.items.length);
+    more.type = 'button';
+    more.onclick = () => { box.innerHTML = ''; drawFameShelf(box, c, true); };
+    box.append(more);
+  }
+}
+
+function fameDate(iso){
+  const d = new Date(iso + 'T12:00:00');
+  return isNaN(d) ? iso : d.toLocaleDateString(undefined, {month: 'short', year: 'numeric'});
+}
+
 function openRated(item){
   return item.rate_type === 'tvshow' ? openShow(item.rate_id) : openFilm(item.rate_id);
 }
@@ -24089,6 +24423,8 @@ async function loadRatings(reset){
   }
   drawQueue();
   drawTopLists();
+  const left = (RATINGS.films || []).length + (RATINGS.shows || []).length;
+  $('#ratleft').textContent = left ? '\u00B7 ' + left + ' to go' : '';
 }
 
 function queueList(){

@@ -130,5 +130,37 @@ check("the phone's settings and Library toolbar fit the width",
 check("the house sits under the word Library on the phone", "function alignLibNav()" in pg
       and "alignLibNav();\n}" in pg)
 
+# --- 2026-10-27: Ratings, the Library's place for what you've rated -------------------
+_k = n.db()
+_ids = [r[0] for r in _k.execute("SELECT id FROM movies WHERE genres LIKE '%Comedy%' ORDER BY id LIMIT 14")]
+for _x, _id in enumerate(_ids):
+    _k.execute("UPDATE movies SET userrating=?, rated_at='2026-10-0%d 20:00:00' WHERE id=?" % (1 + _x % 9),
+               (6 + (_x % 8) * 0.5, _id))
+_k.commit(); _k.close()
+n.LIB.load(force=True)
+fame = n.build_hall_of_fame()
+cats = fame["categories"]
+ids = [c["id"] for c in cats]
+check("the Hall of Fame has shelves", len(cats) >= 3 and ids[0] == "top", ids[:5])
+check("no shelf is thin", all(c["count"] >= 3 for c in cats) and all(c["count"] == len(c["items"]) for c in cats))
+top = next(c for c in cats if c["id"] == "top")
+check("your top ten is ten, best first", len(top["items"]) <= 10
+      and [i["score"] for i in top["items"]] == sorted((i["score"] for i in top["items"]), reverse=True))
+check("each item has what a poster and its page need",
+      all({"kind", "id", "tmdb", "title", "score", "art"} <= set(i) for c in cats for i in c["items"]))
+check("genre shelves only for genres with five or more",
+      all(c["count"] >= n.FAME_MIN for c in cats if c["id"].startswith("genre:")))
+check("directors once each, the Coens not twice",
+      len({frozenset(i["id"] for i in c["items"]) for c in cats if c["id"].startswith("dir:")})
+      == len([c for c in cats if c["id"].startswith("dir:")]))
+check("Rate has left the menu for the Library", 'data-view="rate"' not in pg
+      and "['ratings','Ratings']" in pg and "ratings:'#view-ratings'" in pg)
+check("it sits between History and Recommendations",
+      "[['history','History'],['ratings','Ratings'],['recs','Recommendations']]" in pg)
+check("Hall of Fame and Rate, one switch", 'data-mode="fame"' in pg and 'data-mode="rate"' in pg
+      and 'id="view-rate"' in pg and "function drawFameShelf(" in pg)
+check("the phone asks the PC for its shelves", "/api/pcfame" in pg
+      and '"/api/pcfame": "/phone/fame"' in open(n.__file__, encoding="utf-8").read())
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
