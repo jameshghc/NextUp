@@ -12,27 +12,43 @@ Downloads are on the [Releases page](https://github.com/jameshghc/NextUp/release
 
 ## What it looks like
 
-**Now** picks one thing for tonight and says why, with everything you're part-way through along the top.
+**Now** picks one thing for tonight and says why, with everything you're part-way through along the top. Narrow it down with Anything, Film or TV and the genres beside it; **NEXT** for another.
 
-![The Now page](docs/screenshots/now.png)
+![The Now page, with the genres open](docs/screenshots/now.png)
 
-**Channels** are TV channels made from your own collection, always on, with a guide. There are 22 of them, from Action, Comedy and Saturday Morning cartoons to Anime, World Cinema, In Black & White and your Watchlist, plus Directors Cut and Type Cast, which run one director's or actor's films back to back.
+**The Library** has everything you own as posters: sort it by your own score, TMDB's, what's new or what you watched last, and search by title, director, actor or genre. Your score is in the corner; the heart is a favourite.
 
-![The Channels guide](docs/screenshots/channels.png)
+![Films in the Library](docs/screenshots/films.png)
+
+**Channels** are TV channels made from your own collection, always on, with a guide. There are 22 of them, from Action, Comedy and Saturday Morning cartoons to Anime, World Cinema, In Black & White and your Watchlist, plus Directors Cut and Type Cast, which run one director's or actor's films back to back. Put them in whatever order you like by changing a channel's number. Hover over anything to see what it is; a block of a few episodes shows which one's on now and what's after it.
+
+![The Channels guide, hovering over a run of Arrested Development](docs/screenshots/channels.png)
 
 **Recommendations** finds what's missing: the rest of a series or a collection you've started, and films and shows like the ones you rate highly. **REFRESH** works out a new lot.
 
 ![Recommendations](docs/screenshots/recs.png)
 
-Every film and show has its own page with the cast, what else you own of theirs, similar films you have, and season-by-season scores for a show.
+**A film's page** has the cast and what else you own of theirs, similar films you have, and the facts: release, budget, box office. Films not in English say what language they're in.
 
-| A film | A show |
-|---|---|
-| ![A film's page](docs/screenshots/film.png) | ![A show's page](docs/screenshots/show.png) |
+![A film's page](docs/screenshots/film.png)
 
-**Rate** works through what you haven't scored yet. The more you rate, the better everything else gets.
+**A show's page** has scores for every season and episode. Click an episode's name for its picture, plot, director and guest stars; click its code (S02E03) to say you're up to there.
+
+![A show's page, with an episode open](docs/screenshots/show.png)
+
+**Watch in order.** Some shows you dip into anywhere (Seinfeld, Always Sunny); others are one story (Arcane, Attack on Titan), where a random episode is the wrong thing to be offered. A show that's in order is only ever suggested at the episode you're up to, on Now, Home and the channels, and the purple arrow on its poster says so. Next Up guesses which kind a show is from its genre and how you've been watching it, and says *(guessed)* until you decide: press **WATCH IN ORDER** on the show's page to switch it on or off.
+
+**Rate** works through what you haven't scored yet, films or TV shows. The more you rate, the better everything else gets.
 
 ![The Rate page](docs/screenshots/rate.png)
+
+**Hall of Fame** is what you've rated, on shelves: your top 12, your top TV, and the best of every genre.
+
+![The Hall of Fame](docs/screenshots/fame.png)
+
+**Settings › Appearance** changes the look: Classic, Glass or Silver, three fonts, an accent colour, how strong the glass is, how much of the film's art shows behind the page, and how round the corners are.
+
+![Settings › Appearance](docs/screenshots/settings.png)
 
 ### On the phone
 

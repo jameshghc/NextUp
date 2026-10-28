@@ -17735,6 +17735,16 @@ body.android .gnowpic{height:84px}
   font-family:var(--display);font-weight:700;font-size:14px;cursor:pointer}
 .ratmode[aria-selected="true"]{background:var(--paper);color:#111}
 .ratmode #ratleft{font-family:var(--mono);font-weight:400;font-size:11px;opacity:.75}
+/* Films / TV shows and Refresh, in the header's row (2026-10-28): the
+   queue had a whole filter bar to itself, a third of the page before the
+   film. Refresh sits at the far end, quieter than the switch. */
+.ratkindbtn{background:none;border:0;border-radius:999px;padding:8px 16px;color:var(--muted);
+  font-family:var(--display);font-weight:700;font-size:14px;cursor:pointer}
+.ratkindbtn[aria-selected="true"]{background:rgba(255,255,255,.12);color:var(--paper)}
+.ratkindbtn:hover{color:var(--paper)}
+.ratrefresh{margin-left:auto;background:none;border:1px solid var(--line);border-radius:999px;padding:9px 18px;
+  color:var(--paper);font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;cursor:pointer}
+.ratrefresh:hover{border-color:var(--muted);background:var(--ink-2)}
 .famehead{margin:0 0 16px}
 .famehead h2{margin:0 0 4px;font-size:24px}
 .famehead p{margin:0;color:var(--muted)}
@@ -20793,20 +20803,20 @@ body.android #view-settings{overflow-x:hidden}
         <div class="ratswitch hidden" id="fameback">
           <button type="button" class="ratpill">‹ All shelves</button>
         </div>
+        <div class="ratswitch ratkind" id="ratkind" role="tablist" aria-label="What to rate">
+          <button type="button" class="ratkindbtn" data-kind="film" role="tab" aria-selected="true">Films</button>
+          <button type="button" class="ratkindbtn" data-kind="tv" role="tab">TV shows</button>
+        </div>
+        <select id="rate_kind" hidden>
+          <option value="film">Films</option>
+          <option value="tv">TV shows</option>
+        </select>
+        <button type="button" class="ratrefresh" id="rate_refresh" title="Pick a new set to rate">Refresh queue</button>
       </div>
       <div class="famehead" id="fametitle"></div>
     </div>
     <div id="view-fame"></div>
     <div id="view-rate">
-  <div class="filters">
-    <label class="f"><span>Queue</span>
-      <select id="rate_kind">
-        <option value="film">Films</option>
-        <option value="tv">TV shows</option>
-      </select>
-    </label>
-    <button class="spin" id="rate_refresh">Refresh queue</button>
-  </div>
   <div id="rate-out"><p class="empty">Loading…</p></div>
   <section>
     <div class="sechead">
@@ -25506,6 +25516,8 @@ function drawRatingsPlace(){
   if(ratMode === 'rate'){ fameTitle(null); $('#fameback').classList.add('hidden'); }
   $('#view-fame').classList.toggle('hidden', ratMode !== 'fame');
   $('#view-rate').classList.toggle('hidden', ratMode !== 'rate');
+  $('#ratkind').classList.toggle('hidden', ratMode !== 'rate');
+  $('#rate_refresh').classList.toggle('hidden', ratMode !== 'rate');
   if(ratMode === 'rate'){ staleRatings = false; loadRatings(); }
   else loadFame();
 }
@@ -25828,6 +25840,13 @@ function drawTopLists(){
 }
 
 $('#rate_kind').onchange = () => { queueIndex = 0; drawQueue(); };
+/* Films or TV shows, as the same kind of switch as Hall of Fame / Rate
+   beside it; the select stays as what the queue reads. */
+document.querySelectorAll('.ratkindbtn').forEach(b => b.onclick = () => {
+  document.querySelectorAll('.ratkindbtn').forEach(x => x.setAttribute('aria-selected', String(x === b)));
+  $('#rate_kind').value = b.dataset.kind;
+  $('#rate_kind').onchange();
+});
 $('#rate_refresh').onclick = () => loadRatings(true);
 
 /* ================= CHANNELS ================= */

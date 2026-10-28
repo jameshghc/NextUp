@@ -107,6 +107,10 @@ if WITH_PC:
                           stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=pc_env)
     n.CONFIG["pc_link"] = {"token": pc.stdout.readline().strip(), "pc": n.snapshot_device_name(),
                            "pc_id": "", "port": PC_PORT, "addresses": ["127.0.0.1"], "last_ip": None}
+    # Keep reading what the pretend PC prints after the token: left unread,
+    # its pipe filled after a minute or so and every call to it hung on a
+    # print until the phone's 30-second timeout said the PC was away.
+    threading.Thread(target=lambda: [None for _ in pc.stdout], daemon=True).start()
     print("pretend PC on %d: %s" % (PC_PORT, "up" if n.pc_link_check(force=True)["up"] else "NOT up"), flush=True)
 
 n.prepare_app()

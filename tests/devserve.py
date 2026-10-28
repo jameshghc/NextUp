@@ -39,7 +39,10 @@ def isolate(n, sandbox):
     n.CONFIG["sync_folder"] = ""
     # The channels in the order the code lists them, not the one you've
     # set in the real app: the tests count on knowing which is which.
-    n.CONFIG.pop("channel_order", None)
+    # NEXTUP_KEEP_CHANNEL_ORDER=1 keeps yours, for screenshots that should
+    # look like your own guide; the phone sandbox's pretend PC inherits it.
+    if not os.environ.get("NEXTUP_KEEP_CHANNEL_ORDER"):
+        n.CONFIG.pop("channel_order", None)
     if hasattr(n, "apply_channel_order"):
         n.apply_channel_order()
     with open(n.CONFIG_PATH, "w", encoding="utf-8") as fh:

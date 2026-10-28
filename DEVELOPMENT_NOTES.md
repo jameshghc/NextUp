@@ -38,6 +38,13 @@ default to it.
   frameless window on Windows), the Films tags (`FILM_TAGS`), Hall of Fame
   fit (`genre_fit`) and trophies (`fame_firsts`), History's two-minute bar
   (`HISTORY_MIN_SECONDS`), `real_sittings`, `set_up_to`.
+- Rate's queue controls live in `.ratrow` now: `#ratkind` (`.ratkindbtn`,
+  setting the hidden `#rate_kind` select the queue still reads) and
+  `.ratrefresh`, both hidden by `drawRatingsPlace` on the Hall of Fame.
+- `tests/phone_serve.py --with-pc` drains the pretend PC's stdout: unread,
+  the pipe filled and every call to it hung until the phone's 30s timeout.
+  `NEXTUP_KEEP_CHANNEL_ORDER=1` makes `devserve.isolate` keep your own
+  channel order, for screenshots (the README's are in docs/screenshots).
 
 ## 2026-10-27 — v0.2.4, Ratings in the Library: the Hall of Fame
 
