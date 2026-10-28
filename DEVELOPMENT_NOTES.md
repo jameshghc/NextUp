@@ -16,6 +16,17 @@ at the top.
 
 ---
 
+# Ports
+
+Next Up has **8770–8799**, all taken: 8770 the app (the PC binds exactly
+that; Android walks up to 19 past it when it's held), 8771–8778 the dev
+servers in .claude/launch.json, 8786–8799 the tests, 8790 the phone link.
+A new test or dev server goes in **8800–8899**, which is kept free for this.
+Prep (X:\Prep) has 8900–8919. Leave 8888 alone: Jupyter and plenty else
+default to it.
+
+---
+
 ## 2026-10-28 — v0.2.5, a solid title bar
 
 - `#titlebar` has the body's background layers with `background-attachment:
