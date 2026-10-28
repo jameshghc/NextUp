@@ -17583,6 +17583,8 @@ body.silver .rattop{background:linear-gradient(180deg,rgba(255,255,255,.035) 0,r
 #guidepop .gpsub{font-size:12.5px;color:var(--paper);opacity:.85;margin-top:2px}
 #guidepop .gptime{font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:5px;letter-spacing:.04em}
 #guidepop p{margin:8px 0 0;font-size:12.5px;line-height:1.45;color:var(--muted)}
+#guidepop .gpnext{margin-top:10px;padding-top:9px;border-top:1px solid rgba(255,255,255,.1);font-size:12.5px;color:var(--paper)}
+#guidepop .gpnext em{font-style:normal;font-family:var(--mono);font-size:10px;letter-spacing:.04em;color:var(--muted);margin-right:4px}
 .gphone{display:flex;gap:11px;align-items:stretch;padding:11px 0;border-bottom:1px solid var(--line);cursor:pointer}
 .gphone .gnum{width:30px;height:30px}
 .gpbody{flex:1;min-width:0}
@@ -25809,13 +25811,16 @@ function guidePop(){
   if(!pop){ pop = el('div', ''); pop.id = 'guidepop'; document.body.append(pop); }
   return pop;
 }
-function guideHover(node, p){
+/* opts.noPic: an On now card already shows the picture, so its hover card
+   is words only, and says what's on after (2026-10-28). */
+function guideHover(node, p, opts){
+  opts = opts || {};
   node.onmouseenter = () => {
     if(p.kind === 'live') return;
     const pop = guidePop();
     pop.innerHTML = '';
     const pic = p.still || p.art;
-    if(pic){ const i = el('img'); i.src = pic; i.alt = ''; pop.append(i); }
+    if(pic && !opts.noPic){ const i = el('img'); i.src = pic; i.alt = ''; pop.append(i); }
     const box = el('div', 'gptext');
     box.append(el('b', null, esc(p.title)));
     const line = p.kind === 'episodes'
@@ -25824,6 +25829,8 @@ function guideHover(node, p){
     if(line) box.append(el('div', 'gpsub', esc(line)));
     box.append(el('div', 'gptime', hhmm(p.t0) + '\u2013' + hhmm(p.t1) + (p.now ? '  \u00B7  ON NOW' : '')));
     if(p.plot) box.append(el('p', null, esc(p.plot) + (p.plot.length >= 320 ? '\u2026' : '')));
+    if(opts.next) box.append(el('div', 'gpnext', '<em>Next at ' + hhmm(opts.next.t0) + '</em> ' + esc(opts.next.title)
+      + (opts.next.sub ? ' \u00B7 ' + esc(opts.next.sub) : '')));
     pop.append(box);
     const r = node.getBoundingClientRect();
     pop.classList.add('show');
@@ -25879,7 +25886,7 @@ function drawGuide(data, fromPc){
       bar.append(fill); t.append(bar);
     }
     card.append(t);
-    if(p) guideHover(card, p);
+    if(p) guideHover(card, p, {noPic: true, next: (c.progs || []).find(x => x.t0 >= p.t1)});
     if(!fromPc) card.onclick = () => guideTune(c, t.querySelector('small'));
     else if(p && p.ident) card.onclick = async () => {
       const at = (p.offset || 0) + Math.round(Date.now() / 1000 - data.now);

@@ -305,7 +305,7 @@ check("programmes run nose to tail", all(a["t1"] == b["t0"] for c in _rows for a
 check("a film's hover card has its plot and picture; an episode's its own", any(p.get("plot") and p.get("still") for c in _rows for p in c["progs"]))
 check("every channel is films, tv, docs, kids, live or mixed", all(c["kind"] in ("film", "tv", "docs", "kids", "live", "mixed") for c in _g["channels"]))
 check("the page draws it, with the switch and the hover card", "function drawGuide(data, fromPc)" in page
-      and "[['all', 'Everything'], ['film', 'Films'], ['tv', 'TV']]" in page and "function guideHover(node, p)" in page
+      and "[['all', 'Everything'], ['film', 'Films'], ['tv', 'TV']]" in page and "function guideHover(node, p, opts)" in page and "{noPic: true, next:" in page
       and "'/api/pcguide'" in page)
 check("the folder's year is read from an episode's path", "def show_folder_year(conn, show_id):" in open(n.__file__, encoding="utf-8").read()
       and "function showFixForm(d)" in page and "'/api/show/fix'" in page)
