@@ -17538,17 +17538,17 @@ body.silver .rattop{background:linear-gradient(180deg,rgba(255,255,255,.035) 0,r
 .guidenow::-webkit-scrollbar{display:none}
 .gnow{padding:0;text-align:left;background:var(--ink-2);border:1px solid var(--line);border-radius:var(--r-card,12px);
   overflow:hidden;color:var(--paper);cursor:pointer}
-.gnow:hover{border-color:rgba(var(--accent-rgb),.6)}
+.gnow:hover{border-color:hsl(var(--h) 60% 55%)}
 .gnowpic{height:112px;background:#1b1b22 center/cover;position:relative}
 .gnowpic:after{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,0) 45%,rgba(0,0,0,.8))}
 .gch{position:absolute;left:9px;top:9px;z-index:1;font-family:var(--mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;
-  padding:3px 7px;border-radius:5px;background:rgba(6,5,9,.82);color:#fff;box-shadow:inset 3px 0 0 hsl(var(--h) 55% 55%);max-width:calc(100% - 18px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  padding:3px 7px;border-radius:5px;background:hsl(var(--h) 55% 38%);color:#fff;max-width:calc(100% - 18px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .glive{position:absolute;right:9px;top:9px;z-index:1;font-family:var(--mono);font-size:10px;padding:3px 6px;border-radius:5px;background:#e0424a;color:#fff}
 .gnowtxt{padding:9px 11px 11px}
 .gnowtxt b{display:block;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .gnowtxt small{display:block;font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .gbar{height:3px;background:rgba(255,255,255,.1);border-radius:2px;margin-top:8px}
-.gbar i{display:block;height:100%;border-radius:2px;background:var(--marigold)}
+.gbar i{display:block;height:100%;border-radius:2px;background:hsl(var(--h) 75% 62%)}
 .guidegrid{position:relative;border:1px solid var(--line);border-radius:var(--r-card,12px);overflow:hidden;background:var(--ink-2)}
 .grow{display:flex;height:58px;border-bottom:1px solid var(--line)}
 .grow:last-of-type{border-bottom:0}
@@ -17556,20 +17556,17 @@ body.silver .rattop{background:linear-gradient(180deg,rgba(255,255,255,.035) 0,r
   background:rgba(0,0,0,.18)}
 .gname b{font-size:13.5px;line-height:1.15}
 .gnum{font-family:var(--mono);font-size:12px;width:26px;height:26px;border-radius:7px;display:flex;align-items:center;justify-content:center;
-  background:hsl(var(--h) 45% 30%);color:#fff;flex:none}
+  background:hsl(var(--h) 55% 38%);color:#fff;flex:none}
 .glane{position:relative;flex:1;min-width:0}
 .gruler{height:34px}
 .gruler .gname{font-family:var(--mono);font-size:10.5px;color:var(--muted);letter-spacing:.08em}
 .gtick{position:absolute;top:0;bottom:0;border-left:1px solid var(--line);padding:9px 0 0 8px;font-family:var(--mono);font-size:11px;color:var(--muted)}
-/* The app's own greys, the channel's colour only as a stripe down the
-   left (and its number), and what's on now in your accent — a grid filled
-   with every channel's colour looked muddy (2026-10-28). */
-.gprog{position:absolute;top:5px;bottom:5px;border-radius:7px;padding:6px 10px 6px 11px;overflow:hidden;text-align:left;cursor:pointer;
-  background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.08);color:var(--paper);
-  box-shadow:inset 3px 0 0 hsl(var(--h) 55% 55%)}
-.gprog:hover{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.2)}
-.gprog.now{background:rgba(var(--accent-rgb),.16);border-color:rgba(var(--accent-rgb),.55)}
-.gprog.now:hover{background:rgba(var(--accent-rgb),.24)}
+/* Filled in the channel's own colour, deep enough for white text; what's
+   on now brighter, with a bright edge. */
+.gprog{position:absolute;top:5px;bottom:5px;border-radius:8px;padding:6px 10px;overflow:hidden;text-align:left;cursor:pointer;
+  background:hsl(var(--h) 38% 19%);border:1px solid hsl(var(--h) 42% 30%);color:var(--paper)}
+.gprog:hover{background:hsl(var(--h) 42% 24%);border-color:hsl(var(--h) 60% 55%)}
+.gprog.now{background:hsl(var(--h) 52% 28%);border-color:hsl(var(--h) 70% 62%)}
 .gprog b{display:block;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .gprog small{display:block;font-family:var(--mono);font-size:9.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
 .gnowline{position:absolute;top:0;bottom:0;width:2px;background:#ff5b5b;z-index:2;pointer-events:none;box-shadow:0 0 10px rgba(255,91,91,.6)}
@@ -25780,7 +25777,11 @@ async function loadPcChannels(){
    next two. Hover a programme on the PC for a card: an episode's picture
    and blurb, a film's backdrop and plot. Click what's on to tune in, part
    way, as before; a later one opens its page. channel_guide on the server. */
-const GUIDE_HUES = {film: 18, tv: 205, docs: 150, kids: 46, live: 355, mixed: 270};
+/* Each channel its own colour (2026-10-28: by kind, three film channels
+   in a row were all orange). Hand-picked, in channel order, so neighbours
+   are always far apart on the wheel and none is muddy. */
+const GUIDE_PALETTE = [262, 38, 158, 8, 205, 320, 88, 228, 22, 180, 290, 52, 140, 345, 195, 70, 275, 0, 120, 30, 240, 170];
+const guideHue = (data, c) => GUIDE_PALETTE[Math.max(0, (data.channels || []).indexOf(c)) % GUIDE_PALETTE.length];
 let guideFilter = 'all';
 try{ guideFilter = localStorage.getItem('nextup.chFilter') || 'all'; }catch(e){}
 const guideShows = (kind) => guideFilter === 'all' || kind === 'mixed' || kind === 'docs'
@@ -25860,7 +25861,7 @@ function drawGuide(data, fromPc){
     const p = nowOf(c);
     const card = el('button', 'gnow');
     card.type = 'button';
-    card.style.setProperty('--h', GUIDE_HUES[c.kind] || 270);
+    card.style.setProperty('--h', guideHue(data, c));
     const pic = el('div', 'gnowpic');
     if(p && (p.still || p.art)) pic.style.backgroundImage = 'url("' + (p.still || p.art) + '")';
     pic.append(el('span', 'gch', esc((c.num ? c.num + ' \u00B7 ' : '') + c.name)));
@@ -25892,7 +25893,7 @@ function drawGuide(data, fromPc){
     chans.forEach(c => {
       const p = nowOf(c);
       const r = el('div', 'gphone');
-      r.style.setProperty('--h', GUIDE_HUES[c.kind] || 270);
+      r.style.setProperty('--h', guideHue(data, c));
       r.append(el('span', 'gnum', esc(c.num || '')));
       const body = el('div', 'gpbody');
       body.append(el('div', 'gpname', esc(c.name)));
@@ -25946,7 +25947,7 @@ function drawGuide(data, fromPc){
   grid.append(ruler);
   chans.forEach(c => {
     const r = el('div', 'grow');
-    r.style.setProperty('--h', GUIDE_HUES[c.kind] || 270);
+    r.style.setProperty('--h', guideHue(data, c));
     const name = el('div', 'gname');
     name.append(el('span', 'gnum', esc(c.num || '')));
     name.append(el('b', null, esc(c.name)));
