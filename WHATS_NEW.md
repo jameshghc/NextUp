@@ -8,6 +8,8 @@ The short version, newest first. CHANGELOG.md has every detail.
 - Filter the guide by Everything, Films or TV, and it remembers which you picked.
 - Every channel has its own colour in the guide, so no two rows next to each other look the same, and what's on now lights up in it.
 - Hovering an On now card doesn't just show you the same picture again: it's the blurb and what's on next instead.
+- Channels' top is all one line now: Everything, Films, TV, Shuffle and Remote on the left, the main tabs on the right.
+- Remote opens the remote and now closes it too.
 - On the phone, Channels shows each channel's now and next two, with HERE and ON PC.
 - Shows can be put right like films: WRONG MATCH? on a show's page looks it up again and fetches its episodes fresh.
 - The year in a show's folder name now picks between shows with the same name, so One Piece is the anime, not the Netflix one.

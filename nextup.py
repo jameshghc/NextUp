@@ -19462,6 +19462,14 @@ label.f span b{color:var(--marigold);font-weight:400;font-family:var(--mono)}
 #playingbar .pbctl .iconbtn:disabled{opacity:.35;cursor:default}
 .chtop{display:flex;justify-content:flex-end;align-items:center;gap:8px;padding-top:4px}
 .chtop .guidefilter{margin:0 auto 0 0}
+/* On the PC the row lives in the top bar, on the tabs' line (2026-10-28: it
+   was a line of its own under them): Everything · Films · TV, then SHUFFLE
+   ALL and REMOTE beside it, the tabs on the right. The Library's own navs
+   step aside entirely while it's there rather than holding their width. */
+header.mast .chtop{padding:0;justify-content:flex-start;margin-right:auto;min-width:0}
+header.mast .chtop .guidefilter{margin:0 6px 0 0}
+header.mast:not(.onchannels) .chtop{display:none}
+header.mast.onchannels .subnav, header.mast.onchannels .libplaces{display:none}
 
 .fixform{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
 .fixform input{
@@ -21053,6 +21061,7 @@ function switchTo(view){
   stripShow();
   $('#libnav').classList.toggle('offview', view!=='library');
   $('#libplaces').classList.toggle('offview', view!=='library');
+  $('header.mast').classList.toggle('onchannels', view==='channels');
   if(view==='now' && staleNow){ staleNow = false; loadTonight(); }
   if(view==='library'){
     drawLibNav(); applyLibSection(); libScanTick();
@@ -25850,7 +25859,7 @@ function drawGuide(data, fromPc){
   const phone = document.body.classList.contains('android');
   /* Up in the row with SHUFFLE ALL and REMOTE, not a line of its own:
      the top of the page was mostly empty (2026-10-28). */
-  const top = $('#view-channels .chtop');
+  const top = $('.chtop');
   if(top) top.querySelectorAll('.guidefilter').forEach(x => x.remove());
   /* Everything / Films / TV. Mixed channels are on all three. */
   const sw = el('div', 'ratswitch guidefilter');
@@ -26786,15 +26795,20 @@ $('#savesubs').onclick = async () => {
    the whole point of a remote — mpv takes the foreground the moment it
    starts. Without pywebview (Edge app mode, or an ordinary browser tab) a
    popup is the best on offer and it can't be pinned on top. */
-async function openRemote(){
+/* toggle: the REMOTE buttons close it again if it's open (2026-10-28: it
+   only ever opened). */
+let remotePopup = null;
+async function openRemote(toggle){
   const bridge = window.pywebview && window.pywebview.api;
   if(bridge && bridge.open_remote){
-    try { await bridge.open_remote(); return; } catch(e){ /* fall through */ }
+    try { await bridge.open_remote(toggle === true); return; } catch(e){ /* fall through */ }
   }
-  window.open('/remote', 'nextup-remote',
+  if(toggle === true && remotePopup && !remotePopup.closed){ remotePopup.close(); remotePopup = null; return; }
+  remotePopup = window.open('/remote', 'nextup-remote',
               'width=330,height=730,menubar=no,toolbar=no,location=no,status=no');
 }
-$('#openremote').onclick = openRemote;
+$('#openremote').onclick = () => openRemote(true);
+if(!document.body.classList.contains('android')) $('header.mast').prepend($('#view-channels .chtop'));
 
 /* ---------- currently playing, shared across every tab ---------- */
 function renderPlaying(p, q, st){
@@ -26874,7 +26888,7 @@ function renderPlaying(p, q, st){
   bar.append(ctl);
   const remote = el('button','iconbtn remotebtn','REMOTE');
   remote.title = 'Channel, volume and preset buttons in a window of their own';
-  remote.onclick = openRemote;
+  remote.onclick = () => openRemote(true);
   bar.append(remote);
 }
 
@@ -29608,7 +29622,7 @@ def main():
                     if main is not None:
                         main.destroy()
 
-                def open_remote(self):
+                def open_remote(self, toggle=False):
                     """A second window for the remote, held above mpv.
 
                     on_top is the whole point: mpv takes the foreground the
@@ -29622,10 +29636,16 @@ def main():
                     exactly the case for a call arriving from javascript. The
                     backend drops a window from webview.windows as it closes,
                     so anything still in that list is genuinely open.
+
+                    toggle: the REMOTE buttons close it if it's open, rather
+                    than only ever bringing it back (2026-10-28).
                     """
                     for win in webview.windows:
                         if win.title == REMOTE_TITLE:
                             try:
+                                if toggle:
+                                    win.destroy()
+                                    return False
                                 win.restore()   # already open — bring it back
                                 win.show()
                                 return True
