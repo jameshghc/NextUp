@@ -6,6 +6,7 @@ The short version, newest first. CHANGELOG.md has every detail.
 
 - Channels is now a proper TV guide. What's on now sits up top as cards with progress bars, then a grid of every channel across the next few hours with a red line for now. Hover anything to see what it is, with the episode's own picture and blurb.
 - Filter the guide by Everything, Films or TV, and it remembers which you picked.
+- The guide's colours are calmer: dark grey programmes with a thin coloured stripe per channel, and what's on now lit in your accent colour.
 - On the phone, Channels shows each channel's now and next two, with HERE and ON PC.
 - Shows can be put right like films: WRONG MATCH? on a show's page looks it up again and fetches its episodes fresh.
 - The year in a show's folder name now picks between shows with the same name, so One Piece is the anime, not the Netflix one.

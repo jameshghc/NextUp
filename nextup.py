@@ -17533,21 +17533,22 @@ body.silver .rattop{background:linear-gradient(180deg,rgba(255,255,255,.035) 0,r
 /* ---- the Channels guide ---- */
 .guidefilter{margin:4px 0 4px}
 .guidehead{margin:18px 0 10px;font-size:20px}
+#channels-out > .guidehead:first-of-type{margin-top:10px}
 .guidenow{display:grid;grid-auto-flow:column;grid-auto-columns:200px;gap:12px;overflow-x:auto;scrollbar-width:none;padding-bottom:4px}
 .guidenow::-webkit-scrollbar{display:none}
 .gnow{padding:0;text-align:left;background:var(--ink-2);border:1px solid var(--line);border-radius:var(--r-card,12px);
   overflow:hidden;color:var(--paper);cursor:pointer}
-.gnow:hover{border-color:hsl(var(--h) 55% 50%)}
+.gnow:hover{border-color:rgba(var(--accent-rgb),.6)}
 .gnowpic{height:112px;background:#1b1b22 center/cover;position:relative}
 .gnowpic:after{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,0) 45%,rgba(0,0,0,.8))}
 .gch{position:absolute;left:9px;top:9px;z-index:1;font-family:var(--mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;
-  padding:3px 7px;border-radius:5px;background:hsl(var(--h) 55% 36%);color:#fff;max-width:calc(100% - 18px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  padding:3px 7px;border-radius:5px;background:rgba(6,5,9,.82);color:#fff;box-shadow:inset 3px 0 0 hsl(var(--h) 55% 55%);max-width:calc(100% - 18px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .glive{position:absolute;right:9px;top:9px;z-index:1;font-family:var(--mono);font-size:10px;padding:3px 6px;border-radius:5px;background:#e0424a;color:#fff}
 .gnowtxt{padding:9px 11px 11px}
 .gnowtxt b{display:block;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .gnowtxt small{display:block;font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .gbar{height:3px;background:rgba(255,255,255,.1);border-radius:2px;margin-top:8px}
-.gbar i{display:block;height:100%;border-radius:2px;background:hsl(var(--h) 70% 60%)}
+.gbar i{display:block;height:100%;border-radius:2px;background:var(--marigold)}
 .guidegrid{position:relative;border:1px solid var(--line);border-radius:var(--r-card,12px);overflow:hidden;background:var(--ink-2)}
 .grow{display:flex;height:58px;border-bottom:1px solid var(--line)}
 .grow:last-of-type{border-bottom:0}
@@ -17555,15 +17556,20 @@ body.silver .rattop{background:linear-gradient(180deg,rgba(255,255,255,.035) 0,r
   background:rgba(0,0,0,.18)}
 .gname b{font-size:13.5px;line-height:1.15}
 .gnum{font-family:var(--mono);font-size:12px;width:26px;height:26px;border-radius:7px;display:flex;align-items:center;justify-content:center;
-  background:hsl(var(--h) 55% 32%);color:#fff;flex:none}
+  background:hsl(var(--h) 45% 30%);color:#fff;flex:none}
 .glane{position:relative;flex:1;min-width:0}
 .gruler{height:34px}
 .gruler .gname{font-family:var(--mono);font-size:10.5px;color:var(--muted);letter-spacing:.08em}
 .gtick{position:absolute;top:0;bottom:0;border-left:1px solid var(--line);padding:9px 0 0 8px;font-family:var(--mono);font-size:11px;color:var(--muted)}
-.gprog{position:absolute;top:5px;bottom:5px;border-radius:8px;padding:6px 10px;overflow:hidden;text-align:left;cursor:pointer;
-  background:hsl(var(--h) 22% 16%);border:1px solid hsl(var(--h) 30% 26%);color:var(--paper)}
-.gprog:hover{border-color:hsl(var(--h) 60% 55%)}
-.gprog.now{background:hsl(var(--h) 40% 22%);border-color:hsl(var(--h) 55% 45%)}
+/* The app's own greys, the channel's colour only as a stripe down the
+   left (and its number), and what's on now in your accent — a grid filled
+   with every channel's colour looked muddy (2026-10-28). */
+.gprog{position:absolute;top:5px;bottom:5px;border-radius:7px;padding:6px 10px 6px 11px;overflow:hidden;text-align:left;cursor:pointer;
+  background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.08);color:var(--paper);
+  box-shadow:inset 3px 0 0 hsl(var(--h) 55% 55%)}
+.gprog:hover{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.2)}
+.gprog.now{background:rgba(var(--accent-rgb),.16);border-color:rgba(var(--accent-rgb),.55)}
+.gprog.now:hover{background:rgba(var(--accent-rgb),.24)}
 .gprog b{display:block;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .gprog small{display:block;font-family:var(--mono);font-size:9.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
 .gnowline{position:absolute;top:0;bottom:0;width:2px;background:#ff5b5b;z-index:2;pointer-events:none;box-shadow:0 0 10px rgba(255,91,91,.6)}
@@ -19452,7 +19458,8 @@ label.f span b{color:var(--marigold);font-weight:400;font-family:var(--mono)}
 #playingbar .pbctl{flex:none;display:flex;gap:6px;align-items:center}
 #playingbar .pbctl .iconbtn{min-width:38px;padding:6px 10px;font-size:13px}
 #playingbar .pbctl .iconbtn:disabled{opacity:.35;cursor:default}
-.chtop{display:flex;justify-content:flex-end;gap:8px;padding-top:4px}
+.chtop{display:flex;justify-content:flex-end;align-items:center;gap:8px;padding-top:4px}
+.chtop .guidefilter{margin:0 auto 0 0}
 
 .fixform{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
 .fixform input{
@@ -25830,6 +25837,10 @@ function drawGuide(data, fromPc){
   out.innerHTML = '';
   if(fromPc) out.append(el('div', 'nowsource', 'From the PC\u2019s channels'));
   const phone = document.body.classList.contains('android');
+  /* Up in the row with SHUFFLE ALL and REMOTE, not a line of its own:
+     the top of the page was mostly empty (2026-10-28). */
+  const top = $('#view-channels .chtop');
+  if(top) top.querySelectorAll('.guidefilter').forEach(x => x.remove());
   /* Everything / Films / TV. Mixed channels are on all three. */
   const sw = el('div', 'ratswitch guidefilter');
   [['all', 'Everything'], ['film', 'Films'], ['tv', 'TV']].forEach(([k, label]) => {
@@ -25839,7 +25850,7 @@ function drawGuide(data, fromPc){
     b.onclick = () => { guideFilter = k; try{ localStorage.setItem('nextup.chFilter', k); }catch(e){} drawGuide(data, fromPc); };
     sw.append(b);
   });
-  out.append(sw);
+  if(top) top.prepend(sw); else out.append(sw);
   const chans = (data.channels || []).filter(c => guideShows(c.kind));
   const nowOf = c => (c.progs || []).find(p => p.now);
 
