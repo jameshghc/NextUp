@@ -281,7 +281,19 @@ check("the right year still picks the remake", (n.tmdb_find_movie("Dune", "2021"
 check("accents and the like still match", (n.tmdb_find_movie("Amelie", "2001") or {}).get("id") == 5
       and (n.tmdb_find_movie("Heat", "1995") or {}).get("id") == 6)
 check("nothing at all is still nothing", n.tmdb_find_movie("Zzzz", "1999") is None)
+# 2026-10-28: shows too — "One Piece (1999)" had become the 2023 Netflix series.
+_tv = {("One Piece", 1999): [{"id": 37854, "name": "One Piece", "first_air_date": "1999-10-20"}],
+       ("One Piece", None): [{"id": 111110, "name": "ONE PIECE", "first_air_date": "2023-08-31"},
+                             {"id": 37854, "name": "One Piece", "first_air_date": "1999-10-20"}],
+       ("Arcane", None): [{"id": 94605, "name": "Arcane", "first_air_date": "2021-11-06"}]}
+n.tmdb = lambda path, params=None, fresh=False: {"results": _tv.get((params["query"], params.get("first_air_date_year")), [])}
+check("a show's year in its folder picks the right one of the same name",
+      (n.tmdb_find_show("One Piece", 1999) or {}).get("id") == 37854
+      and (n.tmdb_find_show("One Piece", None) or {}).get("id") == 111110
+      and (n.tmdb_find_show("Arcane", None) or {}).get("id") == 94605)
 n.tmdb = _real_tmdb
+check("the folder's year is read from an episode's path", "def show_folder_year(conn, show_id):" in open(n.__file__, encoding="utf-8").read()
+      and "function showFixForm(d)" in page and "'/api/show/fix'" in page)
 check("and shows it", "if(r && r.line){ why.textContent = r.line; return; }" in page
       and "p.line || p.why" in page)
 

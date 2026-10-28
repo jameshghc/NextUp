@@ -309,6 +309,27 @@ check("one already right is left alone", got[a3] == ("Charlie Story", "charlie p
 check("a film's part takes the film's details and keeps its part", got[a4] == ("The Big Film (Part 1)", "film plot"), got[a4])
 check("a lone odd file name doesn't win on its own (Shogun's 'Crimson Sky')", got[a5] == ("Echo Story", "echo plot"), got[a5])
 
+# 2026-10-28: episodes with no details yet (a show just re-matched), numbered
+# straight through as anime files are — One Piece's S01E830 of a 61-episode
+# TMDB season 1: by their title if it's there, else by the number.
+_tm2 = {"/tv/990002": {"seasons": [{"season_number": 1}, {"season_number": 2}]},
+        "/tv/990002/season/1": {"episodes": [{"season_number": 1, "episode_number": i, "name": "One %d" % i,
+                                              "overview": "p1-%d" % i} for i in (1, 2, 3)]},
+        "/tv/990002/season/2": {"episodes": [{"season_number": 2, "episode_number": i, "name": "Two %d" % i,
+                                              "overview": "p2-%d" % i} for i in (1, 2, 3)]}}
+n.tmdb = lambda path, params=None, fresh=False: _tm2.get(path, {})
+k = n.db()
+sh2 = k.execute("INSERT INTO shows (name,title,tmdb_id) VALUES ('straight','Straight Show','990002')").lastrowid
+b5 = k.execute("INSERT INTO episodes (path,show_id,season,episode) VALUES ('X:/st/S01E05 Two 2 - Straight Show.mkv',?,1,5)", (sh2,)).lastrowid
+b6 = k.execute("INSERT INTO episodes (path,show_id,season,episode) VALUES ('X:/st/S01E06 Worded Otherwise - Straight Show.mkv',?,1,6)", (sh2,)).lastrowid
+k.commit()
+n.reconcile_episode_order(k, show_ids=[sh2])
+g2 = {r["id"]: (r["title"], r["plot"]) for r in k.execute("SELECT id,title,plot FROM episodes WHERE show_id=?", (sh2,))}
+k.close()
+n.tmdb = _real
+check("no details yet: its own title finds it", g2[b5] == ("Two 2", "p2-2"), g2[b5])
+check("worded otherwise: the number counted straight through", g2[b6] == ("Two 3", "p2-3"), g2[b6])
+
 # --- 2026-10-27: Watch in order ------------------------------------------------------
 def _sh(genres, kws=()):
     return {"genre": list(genres), "keywords": list(kws)}

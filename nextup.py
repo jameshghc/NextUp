@@ -3432,41 +3432,8 @@ def enrich_local(conn, progress=None):
     for index, row in enumerate(shows_pending):
         if progress:
             progress(index + 1, len(shows_pending), "looking up %s" % row["title"])
-        found = tmdb("/search/tv", {"query": row["title"]}) or {}
-        results = found.get("results") or []
-        if not results:
-            conn.execute("UPDATE shows SET matched=-1 WHERE id=?", (row["id"],))
-            continue
-        best = results[0]
-        detail = tmdb("/tv/%s" % best["id"], {"append_to_response": "credits,keywords"}) or {}
-        conn.execute("UPDATE shows SET keywords=? WHERE id=?",
-                     (as_text(keyword_names(detail)), row["id"]))
-        conn.execute(
-            "UPDATE shows SET tmdb_id=?,title=?,year=?,genres=?,plot=?,poster=?,"
-            "tmdb_rating=?,country=?,cast_names=?,creators=?,backdrop=?,"
-            "cast_profiles=?,creator_profiles=?,status=?,networks=?,first_air=?,"
-            "seasons_count=?,cast_ids=?,creator_ids=?,matched=1 WHERE id=?",
-            (str(best["id"]), detail.get("name") or row["title"],
-             int((detail.get("first_air_date") or "0000")[:4]) or None,
-             as_text([g["name"] for g in detail.get("genres") or []]),
-             (detail.get("overview") or "")[:1200],
-             POSTER + detail["poster_path"] if detail.get("poster_path") else None,
-             detail.get("vote_average") or 0,
-             as_text(detail.get("origin_country") or []),
-             as_text(cast_names(detail)),
-             as_text([c.get("name") for c in detail.get("created_by") or []]),
-             BACKDROP + detail["backdrop_path"] if detail.get("backdrop_path") else None,
-             as_text(cast_photos(detail)),
-             as_text([(PROFILE + c["profile_path"] if c.get("profile_path") else "")
-                      for c in detail.get("created_by") or []]),
-             detail.get("status") or "",
-             as_text([n.get("name") for n in detail.get("networks") or []][:3]),
-             detail.get("first_air_date") or "",
-             detail.get("number_of_seasons") or 0,
-             as_text(cast_ids(detail)),
-             as_text([str(c.get("id") or "") for c in detail.get("created_by") or []]),
-             row["id"]))
-        done += 1
+        if apply_show_match(conn, row["id"], row["title"], show_folder_year(conn, row["id"])):
+            done += 1
     conn.commit()
     done += backfill_details(conn, progress)
     done += backfill_show_details(conn, progress)
@@ -3596,9 +3563,9 @@ def reconcile_episode_order(conn, progress=None, show_ids=None):
         eps = conn.execute("SELECT id, season, episode, title, path FROM episodes WHERE show_id=?",
                            (show["id"],)).fetchall()
         files = {e["id"]: _file_episode_title(e["path"], show["title"]) for e in eps}
-        odd = [e for e in eps if len(_ep_key(files[e["id"]])) >= 4
+        odd = [e for e in eps if (not (e["title"] or "").strip()) or (len(_ep_key(files[e["id"]])) >= 4
                and not _same_title(_ep_key(files[e["id"]]), _ep_key(e["title"]))
-               and not _same_title(_ep_key_bare(files[e["id"]]), _ep_key_bare(e["title"]))]
+               and not _same_title(_ep_key_bare(files[e["id"]]), _ep_key_bare(e["title"])))]
         if not odd:
             continue
         # Every episode TMDB has of the show, specials too.
@@ -3616,8 +3583,25 @@ def reconcile_episode_order(conn, progress=None, show_ids=None):
         # itself out of place (a reshuffled order), or what's stored now is
         # plainly another of these files' episode.
         slots = {(x["season"], x["episode"]) for x in odd}
+        # Numbered straight through, as anime files often are (One Piece's
+        # S01E830): TMDB's own seasons, end to end, specials left out.
+        straight = sorted((i for i in every if (i.get("season_number") or 0) > 0),
+                          key=lambda i: (i.get("season_number") or 0, i.get("episode_number") or 0))
         for e in odd:
             displaced = _ep_key(e["title"]) in claimed
+            empty = not (e["title"] or "").strip()
+
+            def by_number():
+                # The number, counted straight through, when TMDB's season
+                # hasn't got that episode at all (S01E830 of 61).
+                if e["season"] == 1 and 0 < e["episode"] <= len(straight) and not any(
+                        i.get("season_number") == 1 and i.get("episode_number") == e["episode"] for i in every):
+                    _write_episode(conn, e["id"], straight[e["episode"] - 1], e["episode"])
+                    return 1
+                return 0
+            if empty and not _ep_key(files[e["id"]]):
+                changed += by_number()          # no title in the file to go by
+                continue
             want = _ep_key(files[e["id"]])
             # Exactly that title first: "Anthology of Interest II" is not I.
             hits = ([i for i in every if _ep_key(i.get("name")) == want]
@@ -3634,10 +3618,15 @@ def reconcile_episode_order(conn, progress=None, show_ids=None):
             if len(hits) == 1 and part and not _PART.search(hits[0].get("name") or "") and not title:
                 # Its part of a film: the film's name, and which part.
                 title = "%s (%s)" % (hits[0].get("name"), part.group(0).strip(" (,:)").capitalize())
+            # An episode with no details yet has nothing to lose: one exact
+            # match by its own title is enough.
             if len(hits) == 1 and _ep_key(title or hits[0].get("name")) != _ep_key(e["title"]) and (
-                    displaced or (hits[0].get("season_number"), hits[0].get("episode_number")) in slots):
+                    empty or displaced or (hits[0].get("season_number"), hits[0].get("episode_number")) in slots):
                 _write_episode(conn, e["id"], hits[0], e["episode"], title=title)
                 changed += 1
+            elif empty and not hits:
+                # Its title is worded differently at TMDB: the number.
+                changed += by_number()
             elif len(hits) != 1 and displaced:
                 # Nothing of that name at TMDB, but what's stored is plainly
                 # another of these files' episode: its own name, and no
@@ -3972,6 +3961,115 @@ def _title_key(text):
     text = unicodedata.normalize("NFKD", text or "").encode("ascii", "ignore").decode().lower()
     text = re.sub(r"^(the|a|an)\s+", "", text.replace("&", "and"))
     return re.sub(r"[^a-z0-9]+", "", text)
+
+
+def tmdb_find_show(title, year=None):
+    """The show a folder name means. TMDB's first answer was taken as it
+    came, and the year in the folder was never asked about: "One Piece
+    (1999)" became the 2023 Netflix series rather than the anime (found
+    2026-10-28). As tmdb_find_movie: the exact title wins, and the year
+    decides between shows of the same name."""
+    params = {"query": title}
+    if year:
+        params["first_air_date_year"] = year
+    results = (tmdb("/search/tv", params) or {}).get("results") or []
+    if year:
+        more = (tmdb("/search/tv", {"query": title}) or {}).get("results") or []
+        seen = {r.get("id") for r in results}
+        results = results + [r for r in more if r.get("id") not in seen]
+    if not results:
+        return None
+    want = _title_key(title)
+
+    def score(pair):
+        at, r = pair
+        same = want and want in (_title_key(r.get("name")), _title_key(r.get("original_name")))
+        sc = 10 if same else 0
+        try:
+            gap = abs(int((r.get("first_air_date") or "")[:4]) - int(year))
+            sc += max(0, 3 - gap) * 2
+        except (TypeError, ValueError):
+            pass
+        return (sc, -at)
+    return max(enumerate(results), key=score)[1]
+
+
+def show_folder_year(conn, show_id):
+    """The year in the show's folder name, "One Piece (1999)", or None."""
+    row = conn.execute("SELECT path FROM episodes WHERE show_id=? LIMIT 1", (show_id,)).fetchone()
+    if not row:
+        return None
+    for part in reversed(re.split(r"[\\/]", row["path"] or "")[:-1]):
+        m = re.search(r"\((19\d\d|20\d\d)\)", part)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def apply_show_match(conn, show_id, title, year=None):
+    """Search TMDB for the show and write what it finds onto its row. Shared
+    by the scan and a correction from the show's page (WRONG MATCH?), so a
+    fix behaves exactly like a fresh match."""
+    best = tmdb_find_show(title, year)
+    if not best:
+        conn.execute("UPDATE shows SET matched=-1 WHERE id=?", (show_id,))
+        return False
+    detail = tmdb("/tv/%s" % best["id"], {"append_to_response": "credits,keywords"}) or {}
+    conn.execute("UPDATE shows SET keywords=? WHERE id=?",
+                 (as_text(keyword_names(detail)), show_id))
+    conn.execute(
+        "UPDATE shows SET tmdb_id=?,title=?,year=?,genres=?,plot=?,poster=?,"
+        "tmdb_rating=?,country=?,cast_names=?,creators=?,backdrop=?,"
+        "cast_profiles=?,creator_profiles=?,status=?,networks=?,first_air=?,"
+        "seasons_count=?,cast_ids=?,creator_ids=?,matched=1 WHERE id=?",
+        (str(best["id"]), detail.get("name") or title,
+         int((detail.get("first_air_date") or "0000")[:4]) or None,
+         as_text([g["name"] for g in detail.get("genres") or []]),
+         (detail.get("overview") or "")[:1200],
+         POSTER + detail["poster_path"] if detail.get("poster_path") else None,
+         detail.get("vote_average") or 0,
+         as_text(detail.get("origin_country") or []),
+         as_text(cast_names(detail)),
+         as_text([c.get("name") for c in detail.get("created_by") or []]),
+         BACKDROP + detail["backdrop_path"] if detail.get("backdrop_path") else None,
+         as_text(cast_photos(detail)),
+         as_text([(PROFILE + c["profile_path"] if c.get("profile_path") else "")
+                  for c in detail.get("created_by") or []]),
+         detail.get("status") or "",
+         as_text([n.get("name") for n in detail.get("networks") or []][:3]),
+         detail.get("first_air_date") or "",
+         detail.get("number_of_seasons") or 0,
+         as_text(cast_ids(detail)),
+         as_text([str(c.get("id") or "") for c in detail.get("created_by") or []]),
+         show_id))
+    return True
+
+
+def rematch_show(show_id, title, year=None):
+    """WRONG MATCH? on a show's page: match it again under the title and
+    year given, and fetch its episodes' details afresh for the new show."""
+    conn = db()
+    try:
+        before = conn.execute("SELECT tmdb_id FROM shows WHERE id=?", (show_id,)).fetchone()
+        if not apply_show_match(conn, show_id, title, year):
+            conn.commit()
+            return {"ok": True, "matched": False}
+        after = conn.execute("SELECT tmdb_id FROM shows WHERE id=?", (show_id,)).fetchone()
+        if not before or before["tmdb_id"] != after["tmdb_id"]:
+            conn.execute("UPDATE episodes SET title=NULL, plot=NULL, still=NULL, runtime=NULL,"
+                         " tmdb_rating=NULL, tmdb_votes=NULL, air_date=NULL, directors=NULL,"
+                         " writers=NULL, guests=NULL WHERE show_id=?", (show_id,))
+        conn.commit()
+        try:
+            enrich_episode_titles(conn)
+            reconcile_episode_order(conn, show_ids=[show_id])
+        except Exception:
+            log_problem("episode details after a show fix")
+        conn.commit()
+    finally:
+        conn.close()
+    LOCAL.loaded_at = 0
+    return {"ok": True, "matched": True}
 
 
 def tmdb_find_movie(title, year):
@@ -16699,6 +16797,15 @@ class Handler(BaseHTTPRequestHandler):
                 LOCAL.loaded_at = 0
                 return self.send_json({"ok": True})
 
+            if route == "/api/show/fix":
+                show_id = int(data["id"])
+                title = (data.get("title") or "").strip()
+                if not title:
+                    raise AppError("Give it a title to search for.")
+                year = data.get("year")
+                year = int(year) if str(year or "").strip() else None
+                return self.send_json(rematch_show(show_id, title, year))
+
             if route == "/api/override":
                 movie_id = int(data["id"])
                 title = (data.get("title") or "").strip()
@@ -23887,6 +23994,7 @@ async function openShow(id, pcTmdb, atSeason){
   };
   col.append(fav);
   col.append(linearToggle(d));
+  col.append(showFixForm(d));
   }
   if(d.facts && d.facts.length) col.append(factStrip(d.facts));
   body.append(col);
@@ -23905,6 +24013,35 @@ async function openShow(id, pcTmdb, atSeason){
     eps.append(seasonBrowser(d, seasons, atSeason));
     body.append(eps);
   }
+}
+
+/* WRONG MATCH? for a show (2026-10-28: One Piece had come out as the
+   Netflix series, not the anime): the title and the year to look for. */
+function showFixForm(d){
+  const wrap = el('div', 'showfix');
+  const toggle = el('button', 'iconbtn', 'WRONG MATCH?');
+  toggle.type = 'button';
+  toggle.style.marginTop = '8px';
+  const form = el('div', 'fixform hidden');
+  const t = el('input'); t.className = 'fixtitle'; t.placeholder = 'Correct title'; t.value = d.title || '';
+  const y = el('input'); y.className = 'fixyear'; y.placeholder = 'Year it started';
+  const go = el('button', 'iconbtn', 'LOOK UP');
+  const msg = el('div', 'msg');
+  form.append(t, y, go, msg);
+  toggle.onclick = () => { form.classList.toggle('hidden'); if(!form.classList.contains('hidden')) y.focus(); };
+  go.onclick = async () => {
+    if(!t.value.trim()){ msg.textContent = 'Give it a title first.'; return; }
+    go.disabled = true; msg.textContent = 'Looking\u2026';
+    const r = await post('/api/show/fix', {id: d.id, title: t.value.trim(), year: y.value.trim()});
+    go.disabled = false;
+    if(!r || r.error){ msg.textContent = (r && r.error) || 'That didn\u2019t work.'; return; }
+    if(!r.matched){ msg.textContent = 'TMDB has nothing under that.'; return; }
+    msg.textContent = 'Found it \u2014 refreshing\u2026';
+    libraryChanged(); loadLibrary();
+    setTimeout(() => { const sh = wrap.closest('.sheet'); if(sh) sh.remove(); openShow(d.id); }, 700);
+  };
+  wrap.append(toggle, form);
+  return wrap;
 }
 
 /* Watch in order: a show that's one story is only ever suggested at the

@@ -5,6 +5,8 @@ What changed in Next Up, version by version, newest first. Version numbers start
 ## 0.2.5 — 2026-10-28
 
 - Fixed: the bar along the top of the window was see-through, so a details page scrolled up under it showed its pictures behind the name and the counts. It wears the page's own background now, looking just as it did, but solid.
+- Shows can be put right like films: **WRONG MATCH?** on a show's page looks it up again under the title and the year it started, and fetches its episodes afresh. And a show's year in its folder name now decides between shows of the same name — "One Piece (1999)" had come out as the 2023 Netflix series rather than the anime.
+- Episodes numbered straight through, as anime often are (One Piece's S01E830, where TMDB's season 1 has 61), find their details by their title, or failing that by their number counted through TMDB's seasons.
 - Clicking an episode's code to say "I'm up to here" no longer flashes the screen: the season list updates where it is instead of the show's page closing and opening again.
 
 ## 0.2.4 — 2026-10-27
