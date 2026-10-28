@@ -369,5 +369,35 @@ n.CONFIG["channel_order"] = []
 n.apply_channel_order()
 check("and the page can change it", "function guideNumber(c)" in page and "'/api/channels/order'" in page)
 
+# 2026-10-28: a show matched before its folder's year counted is looked at again.
+import sqlite3 as _sq
+_c = _sq.connect(":memory:"); _c.row_factory = _sq.Row
+_c.execute("CREATE TABLE shows (id INTEGER, name TEXT, title TEXT, year INTEGER, tmdb_id TEXT, matched INTEGER)")
+_c.execute("CREATE TABLE episodes (show_id INTEGER, path TEXT, title TEXT, plot TEXT, still TEXT, runtime INTEGER,"
+           " tmdb_rating REAL, tmdb_votes INTEGER, air_date TEXT, directors TEXT, writers TEXT, guests TEXT)")
+for _row in [(1, "one piece", "ONE PIECE", 2023, "111110", 1), (2, "star trek tng", "Star Trek: TNG", 1987, "655", 1),
+             (3, "arcane", "Arcane", 2021, "94605", 1)]:
+    _c.execute("INSERT INTO shows VALUES (?,?,?,?,?,?)", _row)
+for _sid, _path in [(1, r"E:\TV\One Piece (1999)\S01E001 x.mkv"), (2, r"E:\TV\Star Trek TNG (1990)\S01E01 x.mp4"),
+                    (3, r"E:\TV\Arcane (2021)\S01E01 x.mkv")]:
+    _c.execute("INSERT INTO episodes (show_id, path, title) VALUES (?,?,'old')", (_sid, _path))
+_found = {("one piece", 1999): {"id": 37854, "first_air_date": "1999-10-20"},
+          ("star trek tng", 1990): {"id": 655, "first_air_date": "1987-09-28"}}
+_asked, _real_find, _real_apply = [], n.tmdb_find_show, n.apply_show_match
+n.tmdb_find_show = lambda title, year=None: _found.get((title, year))
+def _fake_apply(conn, show_id, title, year=None):
+    _asked.append((show_id, year))
+    conn.execute("UPDATE shows SET tmdb_id='37854', year=1999 WHERE id=?", (show_id,))
+    return True
+n.apply_show_match = _fake_apply
+_moved = n.recheck_show_years(_c)
+n.tmdb_find_show, n.apply_show_match = _real_find, _real_apply
+check("a show whose folder's year disagrees with its match is matched again under that year",
+      _moved == 1 and _asked == [(1, 1999)]
+      and _c.execute("SELECT title FROM episodes WHERE show_id=1").fetchone()[0] is None)
+check("one TMDB can't place better, or that already agrees, is left as it was",
+      _c.execute("SELECT title FROM episodes WHERE show_id=2").fetchone()[0] == "old"
+      and _c.execute("SELECT tmdb_id FROM shows WHERE id=3").fetchone()[0] == "94605")
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

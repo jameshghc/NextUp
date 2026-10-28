@@ -3474,6 +3474,7 @@ def enrich_local(conn, progress=None):
         if apply_show_match(conn, row["id"], row["title"], show_folder_year(conn, row["id"])):
             done += 1
     conn.commit()
+    done += recheck_show_years(conn, progress)
     done += backfill_details(conn, progress)
     done += backfill_show_details(conn, progress)
     done += enrich_episode_titles(conn, progress)
@@ -4055,6 +4056,39 @@ def show_folder_year(conn, show_id):
     return None
 
 
+def clear_episode_details(conn, show_id):
+    """Episode titles and the rest fetched for a show, wiped so they're
+    fetched again for the show it's now matched to."""
+    conn.execute("UPDATE episodes SET title=NULL, plot=NULL, still=NULL, runtime=NULL,"
+                 " tmdb_rating=NULL, tmdb_votes=NULL, air_date=NULL, directors=NULL,"
+                 " writers=NULL, guests=NULL WHERE show_id=?", (show_id,))
+
+
+def recheck_show_years(conn, progress=None):
+    """A show matched before its folder's year counted ("One Piece (1999)"
+    stayed the 2023 Netflix series, 2026-10-28) is looked up again when the
+    folder's year and the match's are more than a year apart. It moves only
+    if TMDB has a show of that name from the folder's year, so one it can't
+    place better is left as it was, and asked about again only by a scan."""
+    moved = 0
+    rows = conn.execute("SELECT id, name, title, year, tmdb_id FROM shows WHERE matched=1").fetchall()
+    for row in rows:
+        folder = show_folder_year(conn, row["id"])
+        if not folder or not row["year"] or abs(folder - row["year"]) <= 1:
+            continue
+        best = tmdb_find_show(row["name"] or row["title"], folder)
+        aired = int(((best or {}).get("first_air_date") or "0000")[:4]) or None
+        if not best or str(best["id"]) == str(row["tmdb_id"]) or not aired or abs(aired - folder) > 1:
+            continue
+        if progress:
+            progress(1, 1, "matching %s again, as the %d one" % (row["title"], folder))
+        if apply_show_match(conn, row["id"], row["name"] or row["title"], folder):
+            clear_episode_details(conn, row["id"])
+            moved += 1
+    conn.commit()
+    return moved
+
+
 def apply_show_match(conn, show_id, title, year=None):
     """Search TMDB for the show and write what it finds onto its row. Shared
     by the scan and a correction from the show's page (WRONG MATCH?), so a
@@ -4105,9 +4139,7 @@ def rematch_show(show_id, title, year=None):
             return {"ok": True, "matched": False}
         after = conn.execute("SELECT tmdb_id FROM shows WHERE id=?", (show_id,)).fetchone()
         if not before or before["tmdb_id"] != after["tmdb_id"]:
-            conn.execute("UPDATE episodes SET title=NULL, plot=NULL, still=NULL, runtime=NULL,"
-                         " tmdb_rating=NULL, tmdb_votes=NULL, air_date=NULL, directors=NULL,"
-                         " writers=NULL, guests=NULL WHERE show_id=?", (show_id,))
+            clear_episode_details(conn, show_id)
         conn.commit()
         try:
             enrich_episode_titles(conn)

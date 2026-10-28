@@ -16,6 +16,7 @@ The short version, newest first. CHANGELOG.md has every detail.
 - On the phone, Channels shows each channel's now and next two, with HERE and ON PC.
 - Shows can be put right like films: WRONG MATCH? on a show's page looks it up again and fetches its episodes fresh.
 - The year in a show's folder name now picks between shows with the same name, so One Piece is the anime, not the Netflix one.
+- That now goes for shows already in the library too, so One Piece finally stops being the Netflix one, and Planet Earth stops pretending to be The Living Planet.
 - Anime numbered straight through (One Piece episode 830 and all that) now finds its episode details.
 - "I'm up to here" no longer makes the later episodes look watched, and it updates the season list in place rather than flashing the whole page.
 - History counts a watch as a minute or more that you ended yourself. If the sleep timer switched it off, it doesn't count.
