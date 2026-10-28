@@ -14128,16 +14128,45 @@ def _guide_programme(block, t0, now, phone=False):
                        still=art(m.get("backdrop")), year=m.get("year"), runtime=minutes(m.get("runtime")))
     elif block.get("kind") == "episodes":
         ids = block.get("episode_ids") or []
-        e = next((x for x in LIB.episodes if ids and x.get("episodeid") == ids[0]), None)
         out["showid"] = block.get("showid")
         sh = next((x for x in LIB.shows if x.get("tvshowid") == block.get("showid")), None)
         out["tmdb"] = str(((sh or {}).get("uniqueid") or {}).get("tmdb") or "")
-        if e:
-            out.update(episode=e.get("title") or "", plot=(e.get("plot") or "")[:320],
-                       still=art(e.get("still") or (sh or {}).get("backdrop")),
-                       season=e.get("season"), number=e.get("episode"))
+        # A block of two or three runs them nose to tail, each for its own
+        # runtime — the same sums that made the block's length. Each one is
+        # a part, so the guide can mark where one ends and say which is on
+        # (2026-10-28); the block's own details are the one playing now.
+        index = _guide_episode_index()
+        parts, t = [], out["t0"]
+        for eid in ids:
+            e = index.get(eid) or {}
+            length = e.get("runtime") or DEFAULT_EPISODE_RUNTIME
+            parts.append({"t0": int(t), "t1": int(t + length), "episode": e.get("title") or "",
+                          "plot": (e.get("plot") or "")[:320],
+                          "still": art(e.get("still") or (sh or {}).get("backdrop")),
+                          "season": e.get("season"), "number": e.get("episode"),
+                          "code": "S%02dE%02d" % (e.get("season") or 0, e.get("episode") or 0)})
+            t += length
+        if parts:
+            if len(parts) > 1:
+                parts[-1]["t1"] = out["t1"]
+                out["parts"] = parts
+            cur = next((x for x in parts if x["t0"] <= now < x["t1"]), parts[0])
+            out.update({k: cur[k] for k in ("episode", "plot", "still", "season", "number")})
+    if block.get("person"):
+        out["person"] = block["person"]          # Directors Cut, Type Cast: whose run it is
     out["now"] = out["t0"] <= now < out["t1"]
     return out
+
+
+_GUIDE_EPS = [None, {}]
+
+
+def _guide_episode_index():
+    """Episodes by id, built once per library load rather than a search of
+    every episode for every one in the guide."""
+    if _GUIDE_EPS[0] is not LIB.episodes:
+        _GUIDE_EPS[0], _GUIDE_EPS[1] = LIB.episodes, {e.get("episodeid"): e for e in LIB.episodes}
+    return _GUIDE_EPS[1]
 
 
 def channel_guide(hours=GUIDE_HOURS, phone=False):
@@ -17645,6 +17674,17 @@ body.silver .rattop{background:linear-gradient(180deg,rgba(255,255,255,.035) 0,r
 .gprog.now{background:hsl(var(--h) 50% 27%);border-color:hsl(var(--h) 70% 62%);box-shadow:inset 3px 0 0 hsl(var(--h) 80% 70%)}
 .gprog b{display:block;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .gprog small{display:block;font-family:var(--mono);font-size:9.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+/* Where each episode of a block starts, and the one on now. */
+.gprog .gdiv{position:absolute;top:7px;bottom:7px;width:0;border-left:1px dashed hsl(var(--h) 60% 75% / .55);pointer-events:none}
+.gprog .gpart{position:absolute;top:0;bottom:0;background:rgba(255,255,255,.07);box-shadow:inset 0 -2px 0 hsl(var(--h) 80% 72%);pointer-events:none}
+.gprog > b,.gprog > small{position:relative;z-index:1}
+/* A person's run of films: their name over a bracket the width of it. */
+.grow.people{height:70px}
+.glane.people .gprog{top:19px}
+.grun{position:absolute;top:5px;height:9px;border:1.5px solid hsl(var(--h) 70% 65% / .75);border-bottom:0;border-radius:5px 5px 0 0;pointer-events:none}
+.grun span{position:absolute;left:8px;top:-6px;padding:0 6px;background:var(--ink-2);font-family:var(--mono);font-size:9.5px;
+  letter-spacing:.06em;text-transform:uppercase;color:hsl(var(--h) 75% 78%);white-space:nowrap;max-width:calc(100% - 16px);overflow:hidden;text-overflow:ellipsis}
+#guidepop .gpperson{font-family:var(--mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--marigold);margin-top:4px}
 .gnowline{position:absolute;top:0;bottom:0;width:2px;background:#ff5b5b;z-index:2;pointer-events:none;box-shadow:0 0 10px rgba(255,91,91,.6)}
 .gnote{font-family:var(--mono);font-size:10px;color:var(--muted);margin:10px 0 0}
 #guidepop{position:fixed;z-index:90;width:340px;border-radius:12px;overflow:hidden;background:#111116;border:1px solid rgba(255,255,255,.14);
@@ -25908,10 +25948,22 @@ function guidePop(){
 }
 /* opts.noPic: an On now card already shows the picture, so its hover card
    is words only, and says what's on after (2026-10-28). */
-function guideHover(node, p, opts){
+/* Of a block of episodes, the one playing at that moment, or else the first:
+   the hover card is about that one (2026-10-28), worked out when you hover
+   rather than when the page was drawn, so it moves on with the block. */
+function guidePart(p){
+  if(!p.parts) return null;
+  const t = Date.now() / 1000;
+  return p.parts.find(x => x.t0 <= t && t < x.t1) || p.parts[0];
+}
+
+function guideHover(node, p0, opts){
   opts = opts || {};
   node.onmouseenter = () => {
-    if(p.kind === 'live') return;
+    if(p0.kind === 'live') return;
+    const part = guidePart(p0);
+    const p = part ? Object.assign({}, p0, part, {sub: part.code, now: p0.now && part.t0 <= Date.now() / 1000}) : p0;
+    const later = part ? p0.parts.filter(x => x.t0 > part.t0) : [];
     const pop = guidePop();
     pop.innerHTML = '';
     const pic = p.still || p.art;
@@ -25922,8 +25974,12 @@ function guideHover(node, p, opts){
       ? [p.sub, p.episode].filter(Boolean).join('  \u00B7  ')
       : [p.year, p.runtime ? p.runtime + ' min' : ''].filter(Boolean).join('  \u00B7  ');
     if(line) box.append(el('div', 'gpsub', esc(line)));
-    box.append(el('div', 'gptime', hhmm(p.t0) + '\u2013' + hhmm(p.t1) + (p.now ? '  \u00B7  ON NOW' : '')));
+    if(p.person) box.append(el('div', 'gpperson', esc(p.person)));
+    box.append(el('div', 'gptime', hhmm(p.t0) + '\u2013' + hhmm(p.t1) + (p.now ? '  \u00B7  ON NOW' : '')
+      + (part ? '  \u00B7  ' + (p0.parts.indexOf(part) + 1) + ' OF ' + p0.parts.length : '')));
     if(p.plot) box.append(el('p', null, esc(p.plot) + (p.plot.length >= 320 ? '\u2026' : '')));
+    if(later.length) box.append(el('div', 'gpnext', '<em>Then at ' + hhmm(later[0].t0) + '</em> ' + esc(later[0].code)
+      + (later[0].episode ? ' \u00B7 ' + esc(later[0].episode) : '')));
     if(opts.next) box.append(el('div', 'gpnext', '<em>Next at ' + hhmm(opts.next.t0) + '</em> ' + esc(opts.next.title)
       + (opts.next.sub ? ' \u00B7 ' + esc(opts.next.sub) : '')));
     pop.append(box);
@@ -26090,6 +26146,8 @@ function drawGuide(data, fromPc){
     name.append(el('b', null, esc(c.name)));
     r.append(name);
     const lane = el('div', 'glane');
+    const people = (c.progs || []).some(p => p.person);
+    if(people){ r.classList.add('people'); lane.classList.add('people'); }
     (c.progs || []).forEach(p => {
       const a = Math.max(p.t0, data.start), b = Math.min(p.t1, data.end);
       if(b <= a) return;
@@ -26099,10 +26157,43 @@ function drawGuide(data, fromPc){
       blk.style.width = 'calc(' + (100 * (b - a) / span) + '% - 4px)';
       blk.append(el('b', null, esc(p.title)));
       blk.append(el('small', null, esc(hhmm(p.t0) + (p.sub ? '  \u00B7  ' + p.sub : ''))));
+      /* Two or three episodes in one block: a line where each new one
+         starts, and the one on now lit (2026-10-28). */
+      (p.parts || []).forEach((x, i) => {
+        const l = (x.t0 - a) / (b - a), w = (Math.min(x.t1, b) - Math.max(x.t0, a)) / (b - a);
+        if(i && l > 0 && l < 1){ const d = el('i', 'gdiv'); d.style.left = (100 * l) + '%'; blk.append(d); }
+        if(p.now && x.t0 <= data.now && data.now < x.t1 && w > 0){
+          const on = el('i', 'gpart'); on.style.left = (100 * Math.max(0, l)) + '%'; on.style.width = (100 * w) + '%'; blk.append(on);
+        }
+      });
       guideHover(blk, p);
       blk.onclick = () => { guidePop().classList.remove('show'); p.now ? guideTune(c, null) : guideOpen(p, fromPc); };
       lane.append(blk);
     });
+    /* Directors Cut and Type Cast: a bracket over each person's run of
+       films, with their name, so you can see whose they are (2026-10-28). */
+    if(people){
+      let run = null;
+      const close = () => {
+        if(!run) return;
+        const a = Math.max(run.t0, data.start), b = Math.min(run.t1, data.end);
+        if(b > a){
+          const g = el('div', 'grun');
+          g.style.left = 'calc(' + (100 * (a - data.start) / span) + '% + 2px)';
+          g.style.width = 'calc(' + (100 * (b - a) / span) + '% - 4px)';
+          g.append(el('span', null, esc(run.person)));
+          g.title = run.person;
+          lane.append(g);
+        }
+        run = null;
+      };
+      (c.progs || []).forEach(p => {
+        if(run && p.person === run.person){ run.t1 = p.t1; return; }
+        close();
+        if(p.person) run = {person: p.person, t0: p.t0, t1: p.t1};
+      });
+      close();
+    }
     r.append(lane);
     grid.append(r);
   });

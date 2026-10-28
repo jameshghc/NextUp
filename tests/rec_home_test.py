@@ -305,7 +305,7 @@ check("programmes run nose to tail", all(a["t1"] == b["t0"] for c in _rows for a
 check("a film's hover card has its plot and picture; an episode's its own", any(p.get("plot") and p.get("still") for c in _rows for p in c["progs"]))
 check("every channel is films, tv, docs, kids, live or mixed", all(c["kind"] in ("film", "tv", "docs", "kids", "live", "mixed") for c in _g["channels"]))
 check("the page draws it, with the switch and the hover card", "function drawGuide(data, fromPc)" in page
-      and "[['all', 'Everything'], ['film', 'Films'], ['tv', 'TV']]" in page and "function guideHover(node, p, opts)" in page and "{noPic: true, next:" in page
+      and "[['all', 'Everything'], ['film', 'Films'], ['tv', 'TV']]" in page and "function guideHover(node, p0, opts)" in page and "{noPic: true, next:" in page
       and "'/api/pcguide'" in page)
 check("the folder's year is read from an episode's path", "def show_folder_year(conn, show_id):" in open(n.__file__, encoding="utf-8").read()
       and "function showFixForm(d)" in page and "'/api/show/fix'" in page)
@@ -398,6 +398,23 @@ check("a show whose folder's year disagrees with its match is matched again unde
 check("one TMDB can't place better, or that already agrees, is left as it was",
       _c.execute("SELECT title FROM episodes WHERE show_id=2").fetchone()[0] == "old"
       and _c.execute("SELECT tmdb_id FROM shows WHERE id=3").fetchone()[0] == "94605")
+
+# 2026-10-28: a block of episodes, episode by episode; whose run a film is.
+_g2 = n.channel_guide(hours=12)
+_multi = [p for c in _g2["channels"] for p in c["progs"] if p.get("parts")]
+check("a block of several episodes has each one, nose to tail, filling the block exactly",
+      _multi and all(p["parts"][0]["t0"] == p["t0"] and p["parts"][-1]["t1"] == p["t1"]
+                     and all(a["t1"] == b["t0"] for a, b in zip(p["parts"], p["parts"][1:]))
+                     and all(x["code"].startswith("S") for x in p["parts"]) for p in _multi))
+check("its own details are the episode on now, when it's on",
+      all(p["episode"] == next(x for x in p["parts"] if x["t0"] <= _g2["now"] < x["t1"])["episode"]
+          for p in _multi if p["now"]))
+_dc = next(c for c in _g2["channels"] if c["id"] == "directorscut")
+_tc = next(c for c in _g2["channels"] if c["id"] == "typecast")
+check("Directors Cut and Type Cast say whose film each one is; nothing else does",
+      all(p.get("person") for p in _dc["progs"] + _tc["progs"])
+      and not any(p.get("person") for c in _g2["channels"] if c["id"] not in ("directorscut", "typecast") for p in c["progs"]))
+check("and the page draws them", "function guidePart(p)" in page and "'gdiv'" in page and "'grun'" in page)
 
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

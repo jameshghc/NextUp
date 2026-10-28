@@ -13,6 +13,8 @@ The short version, newest first. CHANGELOG.md has every detail.
 - Everything on that top line sits level now.
 - The now playing bar looks the same and sits in the same spot on every page, and there's only ever one Remote button.
 - Reorder your channels: click a channel's number in the guide, type a new one, hit Enter, and it moves there.
+- When a block on Channels is a few episodes back to back, there's a line between each one, and hovering shows the episode that's actually on, not just the first.
+- Directors Cut and Type Cast now show whose films you're watching, with their name over their run.
 - On the phone, Channels shows each channel's now and next two, with HERE and ON PC.
 - Shows can be put right like films: WRONG MATCH? on a show's page looks it up again and fetches its episodes fresh.
 - The year in a show's folder name now picks between shows with the same name, so One Piece is the anime, not the Netflix one.
