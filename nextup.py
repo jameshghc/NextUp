@@ -19468,6 +19468,14 @@ label.f span b{color:var(--marigold);font-weight:400;font-family:var(--mono)}
    step aside entirely while it's there rather than holding their width. */
 header.mast .chtop{padding:0;justify-content:flex-start;margin-right:auto;min-width:0}
 header.mast .chtop .guidefilter{margin:0 6px 0 0}
+/* One line of words, so one centre line: the switch the tabs' height (it
+   was 3px taller), and the mono capitals of SHUFFLE ALL and REMOTE a pixel
+   down, where mixed-case words read as centred. */
+header.mast .chtop .guidefilter{padding:2.5px;gap:2px}
+header.mast .chtop .iconbtn{padding:7px 10px 5px}
+/* Channels has REMOTE on the top line already; the now-playing strip's
+   own would be a second one just under it. */
+header.mast.onchannels ~ #playingbar .remotebtn{display:none}
 header.mast:not(.onchannels) .chtop{display:none}
 header.mast.onchannels .subnav, header.mast.onchannels .libplaces{display:none}
 
