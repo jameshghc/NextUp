@@ -37,6 +37,11 @@ def isolate(n, sandbox):
     n.LIB.loaded_at = 0
     n.CONFIG_PATH = os.path.join(sandbox, "nextup_config.json")
     n.CONFIG["sync_folder"] = ""
+    # The channels in the order the code lists them, not the one you've
+    # set in the real app: the tests count on knowing which is which.
+    n.CONFIG.pop("channel_order", None)
+    if hasattr(n, "apply_channel_order"):
+        n.apply_channel_order()
     with open(n.CONFIG_PATH, "w", encoding="utf-8") as fh:
         json.dump(n.CONFIG, fh)
     # The last suggestions, copied in so the Recommendations page has
