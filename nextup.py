@@ -19013,7 +19013,9 @@ body:not(.android) #view-now > #unfinished-sec{grid-area:cont;margin:0 0 10px}
 /* Up a little, and no scroll bar down the right (asked for, 2026-10-25): it
    still scrolls when the window's too short, just without the bar. */
 body:not(.android) #view-now::-webkit-scrollbar{display:none}
-body:not(.android) .wrap:has(> #view-now:not(.hidden)) > header.mast{margin-bottom:4px}
+/* Not while the now-playing strip is up: it sits in the same place on
+   every page (asked for, 2026-10-28), and this had it 10px higher on Now. */
+body:not(.android) .wrap:has(> #view-now:not(.hidden)):has(> #playingbar.hidden) > header.mast{margin-bottom:4px}
 /* The chooser and the alternatives it produced, one column down the right:
    in a wrapper, so the alternatives follow straight on from the chooser
    rather than waiting for a grid row the pick has made tall. */
@@ -19517,9 +19519,9 @@ header.mast .chtop .guidefilter{margin:0 6px 0 0}
    down, where mixed-case words read as centred. */
 header.mast .chtop .guidefilter{padding:2.5px;gap:2px}
 header.mast .chtop .iconbtn{padding:7px 10px 5px}
-/* Channels has REMOTE on the top line already; the now-playing strip's
-   own would be a second one just under it. */
-header.mast.onchannels ~ #playingbar .remotebtn{display:none}
+/* The now-playing strip is the same on every page, REMOTE and all, so
+   while it's up Channels' own REMOTE steps aside rather than make two. */
+.wrap:has(> #playingbar:not(.hidden)) > header.mast #openremote{display:none}
 header.mast:not(.onchannels) .chtop{display:none}
 header.mast.onchannels .subnav, header.mast.onchannels .libplaces{display:none}
 

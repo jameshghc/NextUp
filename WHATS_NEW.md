@@ -10,7 +10,8 @@ The short version, newest first. CHANGELOG.md has every detail.
 - Hovering an On now card doesn't just show you the same picture again: it's the blurb and what's on next instead.
 - Channels' top is all one line now: Everything, Films, TV, Shuffle and Remote on the left, the main tabs on the right.
 - Remote opens the remote and now closes it too.
-- Everything on that top line sits level now, and when something's playing there's just the one Remote button, not two.
+- Everything on that top line sits level now.
+- The now playing bar looks the same and sits in the same spot on every page, and there's only ever one Remote button.
 - Reorder your channels: click a channel's number in the guide, type a new one, hit Enter, and it moves there.
 - On the phone, Channels shows each channel's now and next two, with HERE and ON PC.
 - Shows can be put right like films: WRONG MATCH? on a show's page looks it up again and fetches its episodes fresh.
