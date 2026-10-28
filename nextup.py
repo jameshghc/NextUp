@@ -6638,6 +6638,16 @@ def money(value):
     return "$%s" % format(int(value), ",")
 
 
+def foreign_language(code):
+    """The language a film or show was made in, named, when it isn't
+    English; "" when it is, or isn't known. For the small tag on its page
+    and hover cards (2026-10-28: March of the Penguins turned out French)."""
+    code = (code or "").strip().lower()
+    if not code or code == "en":
+        return ""
+    return LANGUAGES.get(code, code.upper())
+
+
 def movie_facts(row, item):
     """The handful of things TMDB actually knows, said plainly.
 
@@ -6749,6 +6759,7 @@ def movie_detail_payload(movie_id):
         "poster": item.get("art", {}).get("poster"),
         "plot": item.get("plot") or "",
         "tagline": (row["tagline"] if row else "") or "",
+        "foreign": foreign_language(row["original_language"] if row else item.get("language")),
         "tmdb": round(item.get("rating") or 0, 1),
         "userrating": item.get("userrating") or 0,
         "genres": item.get("genre") or [],
@@ -14125,7 +14136,8 @@ def _guide_programme(block, t0, now, phone=False):
         out["id"] = block.get("id")
         if m:
             out.update(tmdb=str((m.get("uniqueid") or {}).get("tmdb") or ""), plot=(m.get("plot") or "")[:320],
-                       still=art(m.get("backdrop")), year=m.get("year"), runtime=minutes(m.get("runtime")))
+                       still=art(m.get("backdrop")), year=m.get("year"), runtime=minutes(m.get("runtime")),
+                       foreign=foreign_language(m.get("language")))
     elif block.get("kind") == "episodes":
         ids = block.get("episode_ids") or []
         out["showid"] = block.get("showid")
@@ -16811,6 +16823,7 @@ class Handler(BaseHTTPRequestHandler):
                         "runtime": 0, "run": run,
                         "status": detail.get("status") or "",
                         "tagline": (detail.get("tagline") or "")[:120],
+                        "foreign": foreign_language(detail.get("original_language")),
                     })
                 detail = (movie_detail(tid) if tid else {}) or {}
                 credits = detail.get("credits") or {}
@@ -16821,6 +16834,7 @@ class Handler(BaseHTTPRequestHandler):
                              if c.get("name")],
                     "runtime": detail.get("runtime") or 0,
                     "tagline": (detail.get("tagline") or "")[:120],
+                    "foreign": foreign_language(detail.get("original_language")),
                 })
 
             if route == "/api/person":
@@ -17684,6 +17698,9 @@ body.silver .rattop{background:linear-gradient(180deg,rgba(255,255,255,.035) 0,r
 .grun{position:absolute;top:5px;height:9px;border:1.5px solid hsl(var(--h) 70% 65% / .75);border-bottom:0;border-radius:5px 5px 0 0;pointer-events:none}
 .grun span{position:absolute;left:8px;top:-6px;padding:0 6px;background:var(--ink-2);font-family:var(--mono);font-size:9.5px;
   letter-spacing:.06em;text-transform:uppercase;color:hsl(var(--h) 75% 78%);white-space:nowrap;max-width:calc(100% - 16px);overflow:hidden;text-overflow:ellipsis}
+.langtag{display:inline-block;margin-left:10px;padding:1px 6px;border:1px solid rgba(255,255,255,.18);border-radius:4px;
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);vertical-align:1px;white-space:nowrap}
+.cardpeek .langtag{margin-left:0}
 #guidepop .gpperson{font-family:var(--mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--marigold);margin-top:4px}
 .gnowline{position:absolute;top:0;bottom:0;width:2px;background:#ff5b5b;z-index:2;pointer-events:none;box-shadow:0 0 10px rgba(255,91,91,.6)}
 .gnote{font-family:var(--mono);font-size:10px;color:var(--muted);margin:10px 0 0}
@@ -24021,6 +24038,13 @@ function sheet(){
    the PC's own page for it, playing HERE (streamed) or ON PC. */
 function openPcFilm(tmdb){ return openFilm(null, tmdb); }
 
+/* A film made in another language says which, quietly, beside its facts. */
+function langTag(name){
+  const t = el('span', 'langtag', esc(name));
+  t.title = 'Originally in ' + name;
+  return t;
+}
+
 async function openFilm(id, pcTmdb){
   const body = sheet();
   body.append(el('p','empty','Loading…'));
@@ -24045,7 +24069,9 @@ async function openFilm(id, pcTmdb){
   const facts = [item.year, item.runtime ? item.runtime+' min' : null,
                  item.tmdb ? 'TMDB '+item.tmdb : null,
                  (item.genres||[]).join(' / ')].filter(Boolean);
-  right.append(el('div','subline', esc(facts.join('  ·  '))));
+  const sub = el('div','subline', esc(facts.join('  ·  ')));
+  if(item.foreign) sub.append(langTag(item.foreign));
+  right.append(sub);
   if(item.directors && item.directors.length)
     right.append(el('p','plot','Directed by '+esc(item.directors.join(', '))));
   if(item.tagline) right.append(el('p','tagline', esc(item.tagline)));
@@ -25404,8 +25430,9 @@ function filmCard(f, showWhy){
       if(info.run) lines.push(info.run + (info.status === 'Ended' ? ' · ended' : ''));
       if(info.tagline) lines.push(info.tagline);
       peek.innerHTML = '';
-      if(!lines.length){ peek.append(el('div','line','No details on TMDB.')); return; }
+      if(!lines.length && !info.foreign){ peek.append(el('div','line','No details on TMDB.')); return; }
       lines.forEach(l => peek.append(el('div','line', esc(l))));
+      if(info.foreign){ const l = el('div', 'line'); l.append(langTag(info.foreign)); peek.append(l); }
     };
   }
   return c;
@@ -25973,7 +26000,11 @@ function guideHover(node, p0, opts){
     const line = p.kind === 'episodes'
       ? [p.sub, p.episode].filter(Boolean).join('  \u00B7  ')
       : [p.year, p.runtime ? p.runtime + ' min' : ''].filter(Boolean).join('  \u00B7  ');
-    if(line) box.append(el('div', 'gpsub', esc(line)));
+    if(line || p.foreign){
+      const sub = el('div', 'gpsub', esc(line));
+      if(p.foreign) sub.append(langTag(p.foreign));
+      box.append(sub);
+    }
     if(p.person) box.append(el('div', 'gpperson', esc(p.person)));
     box.append(el('div', 'gptime', hhmm(p.t0) + '\u2013' + hhmm(p.t1) + (p.now ? '  \u00B7  ON NOW' : '')
       + (part ? '  \u00B7  ' + (p0.parts.indexOf(part) + 1) + ' OF ' + p0.parts.length : '')));

@@ -416,5 +416,14 @@ check("Directors Cut and Type Cast say whose film each one is; nothing else does
       and not any(p.get("person") for c in _g2["channels"] if c["id"] not in ("directorscut", "typecast") for p in c["progs"]))
 check("and the page draws them", "function guidePart(p)" in page and "'gdiv'" in page and "'grun'" in page)
 
+# 2026-10-28: a film in another language says which.
+check("a film's language is named when it isn't English, and not when it is",
+      n.foreign_language("fr") == "French" and n.foreign_language("sv") == "Swedish"
+      and n.foreign_language("en") == "" and n.foreign_language("") == "" and n.foreign_language("xx") == "XX")
+_fp = [m for m in n.LIB.movies if m.get("language") and m.get("language") != "en"][:1]
+check("its page and the guide's hover cards carry it",
+      (not _fp or n.movie_detail_payload(_fp[0]["movieid"]).get("foreign"))
+      and "if(item.foreign) sub.append(langTag(item.foreign));" in page and "if(p.foreign) sub.append(langTag(p.foreign));" in page)
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
