@@ -115,7 +115,7 @@ ASSET_DIR = getattr(sys, "_MEIPASS", HERE)
 LOGO_PATH = os.path.join(ASSET_DIR, "nextup_logo.png")
 ICON_PATH = os.path.join(ASSET_DIR, "nextup.ico")
 
-APP_VERSION = "0.2.4"
+APP_VERSION = "0.2.5"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w342"
@@ -17155,11 +17155,17 @@ a{color:inherit}
    browser's own controls do the job. */
 #titlebar{
   position:fixed;top:0;left:0;right:0;height:38px;z-index:80;display:flex;
-  /* Transparent, not painted: nothing ever scrolls under this strip — the
-     shell below it is a fixed column — so it can sit on the body's glow
-     rather than laying a flat plank over the brightest part of it. */
-  align-items:stretch;background:transparent;border-bottom:1px solid var(--edge);
+  /* The page's own background, pinned to the window as the page's is: it
+     looks see-through, sitting on the body's glow, but a details window
+     scrolls up under this strip, and see-through let its pictures show
+     behind the name (2026-10-28). */
+  align-items:stretch;border-bottom:1px solid var(--edge);
+  background:radial-gradient(1100px 520px at 50% -160px,#1e1729 0%,rgba(6,5,9,0) 70%) fixed,
+    radial-gradient(900px 640px at 104% 108%,#0d1717 0%,rgba(6,5,9,0) 64%) fixed,var(--ink);
 }
+body.glass #titlebar{background:radial-gradient(1100px 520px at 50% -160px,#24242c 0%,rgba(12,12,16,0) 70%) fixed,#0c0c10}
+body.silver #titlebar{background:linear-gradient(180deg,rgba(255,255,255,.035) 0,rgba(255,255,255,0) 340px) fixed,
+  radial-gradient(1200px 560px at 50% -180px,#3a3a3c 0%,rgba(19,19,19,0) 70%) fixed,#131313}
 #titlebar .dragzone{flex:1;display:flex;align-items:center;gap:9px;padding-left:20px}
 #titlebar .minimark{width:21px;height:21px;border-radius:50%;display:block;flex:none}
 #titlebar .dragzone span{
@@ -24049,9 +24055,15 @@ function episodeRow(ep, d){
       const r = await post('/api/show/upto', {episode_id: ep.id});
       if(!r || r.error) return;
       libraryChanged(); loadLibrary();
-      const sheet = row.closest('.sheet');
-      if(sheet) sheet.remove();
-      openShow(d.id, null, ep.season);
+      /* Just the seasons again, where they are: closing and reopening the
+         whole window to show it flashed the screen (2026-10-28). */
+      const fresh = await api('/api/show?id=' + d.id);
+      const box = row.closest('.showeps');
+      if(!fresh || fresh.error || !box) return;
+      Object.assign(d, fresh);
+      const keep = box.closest('.sheet') ? box.closest('.sheet').scrollTop : 0;
+      box.replaceChildren(seasonBrowser(d, d.seasons || [], ep.season));
+      if(box.closest('.sheet')) box.closest('.sheet').scrollTop = keep;
     };
   }
   /* A show watched in order: its purple arrow in the margin left of the

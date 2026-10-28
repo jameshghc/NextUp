@@ -16,6 +16,18 @@ at the top.
 
 ---
 
+## 2026-10-28 — v0.2.5, a solid title bar
+
+- `#titlebar` has the body's background layers with `background-attachment:
+  fixed` (and the Glass and Silver ones), the same trick as the Hall of
+  Fame's `.rattop`: it reads as transparent but a `.sheet` (z 50, inset 0)
+  scrolling under it (z 80) no longer shows through.
+- The end of 0.2.4 is in the CHANGELOG: Watch in order (`linear_map`,
+  `set_linear`, `own_window`/`hide_top_frame`/`fill_work_area` for the
+  frameless window on Windows), the Films tags (`FILM_TAGS`), Hall of Fame
+  fit (`genre_fit`) and trophies (`fame_firsts`), History's two-minute bar
+  (`HISTORY_MIN_SECONDS`), `real_sittings`, `set_up_to`.
+
 ## 2026-10-27 — v0.2.4, Ratings in the Library: the Hall of Fame
 
 - `build_hall_of_fame()` (`/api/fame`; the phone's `/api/pcfame` -> the

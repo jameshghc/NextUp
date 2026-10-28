@@ -2,6 +2,11 @@
 
 What changed in Next Up, version by version, newest first. Version numbers start at 0.1.1; the work before that is grouped at the end under "Before 0.1".
 
+## 0.2.5 — 2026-10-28
+
+- Fixed: the bar along the top of the window was see-through, so a details page scrolled up under it showed its pictures behind the name and the counts. It wears the page's own background now, looking just as it did, but solid.
+- Clicking an episode's code to say "I'm up to here" no longer flashes the screen: the season list updates where it is instead of the show's page closing and opening again.
+
 ## 0.2.4 — 2026-10-27
 
 - Ratings, a new place in the Library (the ★ between History and Recommendations), with two halves:

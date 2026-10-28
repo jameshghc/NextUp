@@ -123,8 +123,13 @@ check("the art behind the page is dimmed hard", _b and float(_b.group(1)) <= 0.4
 check("and the film's own backdrop in the pick card fades further in Glass", "body.glass .hero{" in page)
 # 2026-10-25: the header went back to the page's own colour with a line
 # under it (as on the README's screenshot), in every style.
-check("the header is the page's colour with a line, in every style", "body.glass #titlebar{" not in page
-      and "border-bottom:1px solid var(--edge)" in page[page.find("\n#titlebar{"):][:500])
+# 2026-10-28: and solid — the page's own background, fixed — so nothing
+# scrolling under it shows through; never Glass's old black bar.
+_gt = page[page.find("body.glass #titlebar{"):][:200]
+check("the header is the page's colour with a line, in every style, and solid",
+      "background:#000" not in _gt and "fixed" in _gt
+      and "border-bottom:1px solid var(--edge)" in page[page.find("\n#titlebar{"):][:900]
+      and "fixed,var(--ink)" in page[page.find("\n#titlebar{"):][:900])
 
 # Silver (2026-10-25): Glass's panels in neutral greys.
 n.CONFIG["appearance"] = {"theme": "silver"}
