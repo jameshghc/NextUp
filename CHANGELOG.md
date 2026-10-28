@@ -4,9 +4,11 @@ What changed in Next Up, version by version, newest first. Version numbers start
 
 ## 0.2.5 — 2026-10-28
 
+- **Channels is a TV guide.** Everything · Films · TV along the top (mixed channels show under all three; remembered); **On now**, every channel's current programme as a card with a progress bar; then the **guide** — a row per channel, three hours across from the half hour before now, a red NOW line, each programme a block as wide as it runs, coloured by the kind of channel. Hover a programme for a card: an episode's own picture and blurb, a film's backdrop and plot. Click what's on now to tune in part way, as before; a later one opens its page. On the phone, each channel's now and next two, with HERE and ON PC.
 - Fixed: the bar along the top of the window was see-through, so a details page scrolled up under it showed its pictures behind the name and the counts. It wears the page's own background now, looking just as it did, but solid.
 - Shows can be put right like films: **WRONG MATCH?** on a show's page looks it up again under the title and the year it started, and fetches its episodes afresh. And a show's year in its folder name now decides between shows of the same name — "One Piece (1999)" had come out as the 2023 Netflix series rather than the anime.
 - Episodes numbered straight through, as anime often are (One Piece's S01E830, where TMDB's season 1 has 61), find their details by their title, or failing that by their number counted through TMDB's seasons.
+- Fixed: saying "I'm up to here" gave every later episode you'd never played a "last played" time, so they looked watched (and stayed out of Quick Suggest). It no longer does, and the stamps it left are cleared on the next start.
 - Clicking an episode's code to say "I'm up to here" no longer flashes the screen: the season list updates where it is instead of the show's page closing and opening again.
 
 ## 0.2.4 — 2026-10-27

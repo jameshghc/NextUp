@@ -292,6 +292,21 @@ check("a show's year in its folder picks the right one of the same name",
       and (n.tmdb_find_show("One Piece", None) or {}).get("id") == 111110
       and (n.tmdb_find_show("Arcane", None) or {}).get("id") == 94605)
 n.tmdb = _real_tmdb
+# 2026-10-28: Channels as a TV guide.
+_g = n.channel_guide()
+_live = [c for c in _g["channels"] if c["live"]]
+_rows = [c for c in _g["channels"] if c["progs"] and not c["live"]]
+check("the guide has every channel, from the half hour before now", len(_g["channels"]) == len(n.CHANNELS)
+      and _g["start"] <= _g["now"] < _g["start"] + 1800 and _g["end"] - _g["start"] == n.GUIDE_HOURS * 3600)
+check("each row starts at the guide's start, runs past its end, one programme on now",
+      _rows and all(c["progs"][0]["t0"] <= _g["start"] and c["progs"][-1]["t1"] >= _g["end"]
+                    and sum(p["now"] for p in c["progs"]) == 1 for c in _rows))
+check("programmes run nose to tail", all(a["t1"] == b["t0"] for c in _rows for a, b in zip(c["progs"], c["progs"][1:])))
+check("a film's hover card has its plot and picture; an episode's its own", any(p.get("plot") and p.get("still") for c in _rows for p in c["progs"]))
+check("every channel is films, tv, docs, kids, live or mixed", all(c["kind"] in ("film", "tv", "docs", "kids", "live", "mixed") for c in _g["channels"]))
+check("the page draws it, with the switch and the hover card", "function drawGuide(data, fromPc)" in page
+      and "[['all', 'Everything'], ['film', 'Films'], ['tv', 'TV']]" in page and "function guideHover(node, p)" in page
+      and "'/api/pcguide'" in page)
 check("the folder's year is read from an episode's path", "def show_folder_year(conn, show_id):" in open(n.__file__, encoding="utf-8").read()
       and "function showFixForm(d)" in page and "'/api/show/fix'" in page)
 check("and shows it", "if(r && r.line){ why.textContent = r.line; return; }" in page

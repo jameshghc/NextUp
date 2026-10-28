@@ -537,17 +537,49 @@ def set_up_to(episode_id):
     else:
         conn.execute("UPDATE episodes SET playcount=0, resume_pos=0, resume_total=0, last_played=? WHERE id=?",
                      (stamp, episode_id))
-    # Anything later you'd touched mustn't look more recent than this.
+    # Anything later you'd touched mustn't look more recent than this —
+    # only those you HAD touched: one never played keeps no "last played"
+    # (it was given one, 2026-10-27, and looked played; see
+    # repair_up_to_stamps).
     later = [e["episodeid"] for e in eps if episode_order(e) > episode_order(ep)]
+    earlier = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 120))
     for i in later:
-        conn.execute("UPDATE episodes SET last_played=MIN(COALESCE(NULLIF(last_played,''), ?), ?) WHERE id=?",
-                     (stamp, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 120)), i))
+        conn.execute("UPDATE episodes SET last_played=? WHERE id=? AND last_played IS NOT NULL"
+                     " AND last_played <> '' AND last_played > ?", (earlier, i, earlier))
     conn.commit()
     conn.close()
     LOCAL.loaded_at = 0
     LIB.loaded_at = 0
     log_event("episode", episode_id, ep.get("title") or "", "marked as where you're up to")
     return {"ok": True}
+
+
+def repair_up_to_stamps(conn):
+    """Once: take back the "last played" that set_up_to gave later episodes
+    you'd never played (2026-10-27 to -28). Only an episode with no plays,
+    no place in it and no history of its own, stamped in the two minutes
+    before a mark on its show — that stamp is the only trace of it, and it
+    made the episode look played (kept out of Quick Suggest for a month)."""
+    marks = conn.execute(
+        "SELECT h.at, e.show_id, e.season, e.episode FROM history h JOIN episodes e ON e.id = h.item_id"
+        " WHERE h.kind='episode' AND h.event=?", ("marked as where you're up to",)).fetchall()
+    fixed = 0
+    for m in marks:
+        at = stamp_seconds(m["at"])
+        if not at:
+            continue
+        lo = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(at - 180))
+        rows = conn.execute(
+            "SELECT id FROM episodes WHERE show_id=? AND (season > ? OR (season = ? AND episode > ?))"
+            " AND COALESCE(playcount,0)=0 AND COALESCE(resume_pos,0)=0"
+            " AND last_played >= ? AND last_played <= ?"
+            " AND id NOT IN (SELECT item_id FROM history WHERE kind='episode' AND item_id IS NOT NULL)",
+            (m["show_id"], m["season"], m["season"], m["episode"], lo, m["at"][:19])).fetchall()
+        for r in rows:
+            conn.execute("UPDATE episodes SET last_played=NULL WHERE id=?", (r["id"],))
+            fixed += 1
+    conn.commit()
+    return fixed
 
 
 def series_progress(episodes_by_show, tvshowid):
@@ -3643,6 +3675,16 @@ def reconcile_episode_order(conn, progress=None, show_ids=None):
 
 def reconcile_once():
     """The first start with this: put right the library as it already is."""
+    if not CONFIG.get("up_to_stamps_repaired"):
+        try:
+            conn = db()
+            repair_up_to_stamps(conn)
+            conn.close()
+            CONFIG["up_to_stamps_repaired"] = 1
+            save_json(CONFIG_PATH, CONFIG)
+            LOCAL.loaded_at = 0
+        except Exception:
+            log_problem("up-to stamps")
     if CONFIG.get("episode_order_checked"):
         return
     try:
@@ -13966,6 +14008,112 @@ def phone_episode(episode_id):
     return _phone_art_deep(got) if got else {"error": "The PC doesn't have that episode."}
 
 
+# --- the Channels guide ------------------------------------------------------
+#
+# Channels as a TV guide (asked for, 2026-10-28): every channel's programmes
+# from the half hour before now to three hours on, worked out from its loop
+# the way channel_now works out the one that's on. What's on now comes from
+# resolve_all_channels_now, so it's what tuning in would actually play; the
+# rest follows in the loop's order — listings further out can shift if two
+# channels would land on the same thing (the page says so). Each programme
+# carries what its hover card shows: an episode's own picture and blurb, a
+# film's backdrop and plot.
+
+GUIDE_HOURS = 3
+_GUIDE_KIND = {"kids": "kids", "docs": "docs", "history": "docs", "news": "live"}
+
+
+def guide_kind(ch):
+    """films, tv, docs, kids, live or mixed — the colour of its row, and
+    which of Everything / Films / TV it shows under."""
+    if ch.get("type") == "live":
+        return "live"
+    if ch["id"] in _GUIDE_KIND:
+        return _GUIDE_KIND[ch["id"]]
+    if ch.get("film_only"):
+        return "film"
+    if ch.get("tv_only") or ch.get("type") == "binge":
+        return "tv"
+    return "mixed"
+
+
+def _guide_programme(block, t0, now, phone=False):
+    art = phone_art if phone else (lambda a: a)
+    out = {"t0": int(t0), "t1": int(t0 + (block.get("duration") or 1800)),
+           "title": block.get("title") or "", "sub": block.get("sub") or "",
+           "kind": block.get("kind"), "art": art(block.get("art"))}
+    if block.get("kind") == "movie":
+        m = next((x for x in LIB.movies if x.get("movieid") == block.get("id")), None)
+        out["id"] = block.get("id")
+        if m:
+            out.update(tmdb=str((m.get("uniqueid") or {}).get("tmdb") or ""), plot=(m.get("plot") or "")[:320],
+                       still=art(m.get("backdrop")), year=m.get("year"), runtime=minutes(m.get("runtime")))
+    elif block.get("kind") == "episodes":
+        ids = block.get("episode_ids") or []
+        e = next((x for x in LIB.episodes if ids and x.get("episodeid") == ids[0]), None)
+        out["showid"] = block.get("showid")
+        sh = next((x for x in LIB.shows if x.get("tvshowid") == block.get("showid")), None)
+        out["tmdb"] = str(((sh or {}).get("uniqueid") or {}).get("tmdb") or "")
+        if e:
+            out.update(episode=e.get("title") or "", plot=(e.get("plot") or "")[:320],
+                       still=art(e.get("still") or (sh or {}).get("backdrop")),
+                       season=e.get("season"), number=e.get("episode"))
+    out["now"] = out["t0"] <= now < out["t1"]
+    return out
+
+
+def channel_guide(hours=GUIDE_HOURS, phone=False):
+    """{start, now, end, channels: [{id, name, num, kind, live, progs}]}."""
+    LIB.load()
+    now = time.time()
+    lt = time.localtime(now)
+    start = int(now - ((lt.tm_min % 30) * 60 + lt.tm_sec))      # the half hour before
+    end = start + hours * 3600
+    resolved = resolve_all_channels_now()
+    out = []
+    for ch in CHANNELS:
+        name, _, num = ch["name"].rpartition(" #")
+        entry = {"id": ch["id"], "name": name or ch["name"], "num": num if name else "",
+                 "kind": guide_kind(ch), "live": ch.get("type") == "live", "progs": []}
+        if entry["live"]:
+            entry["progs"] = [{"t0": start, "t1": end, "title": "Live", "sub": ch["name"], "kind": "live",
+                               "now": True}]
+            out.append(entry)
+            continue
+        blocks = channel_blocks(ch)
+        cur = resolved.get(ch["id"])
+        if not blocks or not cur:
+            out.append(entry)
+            continue
+        try:
+            i = blocks.index(cur["block"])
+        except ValueError:
+            i = 0
+        t = now - cur["offset"]
+        while t > start:                       # back to the start of the guide
+            i -= 1
+            t -= blocks[i % len(blocks)].get("duration") or 1800
+        progs = []
+        while t < end and len(progs) < 60:
+            b = blocks[i % len(blocks)]
+            progs.append(_guide_programme(b, t, now, phone))
+            t += b.get("duration") or 1800
+            i += 1
+        # What's on now is what tuning in plays, even if the loop says
+        # otherwise (resolve_all_channels_now steps round a clash).
+        for p in progs:
+            if p["now"] and (p["title"], p["sub"]) != (cur["block"].get("title"), cur["block"].get("sub")):
+                p.update(_guide_programme(cur["block"], now - cur["offset"], now, phone), now=True)
+        if phone:
+            for p in progs:
+                if p["now"] and ch.get("type") != "youtube":
+                    p["ident"], p["offset"] = channel_ident(cur["block"], cur["offset"])
+        entry["progs"] = progs
+        out.append(entry)
+    return {"start": start, "now": int(now), "end": end, "channels": out}
+
+
+
 def phone_channels():
     """The PC's channels and what's on, for the phone. A film or episode
     channel says what to play and from where; live and YouTube ones don't
@@ -15030,6 +15178,8 @@ class PhoneHandler(BaseHTTPRequestHandler):
                 return self.send_json(out)
             if route == "/phone/channels":
                 return self.send_json(phone_channels())
+            if route == "/phone/guide":
+                return self.send_json(channel_guide(phone=True))
             if route == "/phone/show":
                 return self.send_json(phone_show((query.get("tmdb") or [""])[0]))
             if route == "/phone/film":
@@ -16201,13 +16351,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(remote_state())
 
             if route in ("/api/pcnow", "/api/pcgenres", "/api/pcchannels", "/api/pcshow", "/api/pcepisode",
-                         "/api/pcfilm", "/api/pchome", "/api/pcfame"):
+                         "/api/pcfilm", "/api/pchome", "/api/pcfame", "/api/pcguide"):
                 if PLATFORM != "android":
                     return self.send_json({"error": "only on the phone"}, 404)
                 target = {"/api/pcnow": "/phone/now", "/api/pcgenres": "/phone/genres",
                           "/api/pcchannels": "/phone/channels", "/api/pcshow": "/phone/show",
                           "/api/pcepisode": "/phone/episode", "/api/pcfilm": "/phone/film",
-                          "/api/pchome": "/phone/home", "/api/pcfame": "/phone/fame"}[route]
+                          "/api/pchome": "/phone/home", "/api/pcfame": "/phone/fame",
+                          "/api/pcguide": "/phone/guide"}[route]
                 qs = urllib.parse.urlparse(self.path).query
                 return self.send_json(pc_library_call(target + ("?" + qs if qs else "")))
 
@@ -16368,6 +16519,9 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/history":
                 days = int(one("days", "90") or 90)
                 return self.send_json(build_history(days=max(1, min(days, 3650))))
+
+            if route == "/api/channels/guide":
+                return self.send_json(channel_guide())
 
             if route == "/api/channels":
                 resolved = resolve_all_channels_now()
@@ -17363,6 +17517,64 @@ body.silver .rattop{background:linear-gradient(180deg,rgba(255,255,255,.035) 0,r
 #view-ratings > #view-rate{padding:0}
 /* The old "top tens" under the queue: the Hall of Fame does that now. */
 #view-rate > section:has(#toplists){display:none}
+/* ---- the Channels guide ---- */
+.guidefilter{margin:4px 0 4px}
+.guidehead{margin:18px 0 10px;font-size:20px}
+.guidenow{display:grid;grid-auto-flow:column;grid-auto-columns:200px;gap:12px;overflow-x:auto;scrollbar-width:none;padding-bottom:4px}
+.guidenow::-webkit-scrollbar{display:none}
+.gnow{padding:0;text-align:left;background:var(--ink-2);border:1px solid var(--line);border-radius:var(--r-card,12px);
+  overflow:hidden;color:var(--paper);cursor:pointer}
+.gnow:hover{border-color:hsl(var(--h) 55% 50%)}
+.gnowpic{height:112px;background:#1b1b22 center/cover;position:relative}
+.gnowpic:after{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,0) 45%,rgba(0,0,0,.8))}
+.gch{position:absolute;left:9px;top:9px;z-index:1;font-family:var(--mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;
+  padding:3px 7px;border-radius:5px;background:hsl(var(--h) 55% 36%);color:#fff;max-width:calc(100% - 18px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.glive{position:absolute;right:9px;top:9px;z-index:1;font-family:var(--mono);font-size:10px;padding:3px 6px;border-radius:5px;background:#e0424a;color:#fff}
+.gnowtxt{padding:9px 11px 11px}
+.gnowtxt b{display:block;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gnowtxt small{display:block;font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gbar{height:3px;background:rgba(255,255,255,.1);border-radius:2px;margin-top:8px}
+.gbar i{display:block;height:100%;border-radius:2px;background:hsl(var(--h) 70% 60%)}
+.guidegrid{position:relative;border:1px solid var(--line);border-radius:var(--r-card,12px);overflow:hidden;background:var(--ink-2)}
+.grow{display:flex;height:58px;border-bottom:1px solid var(--line)}
+.grow:last-of-type{border-bottom:0}
+.gname{flex:none;width:176px;display:flex;align-items:center;gap:10px;padding:0 12px;border-right:1px solid var(--line);
+  background:rgba(0,0,0,.18)}
+.gname b{font-size:13.5px;line-height:1.15}
+.gnum{font-family:var(--mono);font-size:12px;width:26px;height:26px;border-radius:7px;display:flex;align-items:center;justify-content:center;
+  background:hsl(var(--h) 55% 32%);color:#fff;flex:none}
+.glane{position:relative;flex:1;min-width:0}
+.gruler{height:34px}
+.gruler .gname{font-family:var(--mono);font-size:10.5px;color:var(--muted);letter-spacing:.08em}
+.gtick{position:absolute;top:0;bottom:0;border-left:1px solid var(--line);padding:9px 0 0 8px;font-family:var(--mono);font-size:11px;color:var(--muted)}
+.gprog{position:absolute;top:5px;bottom:5px;border-radius:8px;padding:6px 10px;overflow:hidden;text-align:left;cursor:pointer;
+  background:hsl(var(--h) 22% 16%);border:1px solid hsl(var(--h) 30% 26%);color:var(--paper)}
+.gprog:hover{border-color:hsl(var(--h) 60% 55%)}
+.gprog.now{background:hsl(var(--h) 40% 22%);border-color:hsl(var(--h) 55% 45%)}
+.gprog b{display:block;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gprog small{display:block;font-family:var(--mono);font-size:9.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+.gnowline{position:absolute;top:0;bottom:0;width:2px;background:#ff5b5b;z-index:2;pointer-events:none;box-shadow:0 0 10px rgba(255,91,91,.6)}
+.gnote{font-family:var(--mono);font-size:10px;color:var(--muted);margin:10px 0 0}
+#guidepop{position:fixed;z-index:90;width:340px;border-radius:12px;overflow:hidden;background:#111116;border:1px solid rgba(255,255,255,.14);
+  box-shadow:0 18px 40px rgba(0,0,0,.6);pointer-events:none;opacity:0;transition:opacity .12s ease}
+#guidepop.show{opacity:1}
+#guidepop img{display:block;width:100%;aspect-ratio:16/9;object-fit:cover;background:#1b1b22}
+#guidepop .gptext{padding:11px 13px 13px}
+#guidepop b{display:block;font-size:15px}
+#guidepop .gpsub{font-size:12.5px;color:var(--paper);opacity:.85;margin-top:2px}
+#guidepop .gptime{font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:5px;letter-spacing:.04em}
+#guidepop p{margin:8px 0 0;font-size:12.5px;line-height:1.45;color:var(--muted)}
+.gphone{display:flex;gap:11px;align-items:stretch;padding:11px 0;border-bottom:1px solid var(--line);cursor:pointer}
+.gphone .gnum{width:30px;height:30px}
+.gpbody{flex:1;min-width:0}
+.gpname{font-family:var(--mono);font-size:10px;letter-spacing:.06em;color:var(--muted);text-transform:uppercase}
+.gpbody b{display:block;font-size:14.5px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gplater{display:flex;gap:12px;margin-top:6px;font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden}
+.gplater span{overflow:hidden;text-overflow:ellipsis}
+.gplater em{font-style:normal;font-family:var(--mono);font-size:10px;color:var(--paper);opacity:.8;margin-right:4px}
+.gpthumb{width:46px;border-radius:6px;background:#1b1b22 center/cover;flex:none}
+body.android .guidenow{grid-auto-columns:150px}
+body.android .gnowpic{height:84px}
 .ratswitch{display:inline-flex;gap:4px;padding:4px;border-radius:999px;background:var(--ink-2);
   border:1px solid var(--line);margin:0 0 18px}
 .ratmode{background:none;border:0;border-radius:999px;padding:8px 16px;color:var(--muted);
@@ -25541,7 +25753,214 @@ async function loadPcChannels(){
   return true;
 }
 
+/* ---- Channels as a TV guide (2026-10-28) ----
+   Everything / Films / TV along the top; On now, every channel's current
+   programme as a card; then the guide — a row per channel, three hours
+   across, a NOW line — on the PC, or on the phone each channel's now and
+   next two. Hover a programme on the PC for a card: an episode's picture
+   and blurb, a film's backdrop and plot. Click what's on to tune in, part
+   way, as before; a later one opens its page. channel_guide on the server. */
+const GUIDE_HUES = {film: 18, tv: 205, docs: 150, kids: 46, live: 355, mixed: 270};
+let guideFilter = 'all';
+try{ guideFilter = localStorage.getItem('nextup.chFilter') || 'all'; }catch(e){}
+const guideShows = (kind) => guideFilter === 'all' || kind === 'mixed' || kind === 'docs'
+  || (guideFilter === 'film' ? (kind === 'film' || kind === 'kids') : kind === 'tv');
+const hhmm = t => { const d = new Date(t * 1000); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
+
+async function guideTune(ch, label){
+  const was = label ? label.textContent : '';
+  if(label) label.textContent = 'TUNING\u2026';
+  const r = await post('/api/channels/tune', {channel: ch.id});
+  if(label) label.textContent = r && r.error ? (r.error.slice(0, 60)) : was;
+  if(r && !r.error) pollPlaying();
+}
+
+function guideOpen(p, fromPc){
+  if(p.kind === 'movie') return fromPc ? openPcFilm(p.tmdb) : openFilm(p.id);
+  if(p.kind === 'episodes') return fromPc ? openPcShow(p.tmdb) : openShow(p.showid, null, p.season);
+}
+
+function guidePop(){
+  let pop = $('#guidepop');
+  if(!pop){ pop = el('div', ''); pop.id = 'guidepop'; document.body.append(pop); }
+  return pop;
+}
+function guideHover(node, p){
+  node.onmouseenter = () => {
+    if(p.kind === 'live') return;
+    const pop = guidePop();
+    pop.innerHTML = '';
+    const pic = p.still || p.art;
+    if(pic){ const i = el('img'); i.src = pic; i.alt = ''; pop.append(i); }
+    const box = el('div', 'gptext');
+    box.append(el('b', null, esc(p.title)));
+    const line = p.kind === 'episodes'
+      ? [p.sub, p.episode].filter(Boolean).join('  \u00B7  ')
+      : [p.year, p.runtime ? p.runtime + ' min' : ''].filter(Boolean).join('  \u00B7  ');
+    if(line) box.append(el('div', 'gpsub', esc(line)));
+    box.append(el('div', 'gptime', hhmm(p.t0) + '\u2013' + hhmm(p.t1) + (p.now ? '  \u00B7  ON NOW' : '')));
+    if(p.plot) box.append(el('p', null, esc(p.plot) + (p.plot.length >= 320 ? '\u2026' : '')));
+    pop.append(box);
+    const r = node.getBoundingClientRect();
+    pop.classList.add('show');
+    const w = 340, h = pop.offsetHeight;
+    let x = Math.min(window.innerWidth - w - 12, Math.max(12, r.left));
+    let y = r.bottom + 8;
+    if(y + h > window.innerHeight - 12) y = Math.max(12, r.top - h - 8);
+    pop.style.left = x + 'px'; pop.style.top = y + 'px';
+  };
+  node.onmouseleave = () => guidePop().classList.remove('show');
+}
+
+function drawGuide(data, fromPc){
+  const out = $('#channels-out');
+  out.innerHTML = '';
+  if(fromPc) out.append(el('div', 'nowsource', 'From the PC\u2019s channels'));
+  const phone = document.body.classList.contains('android');
+  /* Everything / Films / TV. Mixed channels are on all three. */
+  const sw = el('div', 'ratswitch guidefilter');
+  [['all', 'Everything'], ['film', 'Films'], ['tv', 'TV']].forEach(([k, label]) => {
+    const b = el('button', 'ratmode', label);
+    b.type = 'button';
+    b.setAttribute('aria-selected', String(guideFilter === k));
+    b.onclick = () => { guideFilter = k; try{ localStorage.setItem('nextup.chFilter', k); }catch(e){} drawGuide(data, fromPc); };
+    sw.append(b);
+  });
+  out.append(sw);
+  const chans = (data.channels || []).filter(c => guideShows(c.kind));
+  const nowOf = c => (c.progs || []).find(p => p.now);
+
+  out.append(el('h2', 'guidehead', 'On now'));
+  const row = el('div', 'guidenow');
+  chans.forEach(c => {
+    const p = nowOf(c);
+    const card = el('button', 'gnow');
+    card.type = 'button';
+    card.style.setProperty('--h', GUIDE_HUES[c.kind] || 270);
+    const pic = el('div', 'gnowpic');
+    if(p && (p.still || p.art)) pic.style.backgroundImage = 'url("' + (p.still || p.art) + '")';
+    pic.append(el('span', 'gch', esc((c.num ? c.num + ' \u00B7 ' : '') + c.name)));
+    if(c.live) pic.append(el('span', 'glive', 'LIVE'));
+    card.append(pic);
+    const t = el('div', 'gnowtxt');
+    t.append(el('b', null, esc(p ? p.title : 'Nothing on yet')));
+    if(p && !c.live){
+      t.append(el('small', null, esc(p.kind === 'episodes' ? [p.sub, p.episode].filter(Boolean).join(' \u00B7 ') : (p.year || ''))));
+      const bar = el('div', 'gbar'); const fill = el('i');
+      fill.style.width = Math.max(0, Math.min(100, 100 * (data.now - p.t0) / (p.t1 - p.t0))) + '%';
+      bar.append(fill); t.append(bar);
+    }
+    card.append(t);
+    if(p) guideHover(card, p);
+    if(!fromPc) card.onclick = () => guideTune(c, t.querySelector('small'));
+    else if(p && p.ident) card.onclick = async () => {
+      const at = (p.offset || 0) + Math.round(Date.now() / 1000 - data.now);
+      await post('/api/play', {stream: p.ident, start: at, channel: c.id});
+    };
+    row.append(card);
+  });
+  out.append(row);
+  wheelSideways(row, true);
+
+  out.append(el('h2', 'guidehead', 'Guide'));
+  if(phone){
+    /* The phone: each channel's now and next two, one row each. */
+    chans.forEach(c => {
+      const p = nowOf(c);
+      const r = el('div', 'gphone');
+      r.style.setProperty('--h', GUIDE_HUES[c.kind] || 270);
+      r.append(el('span', 'gnum', esc(c.num || '')));
+      const body = el('div', 'gpbody');
+      body.append(el('div', 'gpname', esc(c.name)));
+      body.append(el('b', null, esc(p ? p.title : 'Nothing on')));
+      if(p && !c.live){
+        const bar = el('div', 'gbar'); const fill = el('i');
+        fill.style.width = Math.max(0, Math.min(100, 100 * (data.now - p.t0) / (p.t1 - p.t0))) + '%';
+        bar.append(fill); body.append(bar);
+      }
+      const later = (c.progs || []).filter(x => x.t0 > data.now).slice(0, 2);
+      if(later.length){
+        const l = el('div', 'gplater');
+        later.forEach(x => l.append(el('span', null, '<em>' + hhmm(x.t0) + '</em>' + esc(x.title))));
+        body.append(l);
+      }
+      r.append(body);
+      if(fromPc){
+        const choice = el('div', 'playchoice small');
+        if(p && p.ident){
+          const here = el('button', 'iconbtn', '\u25B6 HERE');
+          here.onclick = async (e) => { e.stopPropagation();
+            const at = (p.offset || 0) + Math.round(Date.now() / 1000 - data.now);
+            const res = await post('/api/play', {stream: p.ident, start: at, channel: c.id});
+            here.textContent = res && res.error ? 'FAILED' : '\u25B6 HERE'; };
+          choice.append(here);
+        }
+        const pcb = el('button', 'iconbtn onpc', '\u25B6 ON PC');
+        pcb.onclick = async (e) => { e.stopPropagation(); const res = await remoteSend('channel', {channel: c.id}); if(res && !res.error) switchTo('remote'); };
+        choice.append(pcb);
+        r.append(choice);
+      } else {
+        if(p && (p.still || p.art)){ const th = el('div', 'gpthumb'); th.style.backgroundImage = 'url("' + (p.art || p.still) + '")'; r.append(th); }
+        r.onclick = () => guideTune(c, null);
+      }
+      out.append(r);
+    });
+    return;
+  }
+  /* The PC: the grid. */
+  const span = data.end - data.start;
+  const grid = el('div', 'guidegrid');
+  const ruler = el('div', 'grow gruler');
+  ruler.append(el('div', 'gname', 'CHANNEL'));
+  const ticks = el('div', 'glane');
+  for(let t = data.start; t < data.end; t += 1800){
+    const tk = el('div', 'gtick', hhmm(t));
+    tk.style.left = (100 * (t - data.start) / span) + '%';
+    ticks.append(tk);
+  }
+  ruler.append(ticks);
+  grid.append(ruler);
+  chans.forEach(c => {
+    const r = el('div', 'grow');
+    r.style.setProperty('--h', GUIDE_HUES[c.kind] || 270);
+    const name = el('div', 'gname');
+    name.append(el('span', 'gnum', esc(c.num || '')));
+    name.append(el('b', null, esc(c.name)));
+    r.append(name);
+    const lane = el('div', 'glane');
+    (c.progs || []).forEach(p => {
+      const a = Math.max(p.t0, data.start), b = Math.min(p.t1, data.end);
+      if(b <= a) return;
+      const blk = el('button', 'gprog' + (p.now ? ' now' : ''));
+      blk.type = 'button';
+      blk.style.left = 'calc(' + (100 * (a - data.start) / span) + '% + 2px)';
+      blk.style.width = 'calc(' + (100 * (b - a) / span) + '% - 4px)';
+      blk.append(el('b', null, esc(p.title)));
+      blk.append(el('small', null, esc(hhmm(p.t0) + (p.sub ? '  \u00B7  ' + p.sub : ''))));
+      guideHover(blk, p);
+      blk.onclick = () => { guidePop().classList.remove('show'); p.now ? guideTune(c, null) : guideOpen(p, fromPc); };
+      lane.append(blk);
+    });
+    r.append(lane);
+    grid.append(r);
+  });
+  const line = el('div', 'gnowline');
+  line.style.left = 'calc(176px + (100% - 176px) * ' + ((data.now - data.start) / span) + ')';
+  grid.append(line);
+  out.append(grid);
+  out.append(el('p', 'gnote', 'Listings a couple of hours out can shift when two channels would land on the same thing at once.'));
+}
+
 async function loadChannels(){
+  const fromPc = document.body.classList.contains('android') && typeof pcLinkUp !== 'undefined' && pcLinkUp;
+  let guide = await api(fromPc ? '/api/pcguide' : '/api/channels/guide');
+  const pc = fromPc && guide && !guide.error;
+  if(fromPc && !pc) guide = await api('/api/channels/guide');
+  if(guide && !guide.error){
+    drawGuide(guide, pc);
+    scheduleChannelRefresh();
+    return;
+  }
   if(document.body.classList.contains('android') && typeof pcLinkUp !== 'undefined' && pcLinkUp
      && await loadPcChannels()) return;
   const out = $('#channels-out');

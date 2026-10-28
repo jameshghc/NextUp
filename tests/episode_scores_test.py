@@ -404,6 +404,12 @@ for e in n.LIB.episodes:
 _pr = n.series_progress(_by, _sid2)
 check("up to the first: back to the start", _pr and _pr["episode"]["episodeid"] == _run[0]["episodeid"])
 check("and what was played stays played", all(e.get("playcount") for e in _by[_sid2] if e["episodeid"] == _run[1]["episodeid"]))
+k = n.db()
+_later = [r[0] for r in k.execute("SELECT last_played FROM episodes WHERE show_id=? AND COALESCE(playcount,0)=0"
+                                  " AND COALESCE(resume_pos,0)=0 AND id NOT IN (SELECT item_id FROM history WHERE item_id IS NOT NULL)", (_sid2,))]
+k.close()
+check("later episodes never played keep no 'last played' (they were stamped, 2026-10-27)",
+      all(not x for x in _later), _later[:4])
 check("the code on the show page is the button", "code.classList.add('setupto');" in n.PAGE and "'/api/show/upto'" in n.PAGE)
 
 print("\n%d/%d passed" % (sum(results), len(results)))
