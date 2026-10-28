@@ -4,9 +4,43 @@
 
 There's also an Android app that keeps films on the phone, streams from the PC over home Wi-Fi, and works as a remote for the PC.
 
-![The Now page](docs/mockups/shots/app-now-glass-v2.png)
+![The Library's Home page](docs/screenshots/home.png)
 
 Downloads are on the [Releases page](https://github.com/jameshghc/NextUp/releases). The repository is private, so you'll need to have been invited. What changed in each version is in [CHANGELOG.md](CHANGELOG.md).
+
+---
+
+## What it looks like
+
+**Now** picks one thing for tonight and says why, with everything you're part-way through along the top.
+
+![The Now page](docs/screenshots/now.png)
+
+**Channels** are TV channels made from your own collection, always on, with a guide. There are 22 of them, from Action, Comedy and Saturday Morning cartoons to Anime, World Cinema, In Black & White and your Watchlist, plus Directors Cut and Type Cast, which run one director's or actor's films back to back.
+
+![The Channels guide](docs/screenshots/channels.png)
+
+**Recommendations** finds what's missing: the rest of a series or a collection you've started, and films and shows like the ones you rate highly. **REFRESH** works out a new lot.
+
+![Recommendations](docs/screenshots/recs.png)
+
+Every film and show has its own page with the cast, what else you own of theirs, similar films you have, and season-by-season scores for a show.
+
+| A film | A show |
+|---|---|
+| ![A film's page](docs/screenshots/film.png) | ![A show's page](docs/screenshots/show.png) |
+
+**Rate** works through what you haven't scored yet. The more you rate, the better everything else gets.
+
+![The Rate page](docs/screenshots/rate.png)
+
+### On the phone
+
+The Android app has the same pages. Paired with the PC, it shows the PC's whole library: play anything **▶ HERE** (streamed over Wi-Fi) or **▶ ON PC**, and use it as the remote.
+
+| Home | Now | Channels | Remote |
+|---|---|---|---|
+| ![Home on the phone](docs/screenshots/phone-home.png) | ![Now on the phone](docs/screenshots/phone-now.png) | ![Channels on the phone](docs/screenshots/phone-channels.png) | ![The remote](docs/screenshots/phone-remote.png) |
 
 ---
 
@@ -50,7 +84,8 @@ Tidy names help it recognise things: `Heat (1995)\Heat (1995).mkv` for films, an
 - **Library** opens on **Home**: suggestions and everything you're part-way through. Then Films, TV, Favourites, History and Recommendations, with search, Sort and Show. Click a poster for its page; right-click to play, queue, favourite or add to your watchlist. A show's page has season and episode scores.
 - **Now** suggests one thing for tonight, with the reason. Narrow it with Film/TV and genres; **NEXT** for another.
 - **Rate** works through what you haven't scored. The more you rate, the better the suggestions.
-- **Channels** are TV-style channels made from your own collection, always "on". You join part-way through.
+- **Channels** are TV-style channels made from your own collection, always "on". You join part-way through. **SHUFFLE ALL** deals out a new schedule; click a channel's number to give it a different one and move it there. Shows you're watching in order only ever put on your next episode.
+- **Recommendations** (in the Library) groups what's worth getting next: the rest of what you've started, then films and shows for you. **REFRESH** looks again; the scan also runs by itself when your library changes.
 - **"Are you still watching?"** If nothing's been touched for a while, it pauses and asks; if nobody answers, it rewinds ten minutes and closes the player. Timings are in Settings › Playback.
 - **The remote** (the REMOTE button, or the phone) has play/pause, seeking, volume, subtitles (**FIND** fetches them from OpenSubtitles, with a free key in Settings › Playback), audio track, and an audio delay remembered per film.
 - **Closing the window** on Windows hides Next Up in the system tray so the phone keeps working. Right-click the tray icon to quit, or switch this off in Settings › Playback.
