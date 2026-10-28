@@ -17561,12 +17561,15 @@ body.silver .rattop{background:linear-gradient(180deg,rgba(255,255,255,.035) 0,r
 .gruler{height:34px}
 .gruler .gname{font-family:var(--mono);font-size:10.5px;color:var(--muted);letter-spacing:.08em}
 .gtick{position:absolute;top:0;bottom:0;border-left:1px solid var(--line);padding:9px 0 0 8px;font-family:var(--mono);font-size:11px;color:var(--muted)}
-/* Filled in the channel's own colour, deep enough for white text; what's
-   on now brighter, with a bright edge. */
-.gprog{position:absolute;top:5px;bottom:5px;border-radius:8px;padding:6px 10px;overflow:hidden;text-align:left;cursor:pointer;
-  background:hsl(var(--h) 38% 19%);border:1px solid hsl(var(--h) 42% 30%);color:var(--paper)}
-.gprog:hover{background:hsl(var(--h) 42% 24%);border-color:hsl(var(--h) 60% 55%)}
-.gprog.now{background:hsl(var(--h) 52% 28%);border-color:hsl(var(--h) 70% 62%)}
+/* The clean dark block, with the channel's own colour as a wash fading
+   across it and a solid stripe down the left; what's on now filled with it
+   (2026-10-28: the best of the filled and the striped versions). */
+.gprog{position:absolute;top:5px;bottom:5px;border-radius:7px;padding:6px 10px 6px 12px;overflow:hidden;text-align:left;cursor:pointer;
+  background:linear-gradient(90deg,hsl(var(--h) 45% 24% / .55),hsl(var(--h) 35% 18% / .18) 70%),rgba(255,255,255,.035);
+  border:1px solid rgba(255,255,255,.07);color:var(--paper);box-shadow:inset 3px 0 0 hsl(var(--h) 65% 58%)}
+.gprog:hover{background:linear-gradient(90deg,hsl(var(--h) 50% 28% / .7),hsl(var(--h) 40% 22% / .3) 70%),rgba(255,255,255,.06);
+  border-color:hsl(var(--h) 55% 50% / .7)}
+.gprog.now{background:hsl(var(--h) 50% 27%);border-color:hsl(var(--h) 70% 62%);box-shadow:inset 3px 0 0 hsl(var(--h) 80% 70%)}
 .gprog b{display:block;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .gprog small{display:block;font-family:var(--mono);font-size:9.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
 .gnowline{position:absolute;top:0;bottom:0;width:2px;background:#ff5b5b;z-index:2;pointer-events:none;box-shadow:0 0 10px rgba(255,91,91,.6)}
