@@ -352,5 +352,22 @@ check("a rated film counts as seen, played here or not",
 check("the phone's PC routes carry the tags", _src.count('tags=one("tags", "")') >= 2
       and 'out["tags"] = available_film_tags(chosen, tags)' in _src)
 
+# 2026-10-28: channel numbers you can change.
+_ids = [c["id"] for c in n.CHANNELS]
+n.move_channel("cult", 2)
+check("a channel moved to 2 is number 2, the rest closing up behind it",
+      [c["id"] for c in n.CHANNELS] == [_ids[0], "cult"] + [i for i in _ids[1:] if i != "cult"]
+      and n.CHANNELS[1]["number"] == 2 and n.CHANNELS[1]["name"].endswith(" #2")
+      and n.CHANNELS[2]["name"] == n.CHANNELS[2]["base_name"] + " #3")
+n.CONFIG["channel_order"] = ["news", "nonsense"]
+n.apply_channel_order()
+check("a saved order holds, and channels it doesn't mention keep their place after it",
+      [c["id"] for c in n.CHANNELS] == ["news"] + [i for i in n.CHANNEL_DEFAULT_ORDER if i != "news"])
+n.move_channel("news", 999)
+check("a number past the end puts it last", n.CHANNELS[-1]["id"] == "news" and n.CHANNELS[-1]["number"] == len(n.CHANNELS))
+n.CONFIG["channel_order"] = []
+n.apply_channel_order()
+check("and the page can change it", "function guideNumber(c)" in page and "'/api/channels/order'" in page)
+
 print("\n%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

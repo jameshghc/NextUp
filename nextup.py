@@ -12481,10 +12481,43 @@ CHANNELS = [
 # Numbered from where they sit in the list rather than written into each
 # name. The number is the position — saying so once means inserting a
 # channel renumbers the rest, instead of leaving two of them called #7.
-for _position, _channel in enumerate(CHANNELS, 1):
-    _channel["number"] = _position
-    _channel["name"] = "%s #%d" % (_channel["name"], _position)
-del _position, _channel
+#
+# Your own order, if you've set one (2026-10-28: click a number in the
+# guide and type another), is kept as a list of ids in the config. A
+# channel added since sits where the list above puts it, after the ones you
+# placed. Schedules are seeded by id, so moving a channel never changes
+# what's on it.
+CHANNEL_DEFAULT_ORDER = [c["id"] for c in CHANNELS]
+for _channel in CHANNELS:
+    _channel["base_name"] = _channel["name"]
+del _channel
+
+
+def apply_channel_order():
+    """Sort CHANNELS (in place: everything holds the one list) by the saved
+    order, then number them from where they now sit."""
+    order = [i for i in (CONFIG.get("channel_order") or []) if isinstance(i, str)]
+    rank = {cid: n for n, cid in enumerate(order)}
+    default = {cid: n for n, cid in enumerate(CHANNEL_DEFAULT_ORDER)}
+    CHANNELS.sort(key=lambda c: (rank.get(c["id"], len(order) + default.get(c["id"], 0)),))
+    for position, channel in enumerate(CHANNELS, 1):
+        channel["number"] = position
+        channel["name"] = "%s #%d" % (channel["base_name"], position)
+
+
+def move_channel(channel_id, number):
+    """Put a channel at that number, the rest closing up behind it."""
+    ids = [c["id"] for c in CHANNELS]
+    if channel_id not in ids:
+        raise AppError("No such channel.")
+    ids.remove(channel_id)
+    ids.insert(max(0, min(len(ids), int(number) - 1)), channel_id)
+    CONFIG["channel_order"] = ids
+    save_json(CONFIG_PATH, CONFIG)
+    apply_channel_order()
+
+
+apply_channel_order()
 
 # 2024-01-01 00:00:00 UTC. Arbitrary, but fixed — every channel's loop is
 # measured from here so restarting the app doesn't reshuffle what's on.
@@ -16890,6 +16923,14 @@ class Handler(BaseHTTPRequestHandler):
                 save_json(CONFIG_PATH, CONFIG)
                 return self.send_json({"ok": True})
 
+            if route == "/api/channels/order":
+                try:
+                    number = int(data.get("number"))
+                except (TypeError, ValueError):
+                    raise AppError("A channel number, please.")
+                move_channel(data.get("channel"), number)
+                return self.send_json({"ok": True})
+
             if route == "/api/channels/tune":
                 channel = next((c for c in CHANNELS if c["id"] == data.get("channel")), None)
                 if not channel:
@@ -17587,6 +17628,9 @@ body.silver .rattop{background:linear-gradient(180deg,rgba(255,255,255,.035) 0,r
 #guidepop .gpnext em{font-style:normal;font-family:var(--mono);font-size:10px;letter-spacing:.04em;color:var(--muted);margin-right:4px}
 .gphone{display:flex;gap:11px;align-items:stretch;padding:11px 0;border-bottom:1px solid var(--line);cursor:pointer}
 .gphone .gnum{width:30px;height:30px}
+.gnumedit{border:0;padding:0;cursor:pointer;font-family:var(--mono)}
+.gnumedit:hover{box-shadow:0 0 0 2px hsl(var(--h) 70% 65%)}
+.gnuminput{border:0;padding:0;text-align:center;outline:none;box-shadow:0 0 0 2px #fff;font-family:var(--mono)}
 .gpbody{flex:1;min-width:0}
 .gpname{font-family:var(--mono);font-size:10px;letter-spacing:.06em;color:var(--muted);text-transform:uppercase}
 .gpbody b{display:block;font-size:14.5px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -25860,6 +25904,38 @@ function guideHover(node, p, opts){
   node.onmouseleave = () => guidePop().classList.remove('show');
 }
 
+/* The number is yours to change: click it, type another, Enter. The channel
+   moves there and the rest close up behind it (2026-10-28). */
+function guideNumber(c){
+  const b = el('button', 'gnum gnumedit', esc(c.num));
+  b.type = 'button';
+  b.title = 'Change ' + c.name + '\u2019s number to move it up or down the guide';
+  b.onclick = ev => {
+    ev.stopPropagation();
+    const inp = el('input', 'gnum gnuminput');
+    inp.type = 'text'; inp.inputMode = 'numeric'; inp.value = c.num; inp.maxLength = 3;
+    inp.setAttribute('aria-label', 'Channel number for ' + c.name);
+    let done = false;
+    const finish = async keep => {
+      if(done) return; done = true;
+      const n = parseInt(inp.value, 10);
+      if(keep && n > 0 && String(n) !== String(c.num)){
+        const r = await post('/api/channels/order', {channel: c.id, number: n});
+        if(r && r.error) toast(r.error, true);
+        loadChannels();
+      } else inp.replaceWith(b);
+    };
+    inp.onkeydown = e => {
+      if(e.key === 'Enter'){ e.preventDefault(); finish(true); }
+      else if(e.key === 'Escape'){ e.preventDefault(); finish(false); }
+    };
+    inp.onblur = () => finish(true);
+    b.replaceWith(inp);
+    inp.focus(); inp.select();
+  };
+  return b;
+}
+
 function drawGuide(data, fromPc){
   const out = $('#channels-out');
   out.innerHTML = '';
@@ -25976,7 +26052,7 @@ function drawGuide(data, fromPc){
     const r = el('div', 'grow');
     r.style.setProperty('--h', guideHue(data, c));
     const name = el('div', 'gname');
-    name.append(el('span', 'gnum', esc(c.num || '')));
+    name.append(c.num && !fromPc ? guideNumber(c) : el('span', 'gnum', esc(c.num || '')));
     name.append(el('b', null, esc(c.name)));
     r.append(name);
     const lane = el('div', 'glane');

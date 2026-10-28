@@ -11,6 +11,7 @@ The short version, newest first. CHANGELOG.md has every detail.
 - Channels' top is all one line now: Everything, Films, TV, Shuffle and Remote on the left, the main tabs on the right.
 - Remote opens the remote and now closes it too.
 - Everything on that top line sits level now, and when something's playing there's just the one Remote button, not two.
+- Reorder your channels: click a channel's number in the guide, type a new one, hit Enter, and it moves there.
 - On the phone, Channels shows each channel's now and next two, with HERE and ON PC.
 - Shows can be put right like films: WRONG MATCH? on a show's page looks it up again and fetches its episodes fresh.
 - The year in a show's folder name now picks between shows with the same name, so One Piece is the anime, not the Netflix one.
