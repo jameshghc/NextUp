@@ -192,15 +192,23 @@ k = n.db()
 j1, j2, j3 = [r[0] for r in k.execute("SELECT id FROM movies ORDER BY id LIMIT 3 OFFSET 30")]
 k.execute("INSERT INTO history (at, kind, item_id, title, event, seconds, position, total)"
           " VALUES (?,'movie',?,'81 seconds','stopped',81,2382,8353)", (_at(900), j1))
+# The sleep timer closed this one: it says so as it does, just before the stop.
+k.execute("INSERT INTO history (at, kind, item_id, title, event) VALUES (?,'movie',?,'asleep',?)",
+          (_at(801), j2, n.SLEEP_CLOSED))
 k.execute("INSERT INTO history (at, kind, item_id, title, event, seconds, position, total)"
           " VALUES (?,'movie',?,'asleep','stopped',980,78,1273)", (_at(800), j2))
+j4 = k.execute("SELECT id FROM movies ORDER BY id LIMIT 1 OFFSET 34").fetchone()[0]
+k.execute("INSERT INTO history (at, kind, item_id, title, event, seconds, position, total)"
+          " VALUES (?,'movie',?,'40 seconds','stopped',40,3000,6000)", (_at(700), j4))
 k.execute("INSERT INTO history (at, kind, item_id, title, event) VALUES (?,'movie',?,'closed fast','played')", (_at(60), j3))
 k.execute("UPDATE movies SET last_played='2026-09-18 03:24:36' WHERE id=?", (j3,))      # put back, as unstamp does
 k.commit(); k.close()
 n.LIB.loaded_at = 0
 _hist = n.build_history(days=2)
 _ids = {(i.get("kind"), i.get("id")) for i in _hist["items"]}
-check("History: 81 seconds isn't shown (under two minutes)", ("movie", j1) not in _ids)
+# 2026-10-28: a minute of play, ended by you, counts; the sleep timer's don't.
+check("History: 81 seconds, stopped by you, is a watch", ("movie", j1) in _ids)
+check("40 seconds isn't", ("movie", j4) not in _ids)
 
 # Continue: an episode stopped under five minutes in is still where you are —
 # offered from the start, not dropped (Always Sunny S05E02 at 78 seconds).
@@ -216,7 +224,9 @@ n.LIB.loaded_at = 0
 _cont = [c for c in n.build_resume_row(limit=0) if c["type"] == "episode" and c["id"] == _e[0]]
 check("Continue: 78 seconds into an episode offers it up next, not nothing",
       len(_cont) == 1 and _cont[0]["note"] == "up next", (_e, [(c["title"], c["sub"], c["id"]) for c in n.build_resume_row(limit=0) if c["type"] == "episode"][:4]))
-check("nor sixteen minutes open but only 78 seconds into it", ("movie", j2) not in _ids)
+check("one the sleep timer closed isn't, however long it ran", ("movie", j2) not in _ids)
+_src = open(n.__file__, encoding="utf-8").read()
+check("the sleep timer writes down that it closed it", "log_event(cur[\"type\"], cur[\"id\"], cur.get(\"title\") or \"\", SLEEP_CLOSED)" in _src)
 check("nor a start whose 'last played' was put back (closed within moments)", ("movie", j3) not in _ids)
 
 print("\n%d/%d passed" % (sum(results), len(results)))

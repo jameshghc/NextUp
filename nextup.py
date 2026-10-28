@@ -2688,10 +2688,12 @@ def refresh_watch_scores():
 SESSION_EVENTS = ("played",) + WATCH_EVENTS
 
 
-# History's bar for a sitting: under two minutes isn't one (asked for,
-# 2026-10-27 — "1m" entries were still showing). Higher than
-# MIN_WATCH_SECONDS, which decides what's kept at all.
-HISTORY_MIN_SECONDS = 120
+# History's bar for a sitting: a minute of play, ended by you — stopping,
+# switching to something else, or reaching the end. One the sleep timer
+# closed isn't a watch, whatever its length (asked for, 2026-10-28; it was
+# two minutes and "how far into the programme" for a day before that).
+HISTORY_MIN_SECONDS = 60            # the same as MIN_WATCH_SECONDS (defined further down)
+SLEEP_CLOSED = "closed by the sleep timer"
 
 
 def build_history(days=90, limit=400):
@@ -2741,6 +2743,14 @@ def build_history(days=90, limit=400):
         # When anything at all started, on each device — a channel tuned,
         # the next episode — so an unclosed start can be told from a flick
         # by how soon the next thing came (see below).
+        # When the sleep timer closed something: (kind, id) and the minute,
+        # and the minute after, to meet the "stopped" written as it went.
+        asleep = set()
+        for r in conn.execute("SELECT at, kind, item_id FROM history WHERE event=? AND at >= ?",
+                              (SLEEP_CLOSED, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(since - 86400)))):
+            t = stamp_seconds(r["at"]) or 0
+            for d in (0, 60):
+                asleep.add(((r["kind"], r["item_id"]), time.strftime("%Y-%m-%d %H:%M", time.localtime(t + d))))
         starts = defaultdict(list)
         for r in conn.execute(
                 "SELECT at, origin FROM history WHERE at >= ? AND (event IN"
@@ -2874,11 +2884,8 @@ def build_history(days=90, limit=400):
         if (not sitting["finished"] and r.get("seconds") is not None
                 and r["seconds"] < HISTORY_MIN_SECONDS):
             sitting["flick"] = True
-        # Or stopped under two minutes into the programme: the window may
-        # have been open a while (asleep, Always Sunny at 78 seconds after
-        # sixteen minutes), but that's all of it there can have been.
-        if (not sitting["finished"] and r.get("position") is not None
-                and r["position"] < HISTORY_MIN_SECONDS):
+        # Ended by the sleep timer: not a watch (it notes so just before).
+        if not sitting["finished"] and (sitting["key"], r["at"][:16]) in asleep:
             sitting["flick"] = True
         sessions.append(sitting)
     sessions.extend(open_now.values())
@@ -6081,6 +6088,12 @@ def afk_tick():
                 mpv_command("seek", str(back), "absolute")
                 with _PLAY_LOCK:
                     NOW_PLAYING["position"] = back
+            # Written down, so History can leave it out: a sitting the sleep
+            # timer ended isn't a watch (asked for, 2026-10-28).
+            with _PLAY_LOCK:
+                cur = dict(NOW_PLAYING)
+            if cur.get("type") in ("movie", "episode") and cur.get("id"):
+                log_event(cur["type"], cur["id"], cur.get("title") or "", SLEEP_CLOSED)
             mpv_command("quit")
         except Exception:
             pass
